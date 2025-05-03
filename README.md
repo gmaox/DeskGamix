@@ -1,6 +1,9 @@
 # DeskGamix
 新概念游戏前端，为非模拟器游戏/家用电脑而生，仿Switch界面
 
+https://wwse.lanzoup.com/b00uz4bjmd
+密码:85jl
+
 不一定是这个名字，也不太可能能寻得好名字
 
 DeskGamix（desk→犹如电脑桌面般轻松操作，gamix→game/mix→代表游戏领域工具/把很多东西融合在一起了（鼠标操控/冻结解冻/电源选项/音量调整/暂停-回到-结束游戏））
