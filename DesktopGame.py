@@ -1,10 +1,11 @@
+import shutil
 import sys
 import json
 import threading
 import winreg
 import pygame
-import win32gui,win32process,psutil
-from PyQt5.QtWidgets import QApplication, QSystemTrayIcon, QMenu , QVBoxLayout, QDialog, QGridLayout, QWidget, QPushButton, QLabel, QDesktopWidget, QHBoxLayout, QFileDialog, QSlider, QTextEdit, QProgressBar, QScrollArea, QFrame
+import win32gui,win32process,psutil,win32api
+from PyQt5.QtWidgets import QApplication, QMessageBox, QSystemTrayIcon, QMenu , QVBoxLayout, QDialog, QGridLayout, QWidget, QPushButton, QLabel, QDesktopWidget, QHBoxLayout, QFileDialog, QSlider, QLineEdit, QProgressBar, QScrollArea, QFrame
 from PyQt5.QtGui import QFont, QPixmap, QIcon
 from PyQt5.QtCore import QDateTime, Qt, QThread, pyqtSignal, QTimer, QPoint  
 import subprocess, time, os,win32con, ctypes, re, win32com.client, ctypes, time, pyautogui
@@ -330,13 +331,37 @@ class ConfirmDialog(QDialog):
                         width: 100%;
                     }
                 """)
+class MouseWindow(QDialog):
+    def __init__(self):
+        super().__init__()
+        self.initUI()
 
+    def initUI(self):
+        # Create a label to display the text
+        self.label = QLabel("↖(L3R3关闭鼠标映射)", self)
+        self.label.setStyleSheet("font-family: 'Microsoft YaHei'; font-size: 15px; color: white; border: 1px solid black; border-radius: 0px; background-color: rgba(0, 0, 0, 125);")
+        self.label.adjustSize()
+    
+        # Get screen geometry and set the label position
+        screen_geometry = QApplication.primaryScreen().geometry()
+        label_width = self.label.width()
+        label_height = self.label.height()
+        self.label.move(screen_geometry.width() - label_width - 30, screen_geometry.height() - label_height - 30)
+
+        # Set window properties
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.WindowTransparentForInput)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setWindowOpacity(0.7)  # 设置窗口透明度为 50%
+        self.setGeometry(screen_geometry)
+        self.show()
 class GameSelector(QWidget): 
     def __init__(self):
         global play_reload
         super().__init__()
+        self.is_mouse_simulation_running = False
         self.ignore_input_until = 0  # 初始化防抖时间戳
         self.current_section = 0  # 0=游戏选择区域，1=控制按钮区域
+
         self.setWindowIcon(QIcon('fav.ico'))
         #if STARTUP:
         #    self.setWindowOpacity(0.0)  # 设置窗口透明度为全透明
@@ -352,6 +377,8 @@ class GameSelector(QWidget):
         self.setWindowFlags(Qt.FramelessWindowHint)  # 全屏无边框
         self.setStyleSheet("background-color: #1e1e1e;")  # 设置深灰背景色
         self.killexplorer = settings.get("killexplorer", False)
+        self.freeze = settings.get("freeze", False)
+        self.freezeapp = None
         if self.killexplorer == True and STARTUP == False:
             subprocess.run(["taskkill", "/f", "/im", "explorer.exe"])
         self.showFullScreen()
@@ -713,7 +740,7 @@ class GameSelector(QWidget):
             controller_name = controller_data['controller'].get_name()
             self.update_controller_status(controller_name)
         # 右侧文字
-        right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.91")
+        right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.92")
         right_label.setStyleSheet(f"""
             QLabel {{
                 font-family: "Microsoft YaHei"; 
@@ -754,14 +781,13 @@ class GameSelector(QWidget):
         # 在 GameSelector 的 __init__ 方法中添加以下代码
         self.tray_icon = QSystemTrayIcon(self)
         self.tray_icon.setIcon(QIcon("fav.ico"))  # 设置托盘图标为 fav.ico
-        
         # 创建托盘菜单
         tray_menu = QMenu(self)
         restore_action = tray_menu.addAction("显示窗口")
         restore_action.triggered.connect(self.show_window)  # 点击显示窗口
         exit_action = tray_menu.addAction("退出")
         exit_action.triggered.connect(self.exitdef)  # 点击退出程序
-        
+        self.tray_icon.activated.connect(self.show_window) 
         self.tray_icon.setContextMenu(tray_menu)  # 设置托盘菜单
         self.tray_icon.show()  # 显示托盘图标
 
@@ -841,15 +867,30 @@ class GameSelector(QWidget):
                 continue
     def mouse_simulation(self):
         """开启鼠标映射"""
+        # 检查是否已经在运行
+        if self.is_mouse_simulation_running:
+            print("鼠标映射已在运行，忽略重复调用")
+            return
+
+        # 设置标志为 True，表示正在运行
+        self.is_mouse_simulation_running = True
+
         pygame.init()
         pygame.joystick.init()
         if pygame.joystick.get_count() == 0:
             self.show_window()
             return
+        joysticks = []
+        for i in range(pygame.joystick.get_count()):
+            joystick = pygame.joystick.Joystick(i)
+            joystick.init()
+            joysticks.append(joystick)
+    
+        if not joysticks:
+            print("未检测到手柄")
+        joystick_states = {joystick.get_instance_id(): {"scrolling_up": False, "scrolling_down": False} for joystick in joysticks}
         self.hide_window()
         print("鼠标映射")
-        joystick = pygame.joystick.Joystick(0)
-        joystick.init()
         axes = joystick.get_numaxes()
         # 一般DualShock4轴数为6，XBox为5
         if axes >= 6:
@@ -870,10 +911,12 @@ class GameSelector(QWidget):
         sensitivity1 = SENS_LOW
         DEADZONE = 0.1    # 摇杆死区阈值，防止轻微漂移
         clock = pygame.time.Clock()
-        mapping = ControllerMapping(joystick)
+        #mapping = ControllerMapping(joystick)
         # 初始化滚动状态变量
         scrolling_up = False
         scrolling_down = False
+        window = MouseWindow()
+        last_mouse_x, last_mouse_y = -1, -1  # 初始化上一次鼠标位置
 
         # 初始化鼠标按键状态变量
         left_button_down = False
@@ -887,146 +930,185 @@ class GameSelector(QWidget):
         running = True  # 添加状态标志
         try:
             while running:
+                # 动态检测新手柄加入或移除
+                for event in pygame.event.get():
+                    if event.type == pygame.JOYDEVICEADDED:
+                        joystick = pygame.joystick.Joystick(event.device_index)
+                        joystick.init()
+                        joysticks.append(joystick)
+                        joystick_states[joystick.get_instance_id()] = {"scrolling_up": False, "scrolling_down": False}
+                        print(f"手柄已连接: {joystick.get_name()}")
+    
+                    elif event.type == pygame.JOYDEVICEREMOVED:
+                        for joystick in joysticks:
+                            if joystick.get_instance_id() == event.instance_id:
+                                print(f"手柄已断开: {joystick.get_name()}")
+                                joysticks.remove(joystick)
+                                del joystick_states[event.instance_id]
+                                break
                 pygame.event.pump()
-                ctypes.windll.user32.ShowCursor(True)  # 显示鼠标光标
-                # GUIDE 按钮退出
-                if joystick.get_button(mapping.guide) or joystick.get_button(mapping.right_stick_in) or joystick.get_button(mapping.left_stick_in):
-                    running = False  # 设置状态标志为 False，退出循环
-                    # 设置右下角坐标
-                    print("退出鼠标映射")
-                    if self.is_virtual_keyboard_open():
-                        self.close_virtual_keyboard()
-                    right_bottom_x = screen_width - 1  # 最右边
-                    right_bottom_y = screen_height - 1  # 最底部
-                    # 移动鼠标到屏幕右下角
-                    pyautogui.moveTo(right_bottom_x, right_bottom_y)
-                    #time.sleep(0.5)  
-                    break
-                
-                if joystick.get_button(mapping.start):  # START键打开键盘
-                        
-                    if self.is_virtual_keyboard_open():
-                        self.close_virtual_keyboard()
+                #self.setCursor(Qt.ArrowCursor)  # 设置鼠标光标为箭头形状
+                #ctypes.windll.user32.SetSystemCursor(
+                #    ctypes.windll.user32.LoadCursorW(0, win32con.IDC_HAND),
+                #    win32con.OCR_NORMAL
+                #)
+                mouse_x, mouse_y = pyautogui.position()
+                # 仅当鼠标位置发生变化时更新窗口位置
+                if (mouse_x, mouse_y) != (last_mouse_x, last_mouse_y):
+                    # 更新窗口位置
+                    window.label.move(mouse_x, mouse_y)
+                    #window.label.setText("↖")
+                    last_mouse_x, last_mouse_y = mouse_x, mouse_y
+                # 遍历所有手柄，处理输入
+                joycount = pygame.joystick.get_count()
+                for joystick in joysticks:
+                    #pygame.mouse.set_visible(True)  # 显示鼠标光标
+                    mapping = ControllerMapping(joystick) #切换对应的手柄映射
+                    #ctypes.windll.user32.ShowCursor(True)  # 显示鼠标光标
+                    # GUIDE 按钮退出
+                    if joystick.get_button(mapping.guide) or joystick.get_button(mapping.right_stick_in) or joystick.get_button(mapping.left_stick_in):
+                        running = False  # 设置状态标志为 False，退出循环
+                        # 设置右下角坐标
+                        print("退出鼠标映射")
+                        if self.is_virtual_keyboard_open():
+                            self.close_virtual_keyboard()
+                        right_bottom_x = screen_width - 1  # 最右边
+                        right_bottom_y = screen_height - 1  # 最底部
+                        # 移动鼠标到屏幕右下角
+                        pyautogui.moveTo(right_bottom_x, right_bottom_y)
+                        #time.sleep(0.5)  
+                        break
+                    
+                    if joystick.get_button(mapping.start):  # START键打开键盘
+
+                        if self.is_virtual_keyboard_open():
+                            self.close_virtual_keyboard()
+                        else:
+                            pyautogui.moveTo(int(screen_width/2), int(screen_height/1.5))  # 移动鼠标到屏幕中心
+                            self.open_virtual_keyboard()
+                        time.sleep(0.5)  # 延迟0.2秒，避免重复触发
+                    if joystick.get_button(mapping.back):  # SELECT键模拟win+tab
+                        pyautogui.hotkey('win', 'tab')
+                        time.sleep(0.5)  # 延迟0.2秒，避免重复触发
+
+                    # 检查左键状态
+                    if joystick.get_button(mapping.button_a) or joystick.get_button(mapping.right_bumper):  # A键模拟左键按下
+                        if not left_button_down:  # 状态变化时触发
+                            pyautogui.mouseDown()
+                            left_button_down = True
                     else:
-                        pyautogui.moveTo(int(screen_width/2), int(screen_height/1.5))  # 移动鼠标到屏幕中心
-                        self.open_virtual_keyboard()
-                    time.sleep(0.5)  # 延迟0.2秒，避免重复触发
-                if joystick.get_button(mapping.back):  # SELECT键模拟win+tab
-                    pyautogui.hotkey('win', 'tab')
-                    time.sleep(0.5)  # 延迟0.2秒，避免重复触发
+                        if left_button_down:  # 状态变化时触发
+                            pyautogui.mouseUp()
+                            left_button_down = False
 
-                # 检查左键状态
-                if joystick.get_button(mapping.button_a) or joystick.get_button(mapping.right_bumper):  # A键模拟左键按下
-                    if not left_button_down:  # 状态变化时触发
-                        pyautogui.mouseDown()
-                        left_button_down = True
-                else:
-                    if left_button_down:  # 状态变化时触发
-                        pyautogui.mouseUp()
-                        left_button_down = False
-
-                # 检查右键状态
-                if joystick.get_button(mapping.button_b) or joystick.get_button(mapping.left_bumper):  # B键模拟右键按下
-                    if not right_button_down:  # 状态变化时触发
-                        pyautogui.mouseDown(button='right')
-                        right_button_down = True
-                else:
-                    if right_button_down:  # 状态变化时触发
-                        pyautogui.mouseUp(button='right')
-                        right_button_down = False
-                # 检查是否使用 hat 输入
-                if mapping.has_hat:
-                    hat_value = joystick.get_hat(0)  # 获取第一个 hat 的值
-                    if hat_value == (-1, 0):  # 左
-                        # 音量减
-                        self.decrease_volume()
-                        time.sleep(0.2)  # 延迟0.2秒，避免重复触发
-                    elif hat_value == (1, 0):  # 右
-                        # 音量加
-                        self.increase_volume()
-                        time.sleep(0.2)  # 延迟0.2秒，避免重复触发
-                    elif hat_value == (0, -1):  # 下
-                        scrolling_down = True
-                    elif hat_value == (0, 1):  # 上
-                        scrolling_up = True
+                    # 检查右键状态
+                    if joystick.get_button(mapping.button_b) or joystick.get_button(mapping.left_bumper):  # B键模拟右键按下
+                        if not right_button_down:  # 状态变化时触发
+                            pyautogui.mouseDown(button='right')
+                            right_button_down = True
                     else:
-                        scrolling_down = False
-                        scrolling_up = False
-                else:
-                    # 如果不使用 hat，则检查按钮输入
-                    if joystick.get_button(mapping.dpad_left):
-                        # 音量减
-                        self.decrease_volume()
-                        time.sleep(0.2)  # 延迟0.2秒，避免重复触发
-                    elif joystick.get_button(mapping.dpad_right):
-                        # 音量加
-                        self.increase_volume()
-                        time.sleep(0.2)  # 延迟0.2秒，避免重复触发
-                
-                    # 检查滚动状态
-                    if joystick.get_button(mapping.button_x) or joystick.get_button(mapping.dpad_down):  # X键或D-pad下
-                        scrolling_down = True
+                        if right_button_down:  # 状态变化时触发
+                            pyautogui.mouseUp(button='right')
+                            right_button_down = False
+                    # 检查是否使用 hat 输入
+                    if mapping.has_hat:
+                        hat_value = joystick.get_hat(0)  # 获取第一个 hat 的值
+                        if hat_value == (-1, 0):  # 左
+                            # 音量减
+                            self.decrease_volume()
+                            time.sleep(0.2)  # 延迟0.2秒，避免重复触发
+                        elif hat_value == (1, 0):  # 右
+                            # 音量加
+                            self.increase_volume()
+                            time.sleep(0.2)  # 延迟0.2秒，避免重复触发
+                        elif joystick.get_button(mapping.button_x) or hat_value == (0, -1):  # 下
+                            scrolling_down = True
+                        elif joystick.get_button(mapping.button_y) or hat_value == (0, 1):  # 上
+                            scrolling_up = True
+                        else:
+                            scrolling_down = False
+                            scrolling_up = False
                     else:
-                        scrolling_down = False
-                
-                    if joystick.get_button(mapping.button_y) or joystick.get_button(mapping.dpad_up):  # Y键或D-pad上
-                        scrolling_up = True
-                    else:
-                        scrolling_up = False
+                        # 如果不使用 hat，则检查按钮输入
+                        if joystick.get_button(mapping.dpad_left):
+                            # 音量减
+                            self.decrease_volume()
+                            time.sleep(0.2)  # 延迟0.2秒，避免重复触发
+                        elif joystick.get_button(mapping.dpad_right):
+                            # 音量加
+                            self.increase_volume()
+                            time.sleep(0.2)  # 延迟0.2秒，避免重复触发
 
-                # 读取左摇杆轴值（0: X 轴，1: Y 轴）
-                x_axis = joystick.get_axis(0)
-                y_axis = joystick.get_axis(1)
-                # 读取右扳机轴值，实现灵敏度切换
-                rt_val = joystick.get_axis(rt_axis)
-                # 读取左扳机轴值
-                lt_val = joystick.get_axis(lt_axis)
+                        # 检查滚动状态
+                        if joystick.get_button(mapping.button_x) or joystick.get_button(mapping.dpad_down):  # X键或D-pad下
+                            scrolling_down = True
+                        else:
+                            scrolling_down = False
 
-                # 读取右摇杆轴值（2: X 轴，3: Y 轴）
-                rx_axis = joystick.get_axis(2)  # 右摇杆 X 轴
-                ry_axis = joystick.get_axis(3)  # 右摇杆 Y 轴
+                        if joystick.get_button(mapping.button_y) or joystick.get_button(mapping.dpad_up):  # Y键或D-pad上
+                            scrolling_up = True
+                        else:
+                            scrolling_up = False
 
-                # 根据左扳机值切换灵敏度（优先级高于右扳机）
-                if lt_val > 0.8:  # 如果左扳机值大于 0.8，设置为高灵敏度
-                    sensitivity = SENS_HIGH
-                elif rt_val > 0.5:  # 如果右扳机值大于 0.5，设置为低灵敏度
-                    sensitivity = SENS_LOW
-                    sensitivity1 = SENS_HIGH
-                #elif rt_val > 0.5 and lt_val > 0.8:  # 如果两个扳机都按下(这样按有病吧？)
-                #    sensitivity = SENS_HIGH
-                #    sensitivity1 = SENS_HIGH
-                else:  # 默认设置
-                    sensitivity = SENS_MEDIUM
-                    sensitivity1 = SENS_LOW
+                    # 读取左摇杆轴值（0: X 轴，1: Y 轴）
+                    x_axis = joystick.get_axis(0)
+                    y_axis = joystick.get_axis(1)
+                    # 读取右扳机轴值，实现灵敏度切换
+                    rt_val = joystick.get_axis(rt_axis)
+                    # 读取左扳机轴值
+                    lt_val = joystick.get_axis(lt_axis)
 
-                # 使用右摇杆控制鼠标移动（低灵敏度）
-                dx = dy = 0
-                if abs(rx_axis) > DEADZONE:
-                    dx = rx_axis * sensitivity1
-                if abs(ry_axis) > DEADZONE:
-                    dy = ry_axis * sensitivity1
-                # PyAutoGUI中 y 轴正值向下移动，与摇杆上推为负值刚好对应
-                pyautogui.moveRel(dx, dy)
+                    # 读取右摇杆轴值（2: X 轴，3: Y 轴）
+                    rx_axis = joystick.get_axis(2)  # 右摇杆 X 轴
+                    ry_axis = joystick.get_axis(3)  # 右摇杆 Y 轴
 
-                # 根据摇杆值控制鼠标移动，加入死区处理
-                dx = dy = 0
-                if abs(x_axis) > DEADZONE:
-                    dx = x_axis * sensitivity
-                if abs(y_axis) > DEADZONE:
-                    dy = y_axis * sensitivity
-                # PyAutoGUI中 y 轴正值向下移动，与摇杆上推为负值刚好对应
-                pyautogui.moveRel(dx, dy)
+                    # 根据左扳机值切换灵敏度（优先级高于右扳机）
+                    if lt_val > 0.8:  # 如果左扳机值大于 0.8，设置为高灵敏度
+                        sensitivity = SENS_HIGH
+                    elif rt_val > 0.5:  # 如果右扳机值大于 0.5，设置为低灵敏度
+                        sensitivity = SENS_LOW
+                        sensitivity1 = SENS_HIGH
+                    #elif rt_val > 0.5 and lt_val > 0.8:  # 如果两个扳机都按下(这样按有病吧？)
+                    #    sensitivity = SENS_HIGH
+                    #    sensitivity1 = SENS_HIGH
+                    else:  # 默认设置
+                        sensitivity = SENS_MEDIUM
+                        sensitivity1 = SENS_LOW
 
-                # 在主循环中处理滚动
-                if scrolling_up:
-                    pyautogui.scroll(50)  # 持续向上滚动
-                if scrolling_down:
-                    pyautogui.scroll(-50)  # 持续向下滚动
-                #print(f'所有按键: {joystick.get_button(mapping.button_a)}, {joystick.get_button(mapping.button_b)}, {joystick.get_button(mapping.button_x)}, {joystick.get_button(mapping.button_y)}, {joystick.get_button(mapping.start)}, {joystick.get_button(mapping.back)}')
-                #print(f"X轴: {x_axis:.2f}, Y轴: {y_axis:.2f}, 右扳机: {rt_val:.2f}, 左扳机: {lt_val:.2f}, 滚动: {scrolling_up}, {scrolling_down}")
-                clock.tick(60)  # 稳定循环频率 (60 FPS)
+                    # 使用右摇杆控制鼠标移动（低灵敏度）
+                    dx = dy = 0
+                    if abs(rx_axis) > DEADZONE:
+                        dx = rx_axis * sensitivity1
+                    if abs(ry_axis) > DEADZONE:
+                        dy = ry_axis * sensitivity1
+                    # PyAutoGUI中 y 轴正值向下移动，与摇杆上推为负值刚好对应
+                    pyautogui.moveRel(dx, dy)
+
+                    # 根据摇杆值控制鼠标移动，加入死区处理
+                    dx = dy = 0
+                    if abs(x_axis) > DEADZONE:
+                        dx = x_axis * sensitivity
+                    if abs(y_axis) > DEADZONE:
+                        dy = y_axis * sensitivity
+                    # PyAutoGUI中 y 轴正值向下移动，与摇杆上推为负值刚好对应
+                    pyautogui.moveRel(dx, dy)
+
+                    # 在主循环中处理滚动
+                    if scrolling_up:
+                        pyautogui.scroll(50)  # 持续向上滚动
+                    if scrolling_down:
+                        pyautogui.scroll(-50)  # 持续向下滚动
+                    #print(f'所有按键: {joystick.get_button(mapping.button_a)}, {joystick.get_button(mapping.button_b)}, {joystick.get_button(mapping.button_x)}, {joystick.get_button(mapping.button_y)}, {joystick.get_button(mapping.start)}, {joystick.get_button(mapping.back)}')
+                    #print(f"X轴: {x_axis:.2f}, Y轴: {y_axis:.2f}, 右扳机: {rt_val:.2f}, 左扳机: {lt_val:.2f}, 滚动: {scrolling_up}, {scrolling_down}")
+                    clock.tick(int(60*joycount))  # 稳定循环频率 (60 FPS)
         except KeyboardInterrupt:
             print("程序已退出。")
+        finally:
+            # 退出时重置标志
+            window.close()
+            #ctypes.windll.user32.SystemParametersInfoW(0x0057, 0, None, 0)  # SPI_SETCURSORS = 0x0057 还原鼠标光标
+            self.is_mouse_simulation_running = False
+            print("鼠标已退出")
 
     def open_virtual_keyboard(self):
         """开启系统虚拟键盘"""
@@ -1538,7 +1620,10 @@ class GameSelector(QWidget):
         if self.more_section == 0 and self.current_index == self.buttonsindexset: # 如果点击的是“更多”按钮
             self.switch_to_all_software()
             return
-
+        #冻结相关
+        if self.freezeapp:
+            os.system(f'pssuspend64.exe -r {self.freezeapp}')
+            self.freezeapp = None
         if game["name"] in self.player:
             for app in valid_apps:
                 if app["name"] == game["name"]:
@@ -1595,6 +1680,60 @@ class GameSelector(QWidget):
             subprocess.Popen(game_cmd, shell=True)
             #self.showFullScreen()
             self.ignore_input_until = pygame.time.get_ticks() + 1000
+    # 判断当前窗口是否全屏(当设置中开启时)
+    def is_current_window_fullscreen(self):
+        try:
+            # 获取当前活动窗口句柄
+            hwnd = win32gui.GetForegroundWindow()
+            if not hwnd:
+                print("未找到活动窗口")
+                return False  # 未找到活动窗口
+    
+            try:
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                process = psutil.Process(pid)
+                exe_path = process.exe()
+                exe_name = os.path.basename(exe_path)
+            except e:
+                print(f"获取进程信息失败: {e}")
+            if exe_name == "explorer.exe":
+                print("当前窗口为桌面")
+                return False  # 忽略桌面
+            # 获取屏幕分辨率
+            screen_width = win32api.GetSystemMetrics(win32con.SM_CXSCREEN)
+            screen_height = win32api.GetSystemMetrics(win32con.SM_CYSCREEN)
+    
+            # 获取窗口位置和大小
+            rect = win32gui.GetWindowRect(hwnd)
+            window_width = rect[2] - rect[0]
+            window_height = rect[3] - rect[1]
+    
+            # 判断窗口是否全屏
+            if window_width == screen_width and window_height == screen_height:
+                print(f"当前窗口已全屏{exe_name}")
+                ShowWindow = ctypes.windll.user32.ShowWindow
+                SW_MINIMIZE = 6
+                # 最小化窗口
+                ShowWindow(hwnd, SW_MINIMIZE)
+                #冻结相关
+                if self.freeze and self.freezeapp == None:
+                    if os.path.exists("pssuspend64.exe"):
+                        pass_exe=['ZFGameBrowser.exe', 'amdow.exe', 'audiodg.exe', 'cmd.exe', 'cncmd.exe', 'copyq.exe', 'frpc.exe', 'gamingservicesnet.exe', 'memreduct.exe', 'mmcrashpad_handler64.exe','GameBarPresenceWriter.exe', 'HipsTray.exe', 'HsFreezer.exe', 'HsFreezerMagiaMove.exe', 'PhoneExperienceHost.exe','PixPin.exe', 'PresentMon-x64.exe','msedgewebview2.exe', 'plugin_host-3.3.exe', 'plugin_host-3.8.exe','explorer.exe','System Idle Process', 'System', 'svchost.exe', 'Registry', 'smss.exe', 'csrss.exe', 'wininit.exe', 'winlogon.exe', 'services.exe', 'lsass.exe', 'atiesrxx.exe', 'amdfendrsr.exe', 'atieclxx.exe', 'MemCompression', 'ZhuDongFangYu.exe', 'wsctrlsvc.exe', 'AggregatorHost.exe', 'wlanext.exe', 'conhost.exe', 'spoolsv.exe', 'reWASDService.exe', 'AppleMobileDeviceService.exe', 'ABService.exe', 'mDNSResponder.exe', 'Everything.exe', 'SunloginClient.exe', 'RtkAudUService64.exe', 'gamingservices.exe', 'SearchIndexer.exe', 'MoUsoCoreWorker.exe', 'SecurityHealthService.exe', 'HsFreezerEx.exe', 'GameInputSvc.exe', 'TrafficProt.exe', 'HipsDaemon.exe','python.exe', 'pythonw.exe', 'qmbrowser.exe', 'reWASDEngine.exe', 'sihost.exe', 'sublime_text.exe', 'taskhostw.exe', 'SearchProtocolHost.exe','crash_handler.exe', 'crashpad_handler.exe', 'ctfmon.exe', 'dasHost.exe', 'dllhost.exe', 'dwm.exe', 'fontdrvhost.exe','RuntimeBroker.exe','taskhostw.exe''WeChatAppEx.exe', 'WeChatOCR.exe', 'WeChatPlayer.exe', 'WeChatUtility.exe', 'WidgetService.exe', 'Widgets.exe', 'WmiPrvSE.exe', 'Xmp.exe','QQScreenshot.exe', 'RadeonSoftware.exe', 'SakuraFrpService.exe', 'SakuraLauncher.exe', 'SearchHost.exe', 'SecurityHealthSystray.exe', 'ShellExperienceHost.exe', 'StartMenuExperienceHost.exe', 'SystemSettings.exe', 'SystemSettingsBroker.exe', 'TextInputHost.exe', 'TrafficMonitor.exe', 'UserOOBEBroker.exe','WeChatAppEx.exe','360zipUpdate.exe', 'AMDRSServ.exe', 'AMDRSSrcExt.exe', 'APlayer.exe', 'ApplicationFrameHost.exe', 'CPUMetricsServer.exe', 'ChsIME.exe', 'DownloadSDKServer.exe','QMWeiyun.exe'];save_input=[]
+                        if exe_name in pass_exe:
+                            print(f"当前窗口 {exe_name} 在冻结列表中，跳过冻结")
+                            return True
+                        os.system(f'pssuspend64.exe {exe_name}')
+                        self.freezeapp = exe_name
+                    else:
+                        QMessageBox.warning(self, "提示", "未找到冻结工具，请检查路径")
+                return True
+            else:
+                print(f"当前窗口非全屏 {exe_name} 窗口大小：{window_width} x {window_height} 屏幕分辨率：{screen_width} x {screen_height}")
+                return False
+        except Exception as e:
+            # 捕获异常，返回假
+            print(f"错误: {e}")
+            return False
     def handle_gamepad_input(self, action):
         """处理手柄输入"""
         global STARTUP  # 声明 STARTUP 为全局变量
@@ -1612,6 +1751,10 @@ class GameSelector(QWidget):
                     if action == 'GUIDE':
                         if ADMIN:
                             try:
+                                # 将所有界面标记归零（没必要似乎
+                                #self.current_index = 0
+                                #self.current_section = 0
+                                #self.more_section = 0
                                 if current_time < ((self.ignore_input_until)+2000):
                                     return
                                 self.ignore_input_until = pygame.time.get_ticks() + 500 
@@ -1631,21 +1774,22 @@ class GameSelector(QWidget):
                                 #    z_order.append(hwnd)
                                 #    return True
                                 #win32gui.EnumWindows(enum_windows_callback, None)
-                                
+                                self.is_current_window_fullscreen()
                                 hwnd = int(self.winId())
                                 ctypes.windll.user32.ShowWindow(hwnd, 9) # 9=SW_RESTORE            
                                 result = ctypes.windll.user32.SetForegroundWindow(hwnd)
+                                screen_width, screen_height = pyautogui.size()
+                                # 设置右下角坐标
+                                right_bottom_x = screen_width - 1  # 最右边
+                                right_bottom_y = screen_height - 1  # 最底部
+                                pyautogui.moveTo(right_bottom_x, right_bottom_y)
                                 if result:
                                     print("窗口已成功带到前台")
                                 else:
                                     print("未能将窗口带到前台，正在尝试设置为最上层")
                                     SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
                                     time.sleep(0.2)
-                                    screen_width, screen_height = pyautogui.size()
-                                    # 设置右下角坐标
-                                    right_bottom_x = screen_width - 1  # 最右边
-                                    right_bottom_y = screen_height - 1  # 最底部
-                                    # 移动鼠标到屏幕右下角并进行右键点击
+                                # 移动鼠标到屏幕右下角并进行右键点击
                                     pyautogui.rightClick(right_bottom_x, right_bottom_y)
                                     # 恢复原来的 Z 顺序
                                     #for hwnd in reversed(z_order):
@@ -1656,7 +1800,8 @@ class GameSelector(QWidget):
                             self.showFullScreen()
                             self.last_input_time = current_time
                     return
-        
+        if self.is_mouse_simulation_running == True:
+            return
         if self.in_floating_window and self.floating_window:
             # 添加防抖检查
             if not self.floating_window.can_process_input():
@@ -1679,6 +1824,7 @@ class GameSelector(QWidget):
                     self.in_floating_window = False
             elif action == 'Y':
                 self.floating_window.toggle_favorite()
+            self.last_input_time = current_time
             return
         
         if hasattr(self, 'confirm_dialog') and self.confirm_dialog.isVisible():  # 如果确认弹窗显示中
@@ -1892,33 +2038,37 @@ class GameSelector(QWidget):
         self.floating_window.show()
         self.in_floating_window = True
         self.floating_window.update_highlight()
-        
+
     def execute_more_item(self, file=None):
         """执行更多选项中的项目"""
+        if not self.floating_window:
+            return
+    
+        sorted_files = self.floating_window.sort_files()  # 提前定义 sorted_files
+    
         if file:
             current_file = file
         else:
             current_file = sorted_files[self.floating_window.current_index]
-        current_file["path"] = os.path.abspath(os.path.join("./bat/", current_file["path"]))
-        if not self.floating_window:
-            return
-
-        sorted_files = self.floating_window.sort_files()
-
+    
+        current_file["path"] = os.path.abspath(os.path.join("./morefloder/", current_file["path"]))
+    
         # 更新最近使用列表
         if "more_last_used" not in settings:
             settings["more_last_used"] = []
-
+    
         if current_file["name"] in settings["more_last_used"]:
             settings["more_last_used"].remove(current_file["name"])
         settings["more_last_used"].insert(0, current_file["name"])
-
+    
         # 保存设置
         with open(settings_path, "w", encoding="utf-8") as f:
             json.dump(settings, f, indent=4)
-
+    
         # 执行文件
-        subprocess.Popen(current_file["path"])
+        print(f"执行文件: {current_file['path']}")
+        subprocess.Popen(current_file["path"], shell=True)
+        self.floating_window.update_highlight()
         self.floating_window.hide()
         self.in_floating_window = False
 
@@ -2300,7 +2450,7 @@ class GameControllerThread(QThread):
 class FloatingWindow(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        bat_dir = './bat'
+        bat_dir = './morefloder'
         if not os.path.exists(bat_dir):
             os.makedirs(bat_dir)  # 创建目录
         self.select_add_btn = None  # 在初始化方法中定义
@@ -2340,10 +2490,10 @@ class FloatingWindow(QWidget):
         files = []
         # 获取当前目录的文件
             # 获取目录中的所有文件和文件夹
-        all_files = os.listdir('./bat/')
+        all_files = os.listdir('./morefloder/')
 
         # 过滤掉文件夹，保留文件
-        filess = [f for f in all_files if os.path.isfile(os.path.join('./bat/', f))]
+        filess = [f for f in all_files if os.path.isfile(os.path.join('./morefloder/', f))]
         for file in filess:
             #if file.endswith(('.bat', '.url')) and not file.endswith('.lnk'):
             files.append({
@@ -2454,11 +2604,11 @@ class FloatingWindow(QWidget):
         layout.setContentsMargins(int(20 * self.parent().scale_factor), int(20 * self.parent().scale_factor), int(20 * self.parent().scale_factor), int(20 * self.parent().scale_factor))
 
         # 第一行：编辑名称
-        self.name_edit = QTextEdit()
+        self.name_edit = QLineEdit()
         self.name_edit.setPlaceholderText("输入名称")
         self.name_edit.setFixedHeight(int(50 * self.parent().scale_factor))  # 设置固定高度为 30 像素
         self.name_edit.setStyleSheet(f"""
-            QTextEdit {{
+            QLineEdit {{
                 background-color: rgba(255, 255, 255, 0.1);
                 color: white;
                 border: {int(1 * self.parent().scale_factor)}px solid #444444;
@@ -2503,25 +2653,25 @@ class FloatingWindow(QWidget):
         self.select_bat_button.clicked.connect(self.select_bat_file)
         button_layout.addWidget(self.select_bat_button)
 
-        self.create_custom_bat_button = QPushButton("创建自定义bat")
-        self.create_custom_bat_button.setStyleSheet(f"""
-            QPushButton {{
-                background-color: #404040;
-                color: #999999;
-                border: none;
-                border-radius: {int(8 * self.parent().scale_factor)}px;
-                padding: {int(8 * self.parent().scale_factor)}px {int(16 * self.parent().scale_factor)}px;
-                font-size: {int(14 * self.parent().scale_factor)}px;
-            }}
-            QPushButton:hover {{
-                background-color: #606060;
-            }}
-            QPushButton:pressed {{
-                background-color: #505050;
-            }}
-        """)
-        self.create_custom_bat_button.clicked.connect(self.show_custom_bat_editor)
-        button_layout.addWidget(self.create_custom_bat_button)
+        #self.create_custom_bat_button = QPushButton("创建自定义bat")
+        #self.create_custom_bat_button.setStyleSheet(f"""
+        #    QPushButton {{
+        #        background-color: #404040;
+        #        color: #999999;
+        #        border: none;
+        #        border-radius: {int(8 * self.parent().scale_factor)}px;
+        #        padding: {int(8 * self.parent().scale_factor)}px {int(16 * self.parent().scale_factor)}px;
+        #        font-size: {int(14 * self.parent().scale_factor)}px;
+        #    }}
+        #    QPushButton:hover {{
+        #        background-color: #606060;
+        #    }}
+        #    QPushButton:pressed {{
+        #        background-color: #505050;
+        #    }}
+        #""")
+        #self.create_custom_bat_button.clicked.connect(self.show_custom_bat_editor)
+        #button_layout.addWidget(self.create_custom_bat_button)
 
         layout.addLayout(button_layout)
 
@@ -2622,7 +2772,7 @@ class FloatingWindow(QWidget):
 
     def remove_file(self, file):
         """删除文件并更新设置"""
-        file_path = os.path.join('./bat/', file["path"])  # 获取文件的完整路径
+        file_path = os.path.join('./morefloder/', file["path"])  # 获取文件的完整路径
         if os.path.exists(file_path):
             os.remove(file_path)  # 删除文件
 
@@ -2633,7 +2783,7 @@ class FloatingWindow(QWidget):
             print(f"文件 {file['name']} 不存在！")
     def select_bat_file(self):
         """选择bat文件"""
-        file_dialog = QFileDialog(self, "选择要启动的文件", "", "All Files (*.*)")
+        file_dialog = QFileDialog(self, "选择要启动的文件", "", "Executable and Shortcut Files (*.exe *.lnk)")
         file_dialog.setFileMode(QFileDialog.ExistingFile)
         if file_dialog.exec_():
             selected_file = file_dialog.selectedFiles()[0]
@@ -2642,129 +2792,135 @@ class FloatingWindow(QWidget):
             # 保持悬浮窗可见
             self.add_item_window.show()
 
-    def show_custom_bat_editor(self):
-        """显示自定义bat编辑器"""
-        # 创建自定义 BAT 编辑器窗口
-        self.custom_bat_editor = QWidget(self, Qt.Popup)
-        self.custom_bat_editor.setWindowFlags(Qt.FramelessWindowHint | Qt.Popup)
-        self.custom_bat_editor.setStyleSheet(f"""
-            QWidget {{
-                background-color: rgba(46, 46, 46, 0.95);
-                border-radius: {int(15 * self.parent().scale_factor)}px;
-                border: {int(2 * self.parent().scale_factor)}px solid #444444;
-            }}
-        """)
+    #def show_custom_bat_editor(self):
+    #    """显示自定义bat编辑器"""
+    #    # 创建自定义 BAT 编辑器窗口
+    #    self.custom_bat_editor = QWidget(self, Qt.Popup)
+    #    self.custom_bat_editor.setWindowFlags(Qt.FramelessWindowHint | Qt.Popup)
+    #    self.custom_bat_editor.setStyleSheet(f"""
+    #        QWidget {{
+    #            background-color: rgba(46, 46, 46, 0.95);
+    #            border-radius: {int(15 * self.parent().scale_factor)}px;
+    #            border: {int(2 * self.parent().scale_factor)}px solid #444444;
+    #        }}
+    #    """)
+#
+    #    layout = QVBoxLayout(self.custom_bat_editor)
+    #    layout.setSpacing(int(15 * self.parent().scale_factor))
+    #    layout.setContentsMargins(int(20 * self.parent().scale_factor), int(20 * self.parent().scale_factor), int(20 * self.parent().scale_factor), int(20 * self.parent().scale_factor))
+#
+    #    # 文本框：显示和编辑 bat 脚本
+    #    self.bat_text_edit = QTextEdit()
+    #    self.bat_text_edit.setPlaceholderText("请输入脚本内容...")
+    #    self.bat_text_edit.setStyleSheet(f"""
+    #        QTextEdit {{
+    #            background-color: rgba(255, 255, 255, 0.1);
+    #            color: white;
+    #            border: {int(1 * self.parent().scale_factor)}px solid #444444;
+    #            border-radius: {int(10 * self.parent().scale_factor)}px;
+    #            padding: {int(12 * self.parent().scale_factor)}px;
+    #            font-size: {int(14 * self.parent().scale_factor)}px;           
+    #        }}
+    #    """)
+    #    layout.addWidget(self.bat_text_edit)
+#
+    #    # 添加程序按钮
+    #    self.add_program_button = QPushButton("添加程序")
+    #    self.add_program_button.setStyleSheet(f"""
+    #        QPushButton {{
+    #            background-color: #5f5f5f;
+    #            color: white;
+    #            border: none;
+    #            border-radius: {int(8 * self.parent().scale_factor)}px;
+    #            padding: {int(10 * self.parent().scale_factor)}px {int(20 * self.parent().scale_factor)}px;
+    #            font-size: {int(14 * self.parent().scale_factor)}px;
+    #        }}
+    #        QPushButton:hover {{
+    #            background-color: #808080;
+    #        }}
+    #        QPushButton:pressed {{
+    #            background-color: #333333;
+    #        }}
+    #    """)
+    #    self.add_program_button.clicked.connect(self.add_program_to_bat)
+    #    layout.addWidget(self.add_program_button)
+#
+    #    # 保存bat按钮
+    #    self.save_bat_button = QPushButton("保存bat")
+    #    self.save_bat_button.setStyleSheet(f"""
+    #        QPushButton {{
+    #            background-color: #4CAF50;
+    #            color: white;
+    #            border: none;
+    #            border-radius: {int(8 * self.parent().scale_factor)}px;
+    #            padding: {int(10 * self.parent().scale_factor)}px {int(20 * self.parent().scale_factor)}px;
+    #            font-size: {int(16 * self.parent().scale_factor)}px;
+    #        }}
+    #        QPushButton:hover {{
+    #            background-color: #45a049;
+    #        }}
+    #        QPushButton:pressed {{
+    #            background-color: #388e3c;
+    #        }}
+    #    """)
+    #    self.save_bat_button.clicked.connect(self.save_custom_bat)
+    #    layout.addWidget(self.save_bat_button)
+    #    self.custom_bat_editor.move(0, 100)
+    #    self.custom_bat_editor.setLayout(layout)
+    #    self.custom_bat_editor.show()
 
-        layout = QVBoxLayout(self.custom_bat_editor)
-        layout.setSpacing(int(15 * self.parent().scale_factor))
-        layout.setContentsMargins(int(20 * self.parent().scale_factor), int(20 * self.parent().scale_factor), int(20 * self.parent().scale_factor), int(20 * self.parent().scale_factor))
 
-        # 文本框：显示和编辑 bat 脚本
-        self.bat_text_edit = QTextEdit()
-        self.bat_text_edit.setPlaceholderText("请输入脚本内容...")
-        self.bat_text_edit.setStyleSheet(f"""
-            QTextEdit {{
-                background-color: rgba(255, 255, 255, 0.1);
-                color: white;
-                border: {int(1 * self.parent().scale_factor)}px solid #444444;
-                border-radius: {int(10 * self.parent().scale_factor)}px;
-                padding: {int(12 * self.parent().scale_factor)}px;
-                font-size: {int(14 * self.parent().scale_factor)}px;           
-            }}
-        """)
-        layout.addWidget(self.bat_text_edit)
-
-        # 添加程序按钮
-        self.add_program_button = QPushButton("添加程序")
-        self.add_program_button.setStyleSheet(f"""
-            QPushButton {{
-                background-color: #5f5f5f;
-                color: white;
-                border: none;
-                border-radius: {int(8 * self.parent().scale_factor)}px;
-                padding: {int(10 * self.parent().scale_factor)}px {int(20 * self.parent().scale_factor)}px;
-                font-size: {int(14 * self.parent().scale_factor)}px;
-            }}
-            QPushButton:hover {{
-                background-color: #808080;
-            }}
-            QPushButton:pressed {{
-                background-color: #333333;
-            }}
-        """)
-        self.add_program_button.clicked.connect(self.add_program_to_bat)
-        layout.addWidget(self.add_program_button)
-
-        # 保存bat按钮
-        self.save_bat_button = QPushButton("保存bat")
-        self.save_bat_button.setStyleSheet(f"""
-            QPushButton {{
-                background-color: #4CAF50;
-                color: white;
-                border: none;
-                border-radius: {int(8 * self.parent().scale_factor)}px;
-                padding: {int(10 * self.parent().scale_factor)}px {int(20 * self.parent().scale_factor)}px;
-                font-size: {int(16 * self.parent().scale_factor)}px;
-            }}
-            QPushButton:hover {{
-                background-color: #45a049;
-            }}
-            QPushButton:pressed {{
-                background-color: #388e3c;
-            }}
-        """)
-        self.save_bat_button.clicked.connect(self.save_custom_bat)
-        layout.addWidget(self.save_bat_button)
-        self.custom_bat_editor.move(0, 100)
-        self.custom_bat_editor.setLayout(layout)
-        self.custom_bat_editor.show()
-
-
-    def add_program_to_bat(self):
-        """添加程序到bat"""
-        file_dialog = QFileDialog(self, "选择一个可执行文件", "", "Executable Files (*.exe)")
-        file_dialog.setFileMode(QFileDialog.ExistingFile)
-        if file_dialog.exec_():
-            selected_file = file_dialog.selectedFiles()[0]
-            program_dir = os.path.dirname(selected_file)
-            self.bat_text_edit.append(f'cd /d "{program_dir}"\nstart "" "{selected_file}"\n')
-            self.add_item_window.show()
-            self.custom_bat_editor.show()
-
-    def save_custom_bat(self):
-        """保存自定义bat"""
-        bat_dir = './bat/Customize'
-        if not os.path.exists(bat_dir):
-            os.makedirs(bat_dir)  # 创建目录
-        bat_content = self.bat_text_edit.toPlainText()
-        bat_path = os.path.join(program_directory, "./bat/Customize/Customize.bat")
-        counter = 1
-        while os.path.exists(bat_path):
-            bat_path = os.path.join(program_directory, f"./bat/Customize/Customize_{counter}.bat")
-            counter += 1
-        bat_path = os.path.abspath(bat_path)
-        with open(bat_path, "w", encoding="utf-8") as f:
-            f.write(bat_content)
-        self.selected_item_label.setText(bat_path)
-        self.custom_bat_editor.hide()
-        self.add_item_window.show()
+    #def add_program_to_bat(self):
+    #    """添加程序到bat"""
+    #    file_dialog = QFileDialog(self, "选择一个可执行文件", "", "Executable Files (*.exe)")
+    #    file_dialog.setFileMode(QFileDialog.ExistingFile)
+    #    if file_dialog.exec_():
+    #        selected_file = file_dialog.selectedFiles()[0]
+    #        program_dir = os.path.dirname(selected_file)
+    #        self.bat_text_edit.append(f'cd /d "{program_dir}"\nstart "" "{selected_file}"\n')
+    #        self.add_item_window.show()
+    #        self.custom_bat_editor.show()
+#
+    #def save_custom_bat(self):
+    #    """保存自定义bat"""
+    #    bat_dir = './bat/Customize'
+    #    if not os.path.exists(bat_dir):
+    #        os.makedirs(bat_dir)  # 创建目录
+    #    bat_content = self.bat_text_edit.toPlainText()
+    #    bat_path = os.path.join(program_directory, "./bat/Customize/Customize.bat")
+    #    counter = 1
+    #    while os.path.exists(bat_path):
+    #        bat_path = os.path.join(program_directory, f"./bat/Customize/Customize_{counter}.bat")
+    #        counter += 1
+    #    bat_path = os.path.abspath(bat_path)
+    #    with open(bat_path, "w", encoding="utf-8") as f:
+    #        f.write(bat_content)
+    #    self.selected_item_label.setText(bat_path)
+    #    self.custom_bat_editor.hide()
+    #    self.add_item_window.show()
 
     def save_item(self):
         """保存项目"""
-        name = self.name_edit.toPlainText()
+        name = self.name_edit.text()
         path = self.selected_item_label.text()  
-        bat_dir = './bat'
+        bat_dir = './morefloder'
         if not os.path.exists(bat_dir):
             os.makedirs(bat_dir)
 
-        # 创建 bat 文件的路径
-        bat_file_path = os.path.join(bat_dir, f"{name}.bat")
-
-        # 写入内容到 bat 文件
-        with open(bat_file_path, 'w') as bat_file:
-            bat_file.write(f'start "" "{path}"\n')
-
-        print(f"成功创建 bat 文件: {bat_file_path}")  
+        shortcut_name = name + ".lnk"
+        shortcut_path = os.path.join(bat_dir, shortcut_name)
+        # 如果是lnk文件，直接复制
+        if path.endswith('.lnk'):
+            shutil.copy(path, shortcut_path)
+        else:
+            # 创建新的快捷方式
+            shell = win32com.client.Dispatch("WScript.Shell")
+            shortcut = shell.CreateShortCut(shortcut_path)
+            shortcut.TargetPath = path
+            shortcut.WorkingDirectory = os.path.dirname(path)
+            shortcut.save()
+        
+        print(f"快捷方式已创建: {shortcut_path}")
         self.add_item_window.hide()
 
         # 重新加载按钮
@@ -3071,8 +3227,26 @@ class SettingsWindow(QWidget):
         self.layout.addWidget(self.refresh_button)
 
         # 添加切换 killexplorer 状态的按钮
-        self.killexplorer_button = QPushButton(f"沉浸模式 {'√' if settings.get('killexplorer', False) else '×'}")
-        self.killexplorer_button.setStyleSheet(f"""
+        #self.killexplorer_button = QPushButton(f"沉浸模式 {'√' if settings.get('killexplorer', False) else '×'}")
+        #self.killexplorer_button.setStyleSheet(f"""
+        #    QPushButton {{
+        #        background-color: #444444;
+        #        color: white;
+        #        text-align: center;
+        #        padding: {int(10 * parent.scale_factor)}px;
+        #        border: none;
+        #        font-size: {int(16 * parent.scale_factor)}px;
+        #    }}
+        #    QPushButton:hover {{
+        #        background-color: #555555;
+        #    }}
+        #""")
+        #self.killexplorer_button.clicked.connect(self.toggle_killexplorer)
+        #self.layout.addWidget(self.killexplorer_button)
+
+        # 添加回到主页时尝试冻结运行中的游戏按钮
+        self.freeze_button = QPushButton(f"回主页时尝试冻结游戏 {'√' if settings.get('freeze', False) else '×'}")
+        self.freeze_button.setStyleSheet(f"""
             QPushButton {{
                 background-color: #444444;
                 color: white;
@@ -3085,8 +3259,8 @@ class SettingsWindow(QWidget):
                 background-color: #555555;
             }}
         """)
-        self.killexplorer_button.clicked.connect(self.toggle_killexplorer)
-        self.layout.addWidget(self.killexplorer_button)
+        self.freeze_button.clicked.connect(self.toggle_freeze)
+        self.layout.addWidget(self.freeze_button)
 
         self.open_folder_button = QPushButton("开启/关闭-开机自启")
         self.open_folder_button.setStyleSheet(f"""
@@ -3122,7 +3296,12 @@ class SettingsWindow(QWidget):
         """)
         self.close_program_button.clicked.connect(self.close_program)
         self.layout.addWidget(self.close_program_button)
-
+        
+        self.asdasgg_label = QLabel("提示：在手柄映射时通过系统\n托盘图标可打开主页面进行设置")
+        self.asdasgg_label.setStyleSheet(f"color: white; font-size: {int(14 * parent.scale_factor)}px;")
+        self.asdasgg_label.setFixedHeight(int(50 * parent.scale_factor))  # 固定高度为30像素
+        self.layout.addWidget(self.asdasgg_label)
+        
     # 检查程序是否设置为开机自启
     def is_startup_enabled(self):
         command = ['schtasks', '/query', '/tn', "DesktopGameStartup"]
@@ -3153,6 +3332,15 @@ class SettingsWindow(QWidget):
         """切换 killexplorer 状态并保存设置"""
         settings["killexplorer"] = not settings.get("killexplorer", False)
         self.killexplorer_button.setText(f"沉浸模式: {'√' if settings['killexplorer'] else '×'}")
+        
+        # 保存设置
+        with open(settings_path, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=4)
+
+    def toggle_freeze(self):
+        """切换 freeze 状态并保存设置"""
+        settings["freeze"] = not settings.get("freeze", False)
+        self.freeze_button.setText(f"回主页时尝试冻结游戏 {'√' if settings['freeze'] else '×'}")
         
         # 保存设置
         with open(settings_path, "w", encoding="utf-8") as f:
