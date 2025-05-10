@@ -106,6 +106,8 @@ def get_target_path(lnk_file):
     return shortcut.TargetPath
 for app in data.get("apps", []):
     cmda = app.get("cmd")
+    if cmda is None:
+        continue  # 跳过无 cmd 的条目
     cmd = cmda.strip('"')
     if cmd:
         # 如果cmd是快捷方式路径（.lnk）
