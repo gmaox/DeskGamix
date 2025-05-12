@@ -742,7 +742,7 @@ class GameSelector(QWidget):
             controller_name = controller_data['controller'].get_name()
             self.update_controller_status(controller_name)
         # 右侧文字
-        right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.92")
+        right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.93")
         right_label.setStyleSheet(f"""
             QLabel {{
                 font-family: "Microsoft YaHei"; 
@@ -867,6 +867,32 @@ class GameSelector(QWidget):
                     return
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
+    def move_mouse_once(self):
+        """模拟鼠标移动，避免光标不显示"""
+        class MOUSEINPUT(ctypes.Structure):
+            _fields_ = [("dx", ctypes.c_long),
+                        ("dy", ctypes.c_long),
+                        ("mouseData", ctypes.c_ulong),
+                        ("dwFlags", ctypes.c_ulong),
+                        ("time", ctypes.c_ulong),
+                        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+
+        class INPUT_UNION(ctypes.Union):
+            _fields_ = [("mi", MOUSEINPUT)]
+
+        class INPUT(ctypes.Structure):
+            _fields_ = [("type", ctypes.c_ulong),
+                        ("u", INPUT_UNION)]
+
+        def send(dx, dy):
+            extra = ctypes.c_ulong(0)
+            mi = MOUSEINPUT(dx, dy, 0, 0x0001, 0, ctypes.pointer(extra))  # 0x0001 = MOUSEEVENTF_MOVE
+            inp = INPUT(0, INPUT_UNION(mi))  # 0 = INPUT_MOUSE
+            ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+
+        send(1, 0)   # 向右移动1像素
+        send(-1, 0)  # 向左移动1像素
+
     def mouse_simulation(self):
         """开启鼠标映射"""
         # 检查是否已经在运行
@@ -949,24 +975,16 @@ class GameSelector(QWidget):
                                 del joystick_states[event.instance_id]
                                 break
                 pygame.event.pump()
-                #self.setCursor(Qt.ArrowCursor)  # 设置鼠标光标为箭头形状
-                #ctypes.windll.user32.SetSystemCursor(
-                #    ctypes.windll.user32.LoadCursorW(0, win32con.IDC_HAND),
-                #    win32con.OCR_NORMAL
-                #)
                 mouse_x, mouse_y = pyautogui.position()
                 # 仅当鼠标位置发生变化时更新窗口位置
                 if (mouse_x, mouse_y) != (last_mouse_x, last_mouse_y):
                     # 更新窗口位置
                     window.label.move(mouse_x, mouse_y)
-                    #window.label.setText("↖")
                     last_mouse_x, last_mouse_y = mouse_x, mouse_y
                 # 遍历所有手柄，处理输入
                 joycount = pygame.joystick.get_count()
                 for joystick in joysticks:
-                    #pygame.mouse.set_visible(True)  # 显示鼠标光标
                     mapping = ControllerMapping(joystick) #切换对应的手柄映射
-                    #ctypes.windll.user32.ShowCursor(True)  # 显示鼠标光标
                     # GUIDE 按钮退出
                     if joystick.get_button(mapping.guide) or joystick.get_button(mapping.right_stick_in) or joystick.get_button(mapping.left_stick_in):
                         running = False  # 设置状态标志为 False，退出循环
@@ -1080,8 +1098,10 @@ class GameSelector(QWidget):
                     # 使用右摇杆控制鼠标移动（低灵敏度）
                     dx = dy = 0
                     if abs(rx_axis) > DEADZONE:
+                        self.move_mouse_once()
                         dx = rx_axis * sensitivity1
                     if abs(ry_axis) > DEADZONE:
+                        self.move_mouse_once()
                         dy = ry_axis * sensitivity1
                     # PyAutoGUI中 y 轴正值向下移动，与摇杆上推为负值刚好对应
                     pyautogui.moveRel(dx, dy)
@@ -1089,8 +1109,10 @@ class GameSelector(QWidget):
                     # 根据摇杆值控制鼠标移动，加入死区处理
                     dx = dy = 0
                     if abs(x_axis) > DEADZONE:
+                        self.move_mouse_once()
                         dx = x_axis * sensitivity
                     if abs(y_axis) > DEADZONE:
+                        self.move_mouse_once()
                         dy = y_axis * sensitivity
                     # PyAutoGUI中 y 轴正值向下移动，与摇杆上推为负值刚好对应
                     pyautogui.moveRel(dx, dy)
