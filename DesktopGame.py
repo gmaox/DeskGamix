@@ -314,7 +314,7 @@ class ConfirmDialog(QDialog):
                     QPushButton {
                         background-color: #45a049;
                         color: white;
-                        border: 1px solid yellow;
+                        border: 1px solid #93ffff;
                         padding: 20px 0;
                         font-size: 32px;
                         margin: 0;
@@ -340,7 +340,7 @@ class MouseWindow(QDialog):
 
     def initUI(self):
         # Create a label to display the text
-        self.label = QLabel("↖(L3R3关闭鼠标映射)", self)
+        self.label = QLabel("↖(L3R3关闭映射)", self)
         self.label.setStyleSheet("font-family: 'Microsoft YaHei'; font-size: 15px; color: white; border: 1px solid black; border-radius: 0px; background-color: rgba(0, 0, 0, 125);")
         self.label.adjustSize()
     
@@ -360,6 +360,8 @@ class GameSelector(QWidget):
     def __init__(self):
         global play_reload
         super().__init__()
+        self.back_start_pressed_time = None  # 初始化按键按下时间
+        self.back_start_action = set()
         self.is_mouse_simulation_running = False
         self.ignore_input_until = 0  # 初始化防抖时间戳
         self.current_section = 0  # 0=游戏选择区域，1=控制按钮区域
@@ -433,7 +435,7 @@ class GameSelector(QWidget):
                 font-size: {int(16 * self.scale_factor)}px;
             }}
             QPushButton:hover {{
-                border: {int(2 * self.scale_factor)}px solid #ffff88;
+                border: {int(2 * self.scale_factor)}px solid #555555;
             }}
         """)
         self.more_button.clicked.connect(self.show_more_window)
@@ -450,7 +452,7 @@ class GameSelector(QWidget):
                 font-size: {int(16 * self.scale_factor)}px;
             }}
             QPushButton:hover {{
-                border: {int(2 * self.scale_factor)}px solid #ffff88;
+                border: {int(2 * self.scale_factor)}px solid #555555;
             }}
         """)
         self.favorite_button.clicked.connect(self.toggle_favorite)
@@ -467,7 +469,7 @@ class GameSelector(QWidget):
                 font-size: {int(16 * self.scale_factor)}px;
             }}
             QPushButton:hover {{
-                border: {int(2 * self.scale_factor)}px solid #ffff88;
+                border: {int(2 * self.scale_factor)}px solid #555555;
             }}
         """)
         self.quit_button.clicked.connect(self.hide_window)
@@ -485,7 +487,7 @@ class GameSelector(QWidget):
                 font-size: {int(16 * self.scale_factor)}px;
             }}
             QPushButton:hover {{
-                border: {int(2 * self.scale_factor)}px solid #ffff88;
+                border: {int(2 * self.scale_factor)}px solid #555555;
             }}
         """)
         self.settings_button.clicked.connect(self.show_settings_window)
@@ -893,7 +895,7 @@ class GameSelector(QWidget):
         send(1, 0)   # 向右移动1像素
         send(-1, 0)  # 向左移动1像素
 
-    def mouse_simulation(self):
+    def mouse_simulation(self,hide=True):
         """开启鼠标映射"""
         # 检查是否已经在运行
         if self.is_mouse_simulation_running:
@@ -917,7 +919,8 @@ class GameSelector(QWidget):
         if not joysticks:
             print("未检测到手柄")
         joystick_states = {joystick.get_instance_id(): {"scrolling_up": False, "scrolling_down": False} for joystick in joysticks}
-        self.hide_window()
+        if hide:
+            self.hide_window()
         print("鼠标映射")
         axes = joystick.get_numaxes()
         # 一般DualShock4轴数为6，XBox为5
@@ -1280,7 +1283,7 @@ class GameSelector(QWidget):
                             font-size: {int(16 * self.scale_factor)}px;
                         }}
                         QPushButton:hover {{
-                            border: {int(2 * self.scale_factor)}px solid #ffff88;
+                            border: {int(2 * self.scale_factor)}px solid #555555;
                         }}
                     """)
                 else:
@@ -1294,7 +1297,7 @@ class GameSelector(QWidget):
                             font-size: {int(16 * self.scale_factor)}px;
                         }}
                         QPushButton:hover {{
-                            border: {int(2 * self.scale_factor)}px solid #ffff88;
+                            border: {int(2 * self.scale_factor)}px solid #555555;
                         }}
                     """)
 
@@ -1305,10 +1308,10 @@ class GameSelector(QWidget):
                         QPushButton {{
                             background-color: #2e2e2e; 
                             border-radius: {int(10 * self.scale_factor2)}px; 
-                            border: {int(3 * self.scale_factor2)}px solid yellow;
+                            border: {int(3 * self.scale_factor2)}px solid #93ffff;
                         }}
                         QPushButton:hover {{
-                            border: {int(3 * self.scale_factor2)}px solid #ffff88;
+                            border: {int(3 * self.scale_factor2)}px solid #25ade7;
                         }}
                     """)
                 else:
@@ -1342,10 +1345,10 @@ class GameSelector(QWidget):
                             background-color: #3e3e3e;
                             border-radius: 62%;
                             font-size: {int(40 * self.scale_factor)}px; 
-                            border: {int(4 * self.scale_factor)}px solid yellow;
+                            border: {int(4 * self.scale_factor)}px solid #93ffff;
                         }}
                         QPushButton:hover {{
-                            border: {int(4 * self.scale_factor)}px solid #00ff00;
+                            border: {int(4 * self.scale_factor)}px solid #25ade7;
                         }}
                     """)
                 else:
@@ -1769,6 +1772,28 @@ class GameSelector(QWidget):
         
         if current_time - self.last_input_time < self.input_delay:
             return
+        # 检查 Back 和 Start 键是否同时按下
+        if action in ('BACK', 'START'):
+            if self.back_start_pressed_time is None:
+                self.back_start_pressed_time = time.time()  # 记录按下时间
+                self.back_start_action = {action}  # 初始化按下的键集合
+            else:
+                self.back_start_action.add(action)  # 添加当前按下的键
+                if len(self.back_start_action) == 2:  # 检查是否同时按下两个键
+                    elapsed_time = time.time() - self.back_start_pressed_time
+                    if 3 <= elapsed_time <= 4: 
+                        self.mouse_simulation(False)  # 开启鼠标映射
+                        self.back_start_pressed_time = None  # 重置按键按下时间
+                        self.back_start_action = set()
+                    elif elapsed_time > 4: 
+                        print("重置状态")
+                        self.back_start_pressed_time = None
+                        self.back_start_action = set()
+        else:  # 如果松开了任意一个键
+            print("松开了 Back 或 Start 键")
+            self.back_start_pressed_time = None  # 重置计时
+            self.back_start_action = set()
+
         if getattrs:
             with focus_lock:  #焦点检查-只有打包后才能使用
                 if not focus: 
@@ -2444,6 +2469,10 @@ class GameControllerThread(QThread):
                         self.gamepad_signal.emit('Y')
                     if buttons[mapping.guide]:
                         self.gamepad_signal.emit('GUIDE')
+                    if buttons[mapping.back]:  # Back
+                        self.gamepad_signal.emit('BACK')
+                    if buttons[mapping.start]:  # Start
+                        self.gamepad_signal.emit('START')
 
                 time.sleep(0.01)
             except Exception as e:
@@ -2993,7 +3022,7 @@ class FloatingWindow(QWidget):
                         color: white;
                         text-align: left;
                         padding: {int(10 * self.parent().scale_factor)}px;
-                        border: {int(2 * self.parent().scale_factor)}px solid yellow;
+                        border: {int(2 * self.parent().scale_factor)}px solid #93ffff;
                         font-size: {int(16 * self.parent().scale_factor)}px;
                     }}
                 """)
