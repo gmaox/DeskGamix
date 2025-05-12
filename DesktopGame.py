@@ -895,7 +895,7 @@ class GameSelector(QWidget):
         send(1, 0)   # 向右移动1像素
         send(-1, 0)  # 向左移动1像素
 
-    def mouse_simulation(self,hide=True):
+    def mouse_simulation(self, ishide=False):
         """开启鼠标映射"""
         # 检查是否已经在运行
         if self.is_mouse_simulation_running:
@@ -919,7 +919,7 @@ class GameSelector(QWidget):
         if not joysticks:
             print("未检测到手柄")
         joystick_states = {joystick.get_instance_id(): {"scrolling_up": False, "scrolling_down": False} for joystick in joysticks}
-        if hide:
+        if not ishide:
             self.hide_window()
         print("鼠标映射")
         axes = joystick.get_numaxes()
@@ -1782,7 +1782,7 @@ class GameSelector(QWidget):
                 if len(self.back_start_action) == 2:  # 检查是否同时按下两个键
                     elapsed_time = time.time() - self.back_start_pressed_time
                     if 3 <= elapsed_time <= 4: 
-                        self.mouse_simulation(False)  # 开启鼠标映射
+                        self.mouse_simulation(True)  # 开启鼠标映射
                         self.back_start_pressed_time = None  # 重置按键按下时间
                         self.back_start_action = set()
                     elif elapsed_time > 4: 
