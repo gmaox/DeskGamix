@@ -894,7 +894,34 @@ class GameSelector(QWidget):
 
         send(1, 0)   # 向右移动1像素
         send(-1, 0)  # 向左移动1像素
+    def is_magnifier_open(self):
+        """检查放大镜是否已打开"""
+        for process in psutil.process_iter(['name']):
+            try:
+                if process.info['name'] and process.info['name'].lower() == 'magnify.exe':
+                    return True
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+        return False
 
+    def open_magnifier(self):
+        """打开系统放大镜"""
+        try:
+            ctypes.windll.shell32.ShellExecuteW(None, "open", "magnify.exe", None, None, 1)
+        except FileNotFoundError:
+            print("无法找到放大镜程序")
+
+    def close_magnifier(self):
+        """关闭系统放大镜"""
+        for process in psutil.process_iter(['name']):
+            try:
+                if process.info['name'] and process.info['name'].lower() == 'magnify.exe':
+                    process.terminate()
+                    process.wait()
+                    print("放大镜已关闭")
+                    return
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
     def mouse_simulation(self, ishide=False):
         """开启鼠标映射"""
         # 检查是否已经在运行
@@ -995,24 +1022,14 @@ class GameSelector(QWidget):
                         print("退出鼠标映射")
                         if self.is_virtual_keyboard_open():
                             self.close_virtual_keyboard()
+                        if self.is_magnifier_open():
+                            self.close_magnifier()
                         right_bottom_x = screen_width - 1  # 最右边
                         right_bottom_y = screen_height - 1  # 最底部
                         # 移动鼠标到屏幕右下角
                         pyautogui.moveTo(right_bottom_x, right_bottom_y)
                         #time.sleep(0.5)  
                         break
-                    
-                    if joystick.get_button(mapping.start):  # START键打开键盘
-
-                        if self.is_virtual_keyboard_open():
-                            self.close_virtual_keyboard()
-                        else:
-                            pyautogui.moveTo(int(screen_width/2), int(screen_height/1.5))  # 移动鼠标到屏幕中心
-                            self.open_virtual_keyboard()
-                        time.sleep(0.5)  # 延迟0.2秒，避免重复触发
-                    if joystick.get_button(mapping.back):  # SELECT键模拟win+tab
-                        pyautogui.hotkey('win', 'tab')
-                        time.sleep(0.5)  # 延迟0.2秒，避免重复触发
 
                     # 检查左键状态
                     if joystick.get_button(mapping.button_a) or joystick.get_button(mapping.right_bumper):  # A键模拟左键按下
@@ -1091,12 +1108,32 @@ class GameSelector(QWidget):
                     elif rt_val > 0.5:  # 如果右扳机值大于 0.5，设置为低灵敏度
                         sensitivity = SENS_LOW
                         sensitivity1 = SENS_HIGH
+                        if joystick.get_button(mapping.start):  # START+rt打开放大镜
+                            if not self.is_magnifier_open():
+                                self.open_magnifier()
+                            else:
+                                self.close_magnifier()
+                            time.sleep(0.5)  # 延迟0.2秒，避免重复触发
                     #elif rt_val > 0.5 and lt_val > 0.8:  # 如果两个扳机都按下(这样按有病吧？)
                     #    sensitivity = SENS_HIGH
                     #    sensitivity1 = SENS_HIGH
                     else:  # 默认设置
                         sensitivity = SENS_MEDIUM
                         sensitivity1 = SENS_LOW
+                    
+                    if joystick.get_button(mapping.start):  # START键打开键盘
+                        if self.is_magnifier_open():
+                            self.close_magnifier()
+                        else:
+                            if self.is_virtual_keyboard_open():
+                                self.close_virtual_keyboard()
+                            else:
+                                pyautogui.moveTo(int(screen_width/2), int(screen_height/1.5))  # 移动鼠标到屏幕中心
+                                self.open_virtual_keyboard()
+                        time.sleep(0.5)  # 延迟0.2秒，避免重复触发
+                    if joystick.get_button(mapping.back):  # SELECT键模拟win+tab
+                        pyautogui.hotkey('win', 'tab')
+                        time.sleep(0.5)  # 延迟0.2秒，避免重复触发
 
                     # 使用右摇杆控制鼠标移动（低灵敏度）
                     dx = dy = 0
