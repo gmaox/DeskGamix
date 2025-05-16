@@ -1256,10 +1256,10 @@ class GameSelector(QWidget):
             if self.current_index >= len(self.control_buttons):
                 self.current_index = len(self.control_buttons) - 1
         # 设置窗口透明度，当游戏运行时
-        if self.player:
-            self.setWindowOpacity(0.95)
-        else:
-            self.setWindowOpacity(1)
+        #if self.player:
+        #    self.setWindowOpacity(0.95)
+        #else:
+        #    self.setWindowOpacity(1)
         # 更新游戏名称标签
         if self.current_section == 0:  # 游戏选择区域
             if self.more_section == 0 and self.current_index == self.buttonsindexset:  # 如果是“更多”按钮
@@ -1702,9 +1702,12 @@ class GameSelector(QWidget):
             return
         if self.player:
             # 创建确认弹窗
-            self.confirm_dialog = ConfirmDialog("已经打开了一个游戏，还要再打开一个吗？")
-            result = self.confirm_dialog.exec_()  # 显示弹窗并获取结果
-            self.ignore_input_until = pygame.time.get_ticks() + 350  # 设置屏蔽时间为800毫秒
+            if not self.is_mouse_simulation_running == True:
+                self.confirm_dialog = ConfirmDialog("已经打开了一个游戏，还要再打开一个吗？")
+                result = self.confirm_dialog.exec_()  # 显示弹窗并获取结果
+                self.ignore_input_until = pygame.time.get_ticks() + 350  # 设置屏蔽时间为800毫秒
+            else:
+                result = False
             if not result == QDialog.Accepted:  # 如果按钮没被点击
                 return
             else:
@@ -2029,9 +2032,12 @@ class GameSelector(QWidget):
         #删除逻辑
         if game_name in self.player:
             # 创建确认弹窗
-            self.confirm_dialog = ConfirmDialog(f"是否关闭下列程序？\n{game_name}")
-            result = self.confirm_dialog.exec_()  # 显示弹窗并获取结果
-            self.ignore_input_until = pygame.time.get_ticks() + 350  # 设置屏蔽时间为800毫秒
+            if not self.is_mouse_simulation_running == True:
+                self.confirm_dialog = ConfirmDialog(f"是否关闭下列程序？\n{game_name}")
+                result = self.confirm_dialog.exec_()  # 显示弹窗并获取结果
+                self.ignore_input_until = pygame.time.get_ticks() + 350  # 设置屏蔽时间为800毫秒
+            else:
+                result = False
             if not result == QDialog.Accepted:  # 如果按钮没被点击
                 return
             for app in valid_apps:
@@ -2200,9 +2206,12 @@ class GameSelector(QWidget):
     def refresh_games(self):
         """刷新游戏列表，处理 extra_paths 中的快捷方式"""
         subprocess.Popen("QuickStreamAppAdd.exe", shell=True)
-        self.confirm_dialog = ConfirmDialog("是否要重启程序以应用更改？")
-        result = self.confirm_dialog.exec_()  # 显示弹窗并获取结果
-        self.ignore_input_until = pygame.time.get_ticks() + 350  # 设置屏蔽时间为800毫秒
+        if not self.is_mouse_simulation_running == True:
+            self.confirm_dialog = ConfirmDialog("是否要重启程序以应用更改？")
+            result = self.confirm_dialog.exec_()  # 显示弹窗并获取结果
+            self.ignore_input_until = pygame.time.get_ticks() + 350  # 设置屏蔽时间为800毫秒
+        else:
+            result = False
         if not result == QDialog.Accepted:  
             return
         else:
@@ -2532,7 +2541,21 @@ class GameControllerThread(QThread):
             print("手柄监听线程已重启")
         except Exception as e:
             print(f"重启线程时发生错误: {e}")
+class FileDialogThread(QThread):
+    file_selected = pyqtSignal(str)  # 信号，用于传递选中的文件路径
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+    def run(self):
+        """运行文件选择对话框"""
+        file_dialog = QFileDialog()
+        file_dialog.setWindowTitle("选择要启动的文件")
+        file_dialog.setNameFilter("Executable and Shortcut Files (*.exe *.lnk)")
+        file_dialog.setFileMode(QFileDialog.ExistingFile)
+        if file_dialog.exec_():
+            selected_file = file_dialog.selectedFiles()[0]
+            self.file_selected.emit(selected_file)  # 发射信号传递选中的文件路径
 class FloatingWindow(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2868,15 +2891,25 @@ class FloatingWindow(QWidget):
         else:
             print(f"文件 {file['name']} 不存在！")
     def select_bat_file(self):
-        """选择bat文件"""
-        file_dialog = QFileDialog(self, "选择要启动的文件", "", "Executable and Shortcut Files (*.exe *.lnk)")
-        file_dialog.setFileMode(QFileDialog.ExistingFile)
-        if file_dialog.exec_():
-            selected_file = file_dialog.selectedFiles()[0]
-            self.selected_item_label.setText(selected_file)
-            self.name_edit.setText(os.path.splitext(os.path.basename(selected_file))[0])  # 只填入文件名部分
-            # 保持悬浮窗可见
-            self.add_item_window.show()
+        """选择bat文件（非阻塞）"""
+        # 先隐藏所有相关弹窗
+        if hasattr(self, 'add_item_window') and self.add_item_window.isVisible():
+            self.add_item_window.hide()
+        if hasattr(self, 'del_item_window') and self.del_item_window.isVisible():
+            self.del_item_window.hide()
+        self.hide()
+        # 启动文件选择线程
+        self.file_dialog_thread = FileDialogThread(self)
+        self.file_dialog_thread.file_selected.connect(self.handle_file_selected)  # 连接信号到槽
+        self.file_dialog_thread.start()  # 启动线程 
+    def handle_file_selected(self, selected_file):
+        """处理选中的文件"""
+        self.show()
+        self.add_item_window.show()
+        self.selected_item_label.setText(selected_file)
+        self.name_edit.setText(os.path.splitext(os.path.basename(selected_file))[0])  # 只填入文件名部分
+        # 保持悬浮窗可见
+        self.add_item_window.show()
 
     #def show_custom_bat_editor(self):
     #    """显示自定义bat编辑器"""
