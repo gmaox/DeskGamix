@@ -744,7 +744,7 @@ class GameSelector(QWidget):
             controller_name = controller_data['controller'].get_name()
             self.update_controller_status(controller_name)
         # 右侧文字
-        right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.93")
+        right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.94")
         right_label.setStyleSheet(f"""
             QLabel {{
                 font-family: "Microsoft YaHei"; 
@@ -1648,9 +1648,28 @@ class GameSelector(QWidget):
             self.switch_to_all_software()
             return
         #冻结相关
-        if self.freezeapp:
-            os.system(f'pssuspend64.exe -r {self.freezeapp}')
-            self.freezeapp = None
+        if os.path.exists("pssuspend64.exe"):
+            for app in valid_apps:
+                if app["name"] == game_name:
+                    game_path = app["path"]
+                    break
+            else:
+                game_path = None
+            if game_path:
+                for process in psutil.process_iter(['pid', 'exe', 'status']):
+                    try:
+                        if process.info['exe'] and process.info['exe'].lower() == game_path.lower():
+                            # 检查进程状态是否为挂起（Windows下为 'stopped'）
+                            if process.status() == psutil.STATUS_STOPPED:
+                                # 恢复挂起
+                                subprocess.Popen(
+                                    ['pssuspend64.exe', '-r', os.path.basename(game_path)],
+                                    creationflags=subprocess.CREATE_NO_WINDOW
+                                )
+                                time.sleep(0.5)  # 等待恢复
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                        continue
+        # 恢复窗口
         if game["name"] in self.player:
             for app in valid_apps:
                 if app["name"] == game["name"]:
@@ -1743,14 +1762,27 @@ class GameSelector(QWidget):
                 # 最小化窗口
                 ShowWindow(hwnd, SW_MINIMIZE)
                 #冻结相关
-                if self.freeze and self.freezeapp == None:
+                if self.freeze:
                     if os.path.exists("pssuspend64.exe"):
                         pass_exe=['ZFGameBrowser.exe', 'amdow.exe', 'audiodg.exe', 'cmd.exe', 'cncmd.exe', 'copyq.exe', 'frpc.exe', 'gamingservicesnet.exe', 'memreduct.exe', 'mmcrashpad_handler64.exe','GameBarPresenceWriter.exe', 'HipsTray.exe', 'HsFreezer.exe', 'HsFreezerMagiaMove.exe', 'PhoneExperienceHost.exe','PixPin.exe', 'PresentMon-x64.exe','msedgewebview2.exe', 'plugin_host-3.3.exe', 'plugin_host-3.8.exe','explorer.exe','System Idle Process', 'System', 'svchost.exe', 'Registry', 'smss.exe', 'csrss.exe', 'wininit.exe', 'winlogon.exe', 'services.exe', 'lsass.exe', 'atiesrxx.exe', 'amdfendrsr.exe', 'atieclxx.exe', 'MemCompression', 'ZhuDongFangYu.exe', 'wsctrlsvc.exe', 'AggregatorHost.exe', 'wlanext.exe', 'conhost.exe', 'spoolsv.exe', 'reWASDService.exe', 'AppleMobileDeviceService.exe', 'ABService.exe', 'mDNSResponder.exe', 'Everything.exe', 'SunloginClient.exe', 'RtkAudUService64.exe', 'gamingservices.exe', 'SearchIndexer.exe', 'MoUsoCoreWorker.exe', 'SecurityHealthService.exe', 'HsFreezerEx.exe', 'GameInputSvc.exe', 'TrafficProt.exe', 'HipsDaemon.exe','python.exe', 'pythonw.exe', 'qmbrowser.exe', 'reWASDEngine.exe', 'sihost.exe', 'sublime_text.exe', 'taskhostw.exe', 'SearchProtocolHost.exe','crash_handler.exe', 'crashpad_handler.exe', 'ctfmon.exe', 'dasHost.exe', 'dllhost.exe', 'dwm.exe', 'fontdrvhost.exe','RuntimeBroker.exe','taskhostw.exe''WeChatAppEx.exe', 'WeChatOCR.exe', 'WeChatPlayer.exe', 'WeChatUtility.exe', 'WidgetService.exe', 'Widgets.exe', 'WmiPrvSE.exe', 'Xmp.exe','QQScreenshot.exe', 'RadeonSoftware.exe', 'SakuraFrpService.exe', 'SakuraLauncher.exe', 'SearchHost.exe', 'SecurityHealthSystray.exe', 'ShellExperienceHost.exe', 'StartMenuExperienceHost.exe', 'SystemSettings.exe', 'SystemSettingsBroker.exe', 'TextInputHost.exe', 'TrafficMonitor.exe', 'UserOOBEBroker.exe','WeChatAppEx.exe','360zipUpdate.exe', 'AMDRSServ.exe', 'AMDRSSrcExt.exe', 'APlayer.exe', 'ApplicationFrameHost.exe', 'CPUMetricsServer.exe', 'ChsIME.exe', 'DownloadSDKServer.exe','QMWeiyun.exe'];save_input=[]
-                        if exe_name in pass_exe:
-                            print(f"当前窗口 {exe_name} 在冻结列表中，跳过冻结")
-                            return True
-                        os.system(f'pssuspend64.exe {exe_name}')
-                        self.freezeapp = exe_name
+                    if exe_name in pass_exe:
+                        print(f"当前窗口 {exe_name} 在冻结列表中，跳过冻结")
+                        return True
+                    # 仅当目标进程未挂起时才执行挂起
+                    is_stopped = False
+                    for proc in psutil.process_iter(['name', 'status']):
+                        try:
+                            if proc.info['name'] and proc.info['name'].lower() == exe_name.lower():
+                                if proc.status() == psutil.STATUS_STOPPED:
+                                    is_stopped = True
+                                    break
+                        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                            continue
+                    if not is_stopped:
+                        subprocess.Popen(
+                            ['pssuspend64.exe', exe_name],
+                            creationflags=subprocess.CREATE_NO_WINDOW
+                        )
                     else:
                         QMessageBox.warning(self, "提示", "未找到冻结工具，请检查路径")
                 return True
@@ -1781,11 +1813,11 @@ class GameSelector(QWidget):
                 self.back_start_action.add(action)  # 添加当前按下的键
                 if len(self.back_start_action) == 2:  # 检查是否同时按下两个键
                     elapsed_time = time.time() - self.back_start_pressed_time
-                    if 3 <= elapsed_time <= 4: 
+                    if 2 <= elapsed_time <= 3: 
                         self.mouse_simulation(True)  # 开启鼠标映射
                         self.back_start_pressed_time = None  # 重置按键按下时间
                         self.back_start_action = set()
-                    elif elapsed_time > 4: 
+                    elif elapsed_time > 3: 
                         print("重置状态")
                         self.back_start_pressed_time = None
                         self.back_start_action = set()
@@ -2120,6 +2152,7 @@ class GameSelector(QWidget):
         self.floating_window.update_highlight()
         self.floating_window.hide()
         self.in_floating_window = False
+        self.mouse_simulation(True)  # 开启鼠标映射
 
     def can_toggle_window(self):
         """检查是否可以切换悬浮窗状态"""
