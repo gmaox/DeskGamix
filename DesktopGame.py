@@ -849,7 +849,7 @@ class GameSelector(QWidget):
         self.scale_factor2 = self.scale_factor  # 用于按钮和图像的缩放因数
         self.current_index = 0
         self.more_section = 1
-        self.scroll_area.setFixedHeight(int(self.height()*0.89))  # 设置为90%高度
+        self.scroll_area.setFixedHeight(int(self.height()*0.85))  # 设置为90%高度
         self.toggle_control_buttons(False)  # 隐藏控制按钮
         self.reload_interface()
     def switch_to_main_interface(self):
@@ -2091,7 +2091,7 @@ class GameSelector(QWidget):
                     self.toggle_favorite()  # 收藏/取消收藏游戏
                 elif action == 'X':  # X键开悬浮窗
                     self.show_more_window()  # 打开悬浮窗
-                elif action == 'LS' or action == 'RS' or action == 'GUIDE':  # L3或R3回桌面
+                elif action == 'GUIDE':  # 回桌面
                     if current_time < ((self.ignore_input_until)+500):
                         return
                     self.ignore_input_until = pygame.time.get_ticks() + 500 
@@ -3632,17 +3632,17 @@ class SettingsWindow(QWidget):
 
     def show_del_custom_valid_apps_dialog(self):
         """显示删除自定义valid_apps条目的窗口"""
-        dialog = QDialog(self)
-        dialog.setWindowTitle("删除自定义游戏进程")
-        dialog.setWindowFlags(Qt.FramelessWindowHint | Qt.Popup)
-        dialog.setStyleSheet(f"""
+        self.del_dialog = QDialog(self)
+        self.del_dialog.setWindowTitle("删除自定义游戏进程")
+        self.del_dialog.setWindowFlags(Qt.FramelessWindowHint | Qt.Popup)
+        self.del_dialog.setStyleSheet(f"""
             QDialog {{
                 background-color: rgba(46, 46, 46, 0.95);
                 border-radius: {int(15 * self.parent().scale_factor)}px;
                 border: {int(2 * self.parent().scale_factor)}px solid #444444;
             }}
         """)
-        layout = QVBoxLayout(dialog)
+        layout = QVBoxLayout(self.del_dialog)
         layout.setSpacing(int(15 * self.parent().scale_factor))
         layout.setContentsMargins(
             int(20 * self.parent().scale_factor),
@@ -3665,7 +3665,7 @@ class SettingsWindow(QWidget):
                 background-color: #007B9E;
             }}
         """)
-        add_btn.clicked.connect(lambda: [dialog.accept(), self.show_custom_valid_apps_dialog()])
+        add_btn.clicked.connect(lambda: [self.del_dialog.accept(), self.show_custom_valid_apps_dialog()])
         layout.addWidget(add_btn)
     
         # 获取自定义条目列表
@@ -3716,28 +3716,28 @@ class SettingsWindow(QWidget):
                                 break
                         with open(settings_path, "w", encoding="utf-8") as f:
                             json.dump(settings, f, indent=4)
-                        dialog.accept()
+                        self.del_dialog.accept()
                 btn.clicked.connect(handle_del)
                 layout.addWidget(btn)
     
-        dialog.setLayout(layout)
-        dialog.exec_()
+        self.del_dialog.setLayout(layout)
+        self.del_dialog.show()
 
     def show_custom_valid_apps_dialog(self):
         """显示自定义valid_apps添加界面"""
-        dialog = QDialog(self)
-        dialog.setWindowTitle("添加自定义游戏进程")
-        dialog.setWindowFlags(Qt.FramelessWindowHint | Qt.Popup)
-        dialog.setStyleSheet(f"""
+        self.add_dialog = QDialog(self)
+        self.add_dialog.setWindowTitle("添加自定义游戏进程")
+        self.add_dialog.setWindowFlags(Qt.FramelessWindowHint | Qt.Popup)
+        self.add_dialog.setStyleSheet(f"""
             QDialog {{
                 background-color: rgba(46, 46, 46, 0.95);
                 border-radius: {int(15 * self.parent().scale_factor)}px;
                 border: {int(2 * self.parent().scale_factor)}px solid #444444;
             }}
         """)
-        dialog.move(int(340 * self.parent().scale_factor), int(100 * self.parent().scale_factor))
-        dialog.setFixedWidth(int(600 * self.parent().scale_factor))
-        layout = QVBoxLayout(dialog)
+        self.add_dialog.move(int(340 * self.parent().scale_factor), int(100 * self.parent().scale_factor))
+        self.add_dialog.setFixedWidth(int(600 * self.parent().scale_factor))
+        layout = QVBoxLayout(self.add_dialog)
         layout.setSpacing(int(10 * self.parent().scale_factor))
         layout.setContentsMargins(
             int(20 * self.parent().scale_factor),
@@ -3769,7 +3769,7 @@ class SettingsWindow(QWidget):
 
         # 点击name_edit弹出选择窗口
         def show_game_name_selector():
-            selector_dialog = QDialog(dialog)
+            selector_dialog = QDialog(self.add_dialog)
             selector_dialog.setWindowTitle("选择游戏名称")
             selector_dialog.setWindowFlags(Qt.FramelessWindowHint | Qt.Popup)
             selector_dialog.setStyleSheet(f"""
@@ -3809,10 +3809,10 @@ class SettingsWindow(QWidget):
         name_edit.mousePressEvent = lambda event: show_game_name_selector()
 
         # 路径输入
-        path_edit = QLineEdit()
-        path_edit.setPlaceholderText("路径（如 C:\\xxx\\xxx.exe）")
-        path_edit.setFixedHeight(int(50 * self.parent().scale_factor))
-        path_edit.setStyleSheet(f"""
+        self.path_edit = QLineEdit()
+        self.path_edit.setPlaceholderText("路径（如 C:\\xxx\\xxx.exe）")
+        self.path_edit.setFixedHeight(int(50 * self.parent().scale_factor))
+        self.path_edit.setStyleSheet(f"""
             QLineEdit {{
                 background-color: rgba(255, 255, 255, 0.1);
                 color: white;
@@ -3822,7 +3822,7 @@ class SettingsWindow(QWidget):
                 font-size: {int(20 * self.parent().scale_factor)}px;
             }}
         """)
-        layout.addWidget(path_edit)
+        layout.addWidget(self.path_edit)
 
         # 选择文件按钮
         select_file_btn = QPushButton("手动选择exe")
@@ -3885,21 +3885,21 @@ class SettingsWindow(QWidget):
         layout.addWidget(save_btn)
 
         # 文件选择逻辑
-        def select_file():
-            file_dialog = QFileDialog(dialog)
-            file_dialog.setWindowTitle("选择可执行文件或快捷方式")
-            file_dialog.setNameFilter("可执行文件 (*.exe *.lnk)")
-            file_dialog.setFileMode(QFileDialog.ExistingFile)
-            if file_dialog.exec_():
-                selected_file = file_dialog.selectedFiles()[0]
-                selected_file = selected_file.replace('/', '\\')
-                path_edit.setText(selected_file)
-            self.show()  
-            dialog.show()
-        select_file_btn.clicked.connect(select_file)
+        #def select_file():
+        #    file_dialog = QFileDialog(dialog)
+        #    file_dialog.setWindowTitle("选择可执行文件或快捷方式")
+        #    file_dialog.setNameFilter("可执行文件 (*.exe *.lnk)")
+        #    file_dialog.setFileMode(QFileDialog.ExistingFile)
+        #    if file_dialog.exec_():
+        #        selected_file = file_dialog.selectedFiles()[0]
+        #        selected_file = selected_file.replace('/', '\\')
+        #        path_edit.setText(selected_file)
+        #    self.show()  
+        #    dialog.show()
+        select_file_btn.clicked.connect(self.select_file)
         # 选择运行中进程逻辑
         def select_running_process():
-            proc_dialog = QDialog(dialog)
+            proc_dialog = QDialog(self.add_dialog)
             proc_dialog.setWindowTitle("选择运行中进程")
             proc_dialog.setWindowFlags(Qt.FramelessWindowHint | Qt.Popup)
             proc_dialog.setStyleSheet(f"""
@@ -3957,17 +3957,17 @@ class SettingsWindow(QWidget):
                         }}
                     """)
                     btn.clicked.connect(lambda checked, exe=proc.info['exe']: (
-                        path_edit.setText(exe), proc_dialog.accept()
+                        self.path_edit.setText(exe), proc_dialog.accept()
                     ))
                     vbox.addWidget(btn)
 
             proc_dialog.setLayout(vbox)
-            proc_dialog.exec_()
+            proc_dialog.show()
         select_proc_btn.clicked.connect(select_running_process)
         # 保存逻辑
         def save_custom():
             name = name_edit.text().strip()
-            path = path_edit.text().strip()
+            path = self.path_edit.text().strip()
             if name and path:
                 if "custom_valid_apps" not in settings:
                     settings["custom_valid_apps"] = []
@@ -3976,12 +3976,32 @@ class SettingsWindow(QWidget):
                     json.dump(settings, f, indent=4)
                 valid_apps.append({"name": name, "path": path})
                 name_edit.clear()
-                path_edit.clear()
-                dialog.hide()
+                self.path_edit.clear()
+                self.add_dialog.hide()
         save_btn.clicked.connect(save_custom)
-        dialog.setLayout(layout)
-        dialog.show()
-        
+        self.add_dialog.setLayout(layout)
+        self.add_dialog.show()
+
+    def select_file(self):
+        """选择可执行文件或快捷方式（非阻塞，适用于SettingsWindow）"""
+        # 先隐藏所有相关弹窗
+        if hasattr(self, 'add_dialog') and self.add_dialog.isVisible():
+            self.add_dialog.hide()
+        if hasattr(self, 'del_dialog') and self.del_dialog.isVisible():
+            self.del_dialog.hide()
+        self.hide()
+        # 启动文件选择线程
+        self.file_dialog_thread = FileDialogThread(self)
+        self.file_dialog_thread.file_selected.connect(self.handle_file_selected)  # 连接信号到槽
+        self.file_dialog_thread.start()  # 启动线程
+    def handle_file_selected(self, selected_file):
+        """处理选中的文件（适用于SettingsWindow）"""
+        self.show()
+        if hasattr(self, 'add_dialog') and self.add_dialog.isVisible() == False:
+            self.add_dialog.show()
+        # 填充路径
+        self.path_edit.setText(selected_file.replace('/', '\\'))
+
     # 检查程序是否设置为开机自启
     def is_startup_enabled(self):
         command = ['schtasks', '/query', '/tn', "DesktopGameStartup"]
