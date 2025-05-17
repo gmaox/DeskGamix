@@ -1,3 +1,4 @@
+import glob
 import shutil
 import sys
 import json
@@ -109,6 +110,9 @@ for app in data.get("apps", []):
     if cmda is None:
         continue  # 跳过无 cmd 的条目
     cmd = cmda.strip('"')
+    # 新增2：如果app["name"]已存在于settings["custom_valid_apps"]的"name"，则跳过
+    if "custom_valid_apps" in settings and any(app["name"] == item["name"] for item in settings["custom_valid_apps"]):
+        continue
     if cmd:
         # 如果cmd是快捷方式路径（.lnk）
         if cmd.lower().endswith('.lnk'):
@@ -120,6 +124,34 @@ for app in data.get("apps", []):
         # 如果cmd是.exe文件路径
         elif cmd.lower().endswith('.exe'):
             valid_apps.append({"name": app["name"], "path": cmd})
+# 加载自定义 valid_apps
+if "custom_valid_apps" in settings:
+    for item in settings["custom_valid_apps"]:
+        if "name" in item and "path" in item:
+            valid_apps.append({"name": item["name"], "path": item["path"]})
+
+more_apps = []
+def load_morefloder_shortcuts():
+    """解析 ./morefloder 文件夹下的快捷方式并添加到 more_apps"""
+    more_apps.clear()  # 清空 more_apps 列表
+    morefloder_path = os.path.join(program_directory, "morefloder")
+    if not os.path.exists(morefloder_path):
+        print(f"目录 {morefloder_path} 不存在")
+        return
+
+    # 遍历文件夹下的所有 .lnk 文件
+    shortcut_files = glob.glob(os.path.join(morefloder_path, "*.lnk"))
+    for shortcut_file in shortcut_files:
+        try:
+            target_path = get_target_path(shortcut_file)
+            app_name = os.path.splitext(os.path.basename(shortcut_file))[0]
+            more_apps.append({"name": app_name, "path": target_path})
+        except Exception as e:
+            print(f"无法解析快捷方式 {shortcut_file}：{e}")
+
+# 调用函数加载 ./morefloder 下的快捷方式
+load_morefloder_shortcuts()
+print(more_apps)
 print(valid_apps)
 
 
@@ -1671,7 +1703,32 @@ class GameSelector(QWidget):
     # 启动焦点判断线程
     thread = threading.Thread(target=focus_thread, daemon=True)
     thread.start()   
+    def restore_window(self, game_path):
+        self.hide_window()
+        for process in psutil.process_iter(['pid', 'exe']):
+                    try:
+                        if process.info['exe'] and process.info['exe'].lower() == game_path.lower():
+                            pid = process.info['pid']
 
+                            # 查找进程对应的窗口
+                            def enum_window_callback(hwnd, lParam):
+                                _, current_pid = win32process.GetWindowThreadProcessId(hwnd)
+                                if current_pid == pid:
+                                    # 获取窗口的可见性
+                                    style = win32gui.GetWindowLong(hwnd, win32con.GWL_STYLE)
+                                    # 如果窗口的样式包含 WS_VISIBLE，则表示该窗口是可见的
+                                    if style & win32con.WS_VISIBLE:
+                                        # 恢复窗口并将其置前
+                                        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                                        win32gui.SetForegroundWindow(hwnd)
+                                        print(f"已将进程 {pid} 的窗口带到前台")
+                                        self.switch_to_main_interface()
+
+                            # 枚举所有窗口
+                            win32gui.EnumWindows(enum_window_callback, None)
+                            return
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                        pass
     def launch_game(self, index):
         """启动选中的游戏"""
         sorted_games = self.sort_games()
@@ -1712,30 +1769,7 @@ class GameSelector(QWidget):
                 if app["name"] == game["name"]:
                     game_path = app["path"]
                     break
-            for process in psutil.process_iter(['pid', 'exe']):
-                try:
-                    if process.info['exe'] and process.info['exe'].lower() == game_path.lower():
-                        pid = process.info['pid']
-
-                        # 查找进程对应的窗口
-                        def enum_window_callback(hwnd, lParam):
-                            _, current_pid = win32process.GetWindowThreadProcessId(hwnd)
-                            if current_pid == pid:
-                                # 获取窗口的可见性
-                                style = win32gui.GetWindowLong(hwnd, win32con.GWL_STYLE)
-                                # 如果窗口的样式包含 WS_VISIBLE，则表示该窗口是可见的
-                                if style & win32con.WS_VISIBLE:
-                                    # 恢复窗口并将其置前
-                                    win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-                                    win32gui.SetForegroundWindow(hwnd)
-                                    print(f"已将进程 {pid} 的窗口带到前台")
-                                    self.switch_to_main_interface()
-
-                        # 枚举所有窗口
-                        win32gui.EnumWindows(enum_window_callback, None)
-                        return
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                    pass
+            self.restore_window(game_path)
             return
         if self.player:
             # 创建确认弹窗
@@ -1761,11 +1795,43 @@ class GameSelector(QWidget):
             json.dump(settings, f, indent=4)
 
         self.reload_interface()
+        self.ignore_input_until = pygame.time.get_ticks() + 1000
         if game_cmd:
             #self.showMinimized()
             subprocess.Popen(game_cmd, shell=True)
             #self.showFullScreen()
-            self.ignore_input_until = pygame.time.get_ticks() + 1000
+            return
+        # 新增：处理detached字段，优先启动detached中的.url
+        detached_list = game.get("detached", [])
+        if detached_list:
+            url_path = detached_list[0].strip('"')  # 去掉前后引号
+            if url_path.lower().endswith('.url'):
+                os.startfile(url_path)
+            # 检查 game["name"] 是否能在 valid_apps["name"] 里找到
+            if not any(app["name"] == game["name"] for app in valid_apps):
+                print(f"未在 valid_apps 中找到 {game['name']}")
+                # 创建确认弹窗
+                if not self.is_mouse_simulation_running == True:
+                    self.confirm_dialog = ConfirmDialog("该游戏未绑定进程\n点击确定后将打开自定义进程页面")
+                    result = self.confirm_dialog.exec_()  # 显示弹窗并获取结果
+                    self.ignore_input_until = pygame.time.get_ticks() + 350  # 设置屏蔽时间为800毫秒
+                else:
+                    result = False
+                if result == QDialog.Accepted:  # 如果按钮被点击
+                    settings_window = SettingsWindow(self)
+                    settings_window.show_custom_valid_apps_dialog()
+                    def fill_name_and_show():
+                        # 找到刚刚弹出的dialog中的name_edit并填充
+                        # 由于show_custom_valid_apps_dialog内部定义了name_edit变量，需通过遍历子控件查找
+                        for widget in QApplication.topLevelWidgets():
+                            if isinstance(widget, QDialog) and widget.windowTitle() == "添加自定义游戏进程":
+                                for child in widget.findChildren(QLineEdit):
+                                    if child.placeholderText().startswith("点击选择游戏名称"):
+                                        child.setText(game["name"])
+                                        break
+                                break
+                    QTimer.singleShot(100, fill_name_and_show)
+                    return
     # 判断当前窗口是否全屏(当设置中开启时)
     def is_current_window_fullscreen(self):
         try:
@@ -1804,25 +1870,34 @@ class GameSelector(QWidget):
                 #冻结相关
                 if self.freeze:
                     if os.path.exists("pssuspend64.exe"):
-                        pass_exe=['ZFGameBrowser.exe', 'amdow.exe', 'audiodg.exe', 'cmd.exe', 'cncmd.exe', 'copyq.exe', 'frpc.exe', 'gamingservicesnet.exe', 'memreduct.exe', 'mmcrashpad_handler64.exe','GameBarPresenceWriter.exe', 'HipsTray.exe', 'HsFreezer.exe', 'HsFreezerMagiaMove.exe', 'PhoneExperienceHost.exe','PixPin.exe', 'PresentMon-x64.exe','msedgewebview2.exe', 'plugin_host-3.3.exe', 'plugin_host-3.8.exe','explorer.exe','System Idle Process', 'System', 'svchost.exe', 'Registry', 'smss.exe', 'csrss.exe', 'wininit.exe', 'winlogon.exe', 'services.exe', 'lsass.exe', 'atiesrxx.exe', 'amdfendrsr.exe', 'atieclxx.exe', 'MemCompression', 'ZhuDongFangYu.exe', 'wsctrlsvc.exe', 'AggregatorHost.exe', 'wlanext.exe', 'conhost.exe', 'spoolsv.exe', 'reWASDService.exe', 'AppleMobileDeviceService.exe', 'ABService.exe', 'mDNSResponder.exe', 'Everything.exe', 'SunloginClient.exe', 'RtkAudUService64.exe', 'gamingservices.exe', 'SearchIndexer.exe', 'MoUsoCoreWorker.exe', 'SecurityHealthService.exe', 'HsFreezerEx.exe', 'GameInputSvc.exe', 'TrafficProt.exe', 'HipsDaemon.exe','python.exe', 'pythonw.exe', 'qmbrowser.exe', 'reWASDEngine.exe', 'sihost.exe', 'sublime_text.exe', 'taskhostw.exe', 'SearchProtocolHost.exe','crash_handler.exe', 'crashpad_handler.exe', 'ctfmon.exe', 'dasHost.exe', 'dllhost.exe', 'dwm.exe', 'fontdrvhost.exe','RuntimeBroker.exe','taskhostw.exe''WeChatAppEx.exe', 'WeChatOCR.exe', 'WeChatPlayer.exe', 'WeChatUtility.exe', 'WidgetService.exe', 'Widgets.exe', 'WmiPrvSE.exe', 'Xmp.exe','QQScreenshot.exe', 'RadeonSoftware.exe', 'SakuraFrpService.exe', 'SakuraLauncher.exe', 'SearchHost.exe', 'SecurityHealthSystray.exe', 'ShellExperienceHost.exe', 'StartMenuExperienceHost.exe', 'SystemSettings.exe', 'SystemSettingsBroker.exe', 'TextInputHost.exe', 'TrafficMonitor.exe', 'UserOOBEBroker.exe','WeChatAppEx.exe','360zipUpdate.exe', 'AMDRSServ.exe', 'AMDRSSrcExt.exe', 'APlayer.exe', 'ApplicationFrameHost.exe', 'CPUMetricsServer.exe', 'ChsIME.exe', 'DownloadSDKServer.exe','QMWeiyun.exe'];save_input=[]
-                    if exe_name in pass_exe:
-                        print(f"当前窗口 {exe_name} 在冻结列表中，跳过冻结")
-                        return True
-                    # 仅当目标进程未挂起时才执行挂起
-                    is_stopped = False
-                    for proc in psutil.process_iter(['name', 'status']):
-                        try:
-                            if proc.info['name'] and proc.info['name'].lower() == exe_name.lower():
-                                if proc.status() == psutil.STATUS_STOPPED:
-                                    is_stopped = True
-                                    break
-                        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                            continue
-                    if not is_stopped:
-                        subprocess.Popen(
-                            ['pssuspend64.exe', exe_name],
-                            creationflags=subprocess.CREATE_NO_WINDOW
-                        )
+                        pass_exe=['DesktopGame.exe', 'ZFGameBrowser.exe', 'amdow.exe', 'audiodg.exe', 'cmd.exe', 'cncmd.exe', 'copyq.exe', 'frpc.exe', 'gamingservicesnet.exe', 'memreduct.exe', 'mmcrashpad_handler64.exe','GameBarPresenceWriter.exe', 'HipsTray.exe', 'HsFreezer.exe', 'HsFreezerMagiaMove.exe', 'PhoneExperienceHost.exe','PixPin.exe', 'PresentMon-x64.exe','msedgewebview2.exe', 'plugin_host-3.3.exe', 'plugin_host-3.8.exe','explorer.exe','System Idle Process', 'System', 'svchost.exe', 'Registry', 'smss.exe', 'csrss.exe', 'wininit.exe', 'winlogon.exe', 'services.exe', 'lsass.exe', 'atiesrxx.exe', 'amdfendrsr.exe', 'atieclxx.exe', 'MemCompression', 'ZhuDongFangYu.exe', 'wsctrlsvc.exe', 'AggregatorHost.exe', 'wlanext.exe', 'conhost.exe', 'spoolsv.exe', 'reWASDService.exe', 'AppleMobileDeviceService.exe', 'ABService.exe', 'mDNSResponder.exe', 'Everything.exe', 'SunloginClient.exe', 'RtkAudUService64.exe', 'gamingservices.exe', 'SearchIndexer.exe', 'MoUsoCoreWorker.exe', 'SecurityHealthService.exe', 'HsFreezerEx.exe', 'GameInputSvc.exe', 'TrafficProt.exe', 'HipsDaemon.exe','python.exe', 'pythonw.exe', 'qmbrowser.exe', 'reWASDEngine.exe', 'sihost.exe', 'sublime_text.exe', 'taskhostw.exe', 'SearchProtocolHost.exe','crash_handler.exe', 'crashpad_handler.exe', 'ctfmon.exe', 'dasHost.exe', 'dllhost.exe', 'dwm.exe', 'fontdrvhost.exe','RuntimeBroker.exe','taskhostw.exe''WeChatAppEx.exe', 'WeChatOCR.exe', 'WeChatPlayer.exe', 'WeChatUtility.exe', 'WidgetService.exe', 'Widgets.exe', 'WmiPrvSE.exe', 'Xmp.exe','QQScreenshot.exe', 'RadeonSoftware.exe', 'SakuraFrpService.exe', 'SakuraLauncher.exe', 'SearchHost.exe', 'SecurityHealthSystray.exe', 'ShellExperienceHost.exe', 'StartMenuExperienceHost.exe', 'SystemSettings.exe', 'SystemSettingsBroker.exe', 'TextInputHost.exe', 'TrafficMonitor.exe', 'UserOOBEBroker.exe','WeChatAppEx.exe','360zipUpdate.exe', 'AMDRSServ.exe', 'AMDRSSrcExt.exe', 'APlayer.exe', 'ApplicationFrameHost.exe', 'CPUMetricsServer.exe', 'ChsIME.exe', 'DownloadSDKServer.exe','QMWeiyun.exe'];save_input=[]
+                        if exe_name in pass_exe:
+                            print(f"当前窗口 {exe_name} 在冻结列表中，跳过冻结")
+                            return True
+                        # 仅当目标进程未挂起时才执行挂起
+                        is_stopped = False
+                        for proc in psutil.process_iter(['name', 'status']):
+                            try:
+                                if proc.info['name'] and proc.info['name'].lower() == exe_name.lower():
+                                    if proc.status() == psutil.STATUS_STOPPED:
+                                        is_stopped = True
+                                        break
+                            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                                continue
+                        # 判断exe_path是否在valid_apps的path中
+                        found_in_valid_apps = False
+                        for app in valid_apps:
+                            if exe_path and exe_path.lower() == app["path"].lower():
+                                found_in_valid_apps = True
+                                break
+                        if not found_in_valid_apps:
+                            is_stopped = True
+
+                        if not is_stopped:
+                            subprocess.Popen(
+                                ['pssuspend64.exe', exe_name],
+                                creationflags=subprocess.CREATE_NO_WINDOW
+                            )
                     else:
                         QMessageBox.warning(self, "提示", "未找到冻结工具，请检查路径")
                 return True
@@ -1876,6 +1951,7 @@ class GameSelector(QWidget):
                                 #self.current_index = 0
                                 #self.current_section = 0
                                 #self.more_section = 0
+                                self.in_floating_window = False
                                 if current_time < ((self.ignore_input_until)+2000):
                                     return
                                 self.ignore_input_until = pygame.time.get_ticks() + 500 
@@ -1923,7 +1999,18 @@ class GameSelector(QWidget):
                     return
         if self.is_mouse_simulation_running == True:
             return
+        
+        if hasattr(self, 'confirm_dialog') and self.confirm_dialog.isVisible():  # 如果确认弹窗显示中
+            print("确认弹窗显示中")
+            self.confirm_dialog.handle_gamepad_input(action)
+            return
+        
         if self.in_floating_window and self.floating_window:
+            # 如果 floating_window 有 confirm_dialog，优先转发
+            if hasattr(self.floating_window, 'confirm_dialog') and self.floating_window.confirm_dialog and self.floating_window.confirm_dialog.isVisible():
+                self.floating_window.handle_gamepad_input(action)
+                self.ignore_input_until = pygame.time.get_ticks() + 300 
+                return
             # 添加防抖检查
             if not self.floating_window.can_process_input():
                 return
@@ -1946,11 +2033,6 @@ class GameSelector(QWidget):
             elif action == 'Y':
                 self.floating_window.toggle_favorite()
             self.last_input_time = current_time
-            return
-        
-        if hasattr(self, 'confirm_dialog') and self.confirm_dialog.isVisible():  # 如果确认弹窗显示中
-            print("确认弹窗显示中")
-            self.confirm_dialog.handle_gamepad_input(action)
             return
 
         # 新增焦点切换逻辑
@@ -2009,6 +2091,14 @@ class GameSelector(QWidget):
                     self.toggle_favorite()  # 收藏/取消收藏游戏
                 elif action == 'X':  # X键开悬浮窗
                     self.show_more_window()  # 打开悬浮窗
+                elif action == 'LS' or action == 'RS' or action == 'GUIDE':  # L3或R3回桌面
+                    if current_time < ((self.ignore_input_until)+500):
+                        return
+                    self.ignore_input_until = pygame.time.get_ticks() + 500 
+                    if not self.in_floating_window and self.can_toggle_window():
+                        #self.exitdef()  # 退出程序
+                        self.hide_window()
+                        pyautogui.hotkey('win', 'd')
 
         # 更新最后一次按键时间
         self.last_input_time = current_time
@@ -2161,6 +2251,11 @@ class GameSelector(QWidget):
         
         self.floating_window.show()
         self.in_floating_window = True
+                # 重新加载按钮
+        for button in self.floating_window.buttons:
+            button.setParent(None)
+        self.floating_window.buttons.clear()
+        self.floating_window.create_buttons()
         self.floating_window.update_highlight()
 
     def execute_more_item(self, file=None):
@@ -2176,22 +2271,26 @@ class GameSelector(QWidget):
             current_file = sorted_files[self.floating_window.current_index]
     
         current_file["path"] = os.path.abspath(os.path.join("./morefloder/", current_file["path"]))
-    
-        # 更新最近使用列表
-        if "more_last_used" not in settings:
-            settings["more_last_used"] = []
-    
-        if current_file["name"] in settings["more_last_used"]:
-            settings["more_last_used"].remove(current_file["name"])
-        settings["more_last_used"].insert(0, current_file["name"])
-    
-        # 保存设置
-        with open(settings_path, "w", encoding="utf-8") as f:
-            json.dump(settings, f, indent=4)
-    
-        # 执行文件
-        print(f"执行文件: {current_file['path']}")
-        subprocess.Popen(current_file["path"], shell=True)
+        if current_file["name"] in self.floating_window.current_running_apps:
+            self.restore_window(get_target_path(current_file["path"]))
+        else:
+            # 更新最近使用列表
+            if "more_last_used" not in settings:
+                settings["more_last_used"] = []
+
+            if current_file["name"] in settings["more_last_used"]:
+                settings["more_last_used"].remove(current_file["name"])
+            settings["more_last_used"].insert(0, current_file["name"])
+
+            # 保存设置
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump(settings, f, indent=4)
+
+            # 执行文件
+            print(f"执行文件: {current_file['path']}")
+            self.hide_window()
+            subprocess.Popen(current_file["path"], shell=True)
+        self.floating_window.current_index = 0
         self.floating_window.update_highlight()
         self.floating_window.hide()
         self.in_floating_window = False
@@ -2552,6 +2651,18 @@ class GameControllerThread(QThread):
                         self.gamepad_signal.emit('BACK')
                     if buttons[mapping.start]:  # Start
                         self.gamepad_signal.emit('START')
+                    #if buttons[mapping.left_bumper]:  # LB
+                    #    self.gamepad_signal.emit('LB')
+                    #if buttons[mapping.right_bumper]:  # RB
+                    #    self.gamepad_signal.emit('RB')
+                    #if buttons[mapping.left_trigger]:  # LT
+                    #    self.gamepad_signal.emit('LT')
+                    #if buttons[mapping.right_trigger]:  # RT
+                    #    self.gamepad_signal.emit('RT')
+                    if buttons[mapping.left_stick_in]:  # LS
+                        self.gamepad_signal.emit('LS')
+                    if buttons[mapping.right_stick_in]:  # RS
+                        self.gamepad_signal.emit('RS')
 
                 time.sleep(0.01)
             except Exception as e:
@@ -2597,6 +2708,7 @@ class FloatingWindow(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         bat_dir = './morefloder'
+        self.current_running_apps = set()
         if not os.path.exists(bat_dir):
             os.makedirs(bat_dir)  # 创建目录
         self.select_add_btn = None  # 在初始化方法中定义
@@ -2623,6 +2735,11 @@ class FloatingWindow(QWidget):
         self.files = self.get_files()
         self.create_buttons(False)
     
+    def handle_gamepad_input(self, action):
+        """处理手柄输入，转发到 confirm_dialog"""
+        if hasattr(self, 'confirm_dialog') and self.confirm_dialog and self.confirm_dialog.isVisible():
+            self.confirm_dialog.handle_gamepad_input(action)
+            
     def can_process_input(self):
         """检查是否可以处理输入"""
         current_time = pygame.time.get_ticks()
@@ -2653,12 +2770,23 @@ class FloatingWindow(QWidget):
         """创建按钮"""
         self.files = self.get_files()
         if settitype:
-            time.sleep(0.1)
             if self.select_add_btn:  # 确保按钮已经定义
                 self.layout.removeWidget(self.select_add_btn)
             if self.select_del_btn:  # 确保按钮已经定义
                 self.layout.removeWidget(self.select_del_btn)
-
+        
+        # 获取当前运行的所有进程
+        self.current_running_apps.clear()
+        for process in psutil.process_iter(['pid', 'exe']):
+            try:
+                exe_path = process.info['exe']
+                if exe_path:
+                    for app in more_apps:
+                        if exe_path.lower() == app['path'].lower():
+                            self.current_running_apps.add(app['name'])
+                            break
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
         sorted_files = self.sort_files()
         for file in sorted_files:
             btn = QPushButton(file["name"])
@@ -2677,7 +2805,10 @@ class FloatingWindow(QWidget):
             """)
             if file["name"] in settings.get("more_favorites", []):
                 btn.setText(f"⭐ {file['name']}")
-
+            if file["name"] in self.current_running_apps:
+                btn.setText(f"🟢 {file['name']}")
+            if file["name"] in settings.get("more_favorites", []) and file["name"] in self.current_running_apps:
+                btn.setText(f"⭐🟢 {file['name']}")
             self.buttons.append(btn)
             self.layout.addWidget(btn)
             btn.clicked.connect(lambda checked, f=file: self.parent().execute_more_item(f))
@@ -3078,7 +3209,7 @@ class FloatingWindow(QWidget):
         
         print(f"快捷方式已创建: {shortcut_path}")
         self.add_item_window.hide()
-
+        load_morefloder_shortcuts()
         # 重新加载按钮
         for button in self.buttons:
             button.setParent(None)
@@ -3148,18 +3279,44 @@ class FloatingWindow(QWidget):
         """切换收藏状态"""
         sorted_files = self.sort_files()
         current_file = sorted_files[self.current_index]
-        
-        if "more_favorites" not in settings:
-            settings["more_favorites"] = []
-            
-        if current_file["name"] in settings["more_favorites"]:
-            settings["more_favorites"].remove(current_file["name"])
+        if current_file["name"] in self.current_running_apps:
+            # 创建确认弹窗
+            if not self.parent().is_mouse_simulation_running == True:
+                self.confirm_dialog = ConfirmDialog(f"是否关闭下列程序？\n{current_file['name']}")
+                result = self.confirm_dialog.exec_()  # 显示弹窗并获取结果
+                self.ignore_input_until = pygame.time.get_ticks() + 350  # 设置屏蔽时间为800毫秒
+            else:
+                result = False
+            # 关闭窗口
+            self.current_index = 0
+            self.update_highlight()
+            self.hide()
+            self.parent().in_floating_window = False
+            if not result == QDialog.Accepted:  # 如果按钮没被点击
+                return
+            for proc in psutil.process_iter(['pid', 'name', 'exe']):
+                try:
+                    # 检查进程的执行文件路径是否与指定路径匹配
+                    if proc.info['exe'] and os.path.abspath(proc.info['exe']) == os.path.abspath(current_file["name"]):
+                        print(f"找到进程: {proc.info['name']} (PID: {proc.info['pid']})")
+                        proc.terminate()  # 结束进程
+                        proc.wait()  # 等待进程完全终止
+                        return
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    # 处理权限问题和进程已消失的异常
+                    continue
         else:
-            settings["more_favorites"].append(current_file["name"])
-            
-        # 保存设置
-        with open(settings_path, "w", encoding="utf-8") as f:
-            json.dump(settings, f, indent=4)
+            if "more_favorites" not in settings:
+                settings["more_favorites"] = []
+
+            if current_file["name"] in settings["more_favorites"]:
+                settings["more_favorites"].remove(current_file["name"])
+            else:
+                settings["more_favorites"].append(current_file["name"])
+
+            # 保存设置
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump(settings, f, indent=4)
             
         # 重新加载按钮
         for button in self.buttons:
@@ -3399,7 +3556,22 @@ class SettingsWindow(QWidget):
         #""")
         #self.killexplorer_button.clicked.connect(self.toggle_killexplorer)
         #self.layout.addWidget(self.killexplorer_button)
-
+        self.custom_valid_apps_button = QPushButton("-自定义游戏进程列表-")
+        self.custom_valid_apps_button.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #444444;
+                color: white;
+                text-align: center;
+                padding: {int(10 * parent.scale_factor)}px;
+                border: none;
+                font-size: {int(16 * parent.scale_factor)}px;
+            }}
+            QPushButton:hover {{
+                background-color: #555555;
+            }}
+        """)
+        self.custom_valid_apps_button.clicked.connect(self.show_del_custom_valid_apps_dialog)
+        self.layout.addWidget(self.custom_valid_apps_button)
         # 添加回到主页时尝试冻结运行中的游戏按钮
         self.freeze_button = QPushButton(f"回主页时尝试冻结游戏 {'√' if settings.get('freeze', False) else '×'}")
         self.freeze_button.setStyleSheet(f"""
@@ -3457,6 +3629,358 @@ class SettingsWindow(QWidget):
         self.asdasgg_label.setStyleSheet(f"color: white; font-size: {int(14 * parent.scale_factor)}px;")
         self.asdasgg_label.setFixedHeight(int(50 * parent.scale_factor))  # 固定高度为30像素
         self.layout.addWidget(self.asdasgg_label)
+
+    def show_del_custom_valid_apps_dialog(self):
+        """显示删除自定义valid_apps条目的窗口"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("删除自定义游戏进程")
+        dialog.setWindowFlags(Qt.FramelessWindowHint | Qt.Popup)
+        dialog.setStyleSheet(f"""
+            QDialog {{
+                background-color: rgba(46, 46, 46, 0.95);
+                border-radius: {int(15 * self.parent().scale_factor)}px;
+                border: {int(2 * self.parent().scale_factor)}px solid #444444;
+            }}
+        """)
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(int(15 * self.parent().scale_factor))
+        layout.setContentsMargins(
+            int(20 * self.parent().scale_factor),
+            int(20 * self.parent().scale_factor),
+            int(20 * self.parent().scale_factor),
+            int(20 * self.parent().scale_factor)
+        )
+    
+        # 添加“+添加自定义进程”按钮
+        add_btn = QPushButton("+添加自定义进程")
+        add_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #008CBA;
+                color: white;
+                border-radius: {int(8 * self.parent().scale_factor)}px;
+                font-size: {int(16 * self.parent().scale_factor)}px;
+                padding: {int(10 * self.parent().scale_factor)}px;
+            }}
+            QPushButton:hover {{
+                background-color: #007B9E;
+            }}
+        """)
+        add_btn.clicked.connect(lambda: [dialog.accept(), self.show_custom_valid_apps_dialog()])
+        layout.addWidget(add_btn)
+    
+        # 获取自定义条目列表
+        custom_list = settings.get("custom_valid_apps", [])
+        if not custom_list:
+            label = QLabel("暂无自定义条目")
+            label.setStyleSheet("color: white; font-size: 16px;")
+            layout.addWidget(label)
+        else:
+            for idx, item in enumerate(custom_list):
+                btn = QPushButton(f"{item['name']} ({item['path']})")
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: #444444;
+                        color: white;
+                        text-align: left;
+                        padding: {int(10 * self.parent().scale_factor)}px;
+                        border: none;
+                        font-size: {int(16 * self.parent().scale_factor)}px;
+                    }}
+                    QPushButton:hover {{
+                        background-color: #3f3f3f;
+                        color: white;
+                    }}
+                """)
+                def handle_del(i=idx, b=btn):
+                    # 第一次点击变红
+                    if not hasattr(b, "_clicked_once"):
+                        b.setStyleSheet(f"""
+                            QPushButton {{
+                                background-color: #ff4444;
+                                color: yellow;
+                                text-align: left;
+                                padding: {int(10 * self.parent().scale_factor)}px;
+                                border: none;
+                                font-size: {int(16 * self.parent().scale_factor)}px;
+                            }}
+                        """)
+                        b.setText("确认删除？(再次点击)")
+                        b._clicked_once = True
+                    else:
+                        # 第二次点击删除
+                        del settings["custom_valid_apps"][i]
+                        # 从 valid_apps 中删除对应项
+                        for i_app, app in enumerate(valid_apps):
+                            if app["name"] == item["name"] and app["path"] == item["path"]:
+                                del valid_apps[i_app]
+                                break
+                        with open(settings_path, "w", encoding="utf-8") as f:
+                            json.dump(settings, f, indent=4)
+                        dialog.accept()
+                btn.clicked.connect(handle_del)
+                layout.addWidget(btn)
+    
+        dialog.setLayout(layout)
+        dialog.exec_()
+
+    def show_custom_valid_apps_dialog(self):
+        """显示自定义valid_apps添加界面"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("添加自定义游戏进程")
+        dialog.setWindowFlags(Qt.FramelessWindowHint | Qt.Popup)
+        dialog.setStyleSheet(f"""
+            QDialog {{
+                background-color: rgba(46, 46, 46, 0.95);
+                border-radius: {int(15 * self.parent().scale_factor)}px;
+                border: {int(2 * self.parent().scale_factor)}px solid #444444;
+            }}
+        """)
+        dialog.move(int(340 * self.parent().scale_factor), int(100 * self.parent().scale_factor))
+        dialog.setFixedWidth(int(600 * self.parent().scale_factor))
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(int(10 * self.parent().scale_factor))
+        layout.setContentsMargins(
+            int(20 * self.parent().scale_factor),
+            int(20 * self.parent().scale_factor),
+            int(20 * self.parent().scale_factor),
+            int(20 * self.parent().scale_factor)
+        )
+
+        # 名称输入（只读）
+        name_edit = QLineEdit()
+        name_edit.setPlaceholderText("点击选择游戏名称")
+        name_edit.setReadOnly(True)
+        name_edit.setFixedHeight(int(50 * self.parent().scale_factor))
+        name_edit.setStyleSheet(f"""
+            QLineEdit {{
+                background-color: rgba(255, 255, 255, 0.2);
+                color: white;
+                border: {int(1 * self.parent().scale_factor)}px solid #666666;
+                border-radius: {int(10 * self.parent().scale_factor)}px;
+                padding: {int(10 * self.parent().scale_factor)}px;
+                font-size: {int(20 * self.parent().scale_factor)}px;
+            }}
+            QLineEdit:hover {{
+                background-color: #3f3f3f;
+                color: white;
+            }}
+        """)
+        layout.addWidget(name_edit)
+
+        # 点击name_edit弹出选择窗口
+        def show_game_name_selector():
+            selector_dialog = QDialog(dialog)
+            selector_dialog.setWindowTitle("选择游戏名称")
+            selector_dialog.setWindowFlags(Qt.FramelessWindowHint | Qt.Popup)
+            selector_dialog.setStyleSheet(f"""
+                QDialog {{
+                    background-color: rgba(46, 46, 46, 0.98);
+                    border-radius: {int(10 * self.parent().scale_factor)}px;
+                    border: {int(2 * self.parent().scale_factor)}px solid #444444;
+                }}
+            """)
+            vbox = QVBoxLayout(selector_dialog)
+            vbox.setSpacing(int(10 * self.parent().scale_factor))
+            vbox.setContentsMargins(
+                int(20 * self.parent().scale_factor),
+                int(20 * self.parent().scale_factor),
+                int(20 * self.parent().scale_factor),
+                int(20 * self.parent().scale_factor)
+            )
+            # 列出所有游戏名称
+            for game in games:
+                btn = QPushButton(game["name"])
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: #444444;
+                        color: white;
+                        border-radius: {int(8 * self.parent().scale_factor)}px;
+                        font-size: {int(16 * self.parent().scale_factor)}px;
+                        padding: {int(10 * self.parent().scale_factor)}px;
+                    }}
+                    QPushButton:hover {{
+                        background-color: #555555;
+                    }}
+                """)
+                btn.clicked.connect(lambda checked, n=game["name"]: (name_edit.setText(n), selector_dialog.accept()))
+                vbox.addWidget(btn)
+            selector_dialog.setLayout(vbox)
+            selector_dialog.exec_()
+        name_edit.mousePressEvent = lambda event: show_game_name_selector()
+
+        # 路径输入
+        path_edit = QLineEdit()
+        path_edit.setPlaceholderText("路径（如 C:\\xxx\\xxx.exe）")
+        path_edit.setFixedHeight(int(50 * self.parent().scale_factor))
+        path_edit.setStyleSheet(f"""
+            QLineEdit {{
+                background-color: rgba(255, 255, 255, 0.1);
+                color: white;
+                border: {int(1 * self.parent().scale_factor)}px solid #444444;
+                border-radius: {int(10 * self.parent().scale_factor)}px;
+                padding: {int(10 * self.parent().scale_factor)}px;
+                font-size: {int(20 * self.parent().scale_factor)}px;
+            }}
+        """)
+        layout.addWidget(path_edit)
+
+        # 选择文件按钮
+        select_file_btn = QPushButton("手动选择exe")
+        select_file_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #5f5f5f;
+                color: white;
+                border: none;
+                border-radius: {int(8 * self.parent().scale_factor)}px;
+                padding: {int(8 * self.parent().scale_factor)}px {int(16 * self.parent().scale_factor)}px;
+                font-size: {int(14 * self.parent().scale_factor)}px;
+            }}
+            QPushButton:hover {{
+                background-color: #808080;
+            }}
+            QPushButton:pressed {{
+                background-color: #333333;
+            }}
+        """)
+        layout.addWidget(select_file_btn)
+
+        # 新增：选择运行中进程按钮
+        select_proc_btn = QPushButton("选择运行中进程")
+        select_proc_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #5f5f5f;
+                color: white;
+                border: none;
+                border-radius: {int(8 * self.parent().scale_factor)}px;
+                padding: {int(8 * self.parent().scale_factor)}px {int(16 * self.parent().scale_factor)}px;
+                font-size: {int(14 * self.parent().scale_factor)}px;
+            }}
+            QPushButton:hover {{
+                background-color: #808080;
+            }}
+            QPushButton:pressed {{
+                background-color: #333333;
+            }}
+        """)
+        layout.addWidget(select_proc_btn)
+
+        # 保存按钮
+        save_btn = QPushButton("保存")
+        save_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #008CBA;
+                color: white;
+                border: none;
+                border-radius: {int(8 * self.parent().scale_factor)}px;
+                padding: {int(10 * self.parent().scale_factor)}px {int(20 * self.parent().scale_factor)}px;
+                font-size: {int(16 * self.parent().scale_factor)}px;
+            }}
+            QPushButton:hover {{
+                background-color: #007B9E;
+            }}
+            QPushButton:pressed {{
+                background-color: #006F8A;
+            }}
+        """)
+        layout.addWidget(save_btn)
+
+        # 文件选择逻辑
+        def select_file():
+            file_dialog = QFileDialog(dialog)
+            file_dialog.setWindowTitle("选择可执行文件或快捷方式")
+            file_dialog.setNameFilter("可执行文件 (*.exe *.lnk)")
+            file_dialog.setFileMode(QFileDialog.ExistingFile)
+            if file_dialog.exec_():
+                selected_file = file_dialog.selectedFiles()[0]
+                selected_file = selected_file.replace('/', '\\')
+                path_edit.setText(selected_file)
+            self.show()  
+            dialog.show()
+        select_file_btn.clicked.connect(select_file)
+        # 选择运行中进程逻辑
+        def select_running_process():
+            proc_dialog = QDialog(dialog)
+            proc_dialog.setWindowTitle("选择运行中进程")
+            proc_dialog.setWindowFlags(Qt.FramelessWindowHint | Qt.Popup)
+            proc_dialog.setStyleSheet(f"""
+                QDialog {{
+                    background-color: rgba(46, 46, 46, 0.98);
+                    border-radius: {int(10 * self.parent().scale_factor)}px;
+                    border: {int(2 * self.parent().scale_factor)}px solid #444444;
+                }}
+            """)
+            vbox = QVBoxLayout(proc_dialog)
+            vbox.setSpacing(int(10 * self.parent().scale_factor))
+            vbox.setContentsMargins(
+                int(20 * self.parent().scale_factor),
+                int(20 * self.parent().scale_factor),
+                int(20 * self.parent().scale_factor),
+                int(20 * self.parent().scale_factor)
+            )
+
+            # 枚举所有有前台窗口且不是隐藏的进程
+            hwnd_pid_map = {}
+            def enum_window_callback(hwnd, lParam):
+                if win32gui.IsWindowVisible(hwnd) and win32gui.GetWindowText(hwnd):
+                    _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                    hwnd_pid_map[pid] = hwnd
+                return True
+            win32gui.EnumWindows(enum_window_callback, None)
+
+            # 收集进程信息
+            proc_list = []
+            for proc in psutil.process_iter(['pid', 'name', 'exe']):
+                try:
+                    if proc.info['pid'] in hwnd_pid_map and proc.info['exe'] and proc.info['name'].lower() != "explorer.exe":
+                        proc_list.append(proc)
+                except Exception:
+                    continue
+                
+            if not proc_list:
+                label = QLabel("没有检测到可用进程")
+                label.setStyleSheet("color: white; font-size: 16px;")
+                vbox.addWidget(label)
+            else:
+                for proc in proc_list:
+                    btn = QPushButton(f"{proc.info['name']} ({proc.info['exe']})")
+                    btn.setStyleSheet(f"""
+                        QPushButton {{
+                            background-color: #444444;
+                            color: white;
+                            border-radius: {int(8 * self.parent().scale_factor)}px;
+                            font-size: {int(14 * self.parent().scale_factor)}px;
+                            padding: {int(8 * self.parent().scale_factor)}px;
+                            text-align: left;
+                        }}
+                        QPushButton:hover {{
+                            background-color: #555555;
+                        }}
+                    """)
+                    btn.clicked.connect(lambda checked, exe=proc.info['exe']: (
+                        path_edit.setText(exe), proc_dialog.accept()
+                    ))
+                    vbox.addWidget(btn)
+
+            proc_dialog.setLayout(vbox)
+            proc_dialog.exec_()
+        select_proc_btn.clicked.connect(select_running_process)
+        # 保存逻辑
+        def save_custom():
+            name = name_edit.text().strip()
+            path = path_edit.text().strip()
+            if name and path:
+                if "custom_valid_apps" not in settings:
+                    settings["custom_valid_apps"] = []
+                settings["custom_valid_apps"].append({"name": name, "path": path})
+                with open(settings_path, "w", encoding="utf-8") as f:
+                    json.dump(settings, f, indent=4)
+                valid_apps.append({"name": name, "path": path})
+                name_edit.clear()
+                path_edit.clear()
+                dialog.hide()
+        save_btn.clicked.connect(save_custom)
+        dialog.setLayout(layout)
+        dialog.show()
         
     # 检查程序是否设置为开机自启
     def is_startup_enabled(self):
@@ -3497,11 +4021,10 @@ class SettingsWindow(QWidget):
         """切换 freeze 状态并保存设置"""
         settings["freeze"] = not settings.get("freeze", False)
         self.freeze_button.setText(f"回主页时尝试冻结游戏 {'√' if settings['freeze'] else '×'}")
-        
         # 保存设置
         with open(settings_path, "w", encoding="utf-8") as f:
             json.dump(settings, f, indent=4)
-
+        self.parent().freeze = settings["freeze"]
 
     def update_buttonsindexset(self, value):
         """更新主页游戏数量并保存设置"""
