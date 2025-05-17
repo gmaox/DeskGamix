@@ -3294,17 +3294,23 @@ class FloatingWindow(QWidget):
             self.parent().in_floating_window = False
             if not result == QDialog.Accepted:  # 如果按钮没被点击
                 return
-            for proc in psutil.process_iter(['pid', 'name', 'exe']):
-                try:
-                    # 检查进程的执行文件路径是否与指定路径匹配
-                    if proc.info['exe'] and os.path.abspath(proc.info['exe']) == os.path.abspath(current_file["name"]):
-                        print(f"找到进程: {proc.info['name']} (PID: {proc.info['pid']})")
-                        proc.terminate()  # 结束进程
-                        proc.wait()  # 等待进程完全终止
-                        return
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                    # 处理权限问题和进程已消失的异常
-                    continue
+            # 修正：用 more_apps 查找真实路径
+            exe_path = None
+            for app in more_apps:
+                if app["name"] == current_file["name"]:
+                    exe_path = app["path"]
+                    break
+            if exe_path:
+                for proc in psutil.process_iter(['pid', 'name', 'exe']):
+                    try:
+                        if proc.info['exe'] and os.path.abspath(proc.info['exe']) == os.path.abspath(exe_path):
+                            print(f"找到进程: {proc.info['name']} (PID: {proc.info['pid']})")
+                            proc.terminate()  # 结束进程
+                            proc.wait()  # 等待进程完全终止
+                            return
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                        continue
+            return
         else:
             if "more_favorites" not in settings:
                 settings["more_favorites"] = []
