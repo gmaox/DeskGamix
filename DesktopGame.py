@@ -4,11 +4,13 @@ import sys
 import json
 import threading
 import winreg
+from PyQt5 import QtWidgets
+from PyQt5 import QtGui
 import pygame
 import win32gui,win32process,psutil,win32api
-from PyQt5.QtWidgets import QApplication, QMessageBox, QSystemTrayIcon, QMenu , QVBoxLayout, QDialog, QGridLayout, QWidget, QPushButton, QLabel, QDesktopWidget, QHBoxLayout, QFileDialog, QSlider, QLineEdit, QProgressBar, QScrollArea, QFrame
-from PyQt5.QtGui import QFont, QPixmap, QIcon
-from PyQt5.QtCore import QDateTime, Qt, QThread, pyqtSignal, QTimer, QPoint  
+from PyQt5.QtWidgets import QApplication, QListWidgetItem, QMessageBox, QSystemTrayIcon, QMenu , QVBoxLayout, QDialog, QGridLayout, QWidget, QPushButton, QLabel, QDesktopWidget, QHBoxLayout, QFileDialog, QSlider, QLineEdit, QProgressBar, QScrollArea, QFrame
+from PyQt5.QtGui import QFont, QPixmap, QIcon, QColor
+from PyQt5.QtCore import QDateTime, QSize, Qt, QThread, pyqtSignal, QTimer, QPoint  
 import subprocess, time, os,win32con, ctypes, re, win32com.client, ctypes, time, pyautogui
 from ctypes import wintypes
 #PyInstaller --add-data "fav.ico;." DesktopGame.py -i '.\fav.ico' --uac-admin --noconsole
@@ -206,7 +208,365 @@ class MonitorRunningAppsThread(QThread):
         """停止线程"""
         self.running = False
         self.wait()  # 等待线程结束
+class ScreenshotLoaderThread(QThread):
+    """后台线程用于加载和缩放图片"""
+    screenshot_loaded = pyqtSignal(list)  # 信号，用于通知主线程加载完成
 
+    def __init__(self, screenshots, icon_size):
+        super().__init__()
+        self.screenshots = screenshots
+        self.icon_size = icon_size
+
+    def run(self):
+        loaded_screenshots = []
+        for path, game, ts in self.screenshots:
+            try:
+                pixmap = QtGui.QPixmap(path)
+                thumb = pixmap.scaled(
+                    self.icon_size, self.icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                )
+                loaded_screenshots.append((thumb, path, game, ts))
+            except Exception as e:
+                print(f"加载图片失败: {path}, 错误: {e}")
+        self.screenshot_loaded.emit(loaded_screenshots)
+
+class ScreenshotWindow(QDialog):
+    """截图浏览窗口，显示所有截图的缩略图"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("截图浏览")
+        self.setWindowFlags(Qt.FramelessWindowHint)# | Qt.Popup
+        self.resize(1800, 1000)
+        # 缩略图尺寸和缩放因子（假设 scale_factor 由外部提供或计算）
+        self.icon_size = 256 * getattr(self, 'scale_factor', 1.0)
+        
+        # 主列表控件：以图标模式显示截图
+        self.listWidget = QtWidgets.QListWidget(self)
+        self.listWidget.setViewMode(QtWidgets.QListView.IconMode)
+        self.listWidget.setIconSize(QSize(int(self.icon_size), int(self.icon_size)))
+        self.listWidget.setResizeMode(QtWidgets.QListWidget.Adjust)
+        self.listWidget.setMovement(QtWidgets.QListView.Static)
+        self.listWidget.setSpacing(10)
+        self.listWidget.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.listWidget.setFocus()
+        # 创建关闭按钮
+        self.closeButton = QPushButton("关闭窗口", self)
+        self.closeButton.setFixedHeight(50)
+        self.closeButton.setStyleSheet("""
+            QPushButton {
+                background-color: #444444;
+                color: white;
+                font-size: 16px;
+                border: none;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #555555;
+            }
+        """)
+        self.closeButton.clicked.connect(self.close)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(self.listWidget)
+        layout.addWidget(self.closeButton)
+        
+        self.setLayout(layout)
+        self.all_screenshots = []
+        self.current_screenshots = []
+        # 事件过滤：拦截按键处理快捷操作
+        self.listWidget.installEventFilter(self)
+        self.batch_mode = False
+
+        # 添加手柄输入相关属性
+        self.current_index = 0
+        self.last_input_time = 0
+        self.input_delay = 200
+        self.ignore_input_until = 0
+        self.buttons = []  # 用于存储列表项
+        self.update_highlight()  # 初始化高亮状态
+    def showEvent(self, event):
+        """窗口显示时触发重新加载截图"""
+        super().showEvent(event)
+        self.reload_screenshots()
+
+    def reload_screenshots(self):
+        """重新加载截图目录并启动后台线程"""
+        self.load_screenshots()
+
+        # 启动后台线程加载图片
+        self.loader_thread = ScreenshotLoaderThread(self.current_screenshots, self.icon_size)
+        self.loader_thread.screenshot_loaded.connect(self.on_screenshots_loaded)
+        self.loader_thread.finished.connect(self.update_highlight)  # 添加线程结束后调用 update_highlight
+        self.loader_thread.start()
+
+    def update_highlight(self):
+        """更新高亮状态"""
+        # 获取所有列表项
+        self.buttons = [self.listWidget.item(i) for i in range(self.listWidget.count())]
+        
+        # 确保 current_index 在有效范围内
+        if self.buttons:
+            self.current_index = max(0, min(self.current_index, len(self.buttons) - 1))
+            
+            # 设置当前选中项
+            self.listWidget.setCurrentItem(self.buttons[self.current_index])
+            
+            # 确保当前项可见
+            self.listWidget.scrollToItem(self.buttons[self.current_index])
+            
+            # 更新高亮背景
+            for i, item in enumerate(self.buttons):
+                if i == self.current_index:
+                    item.setBackground(QColor("#93ffff"))
+                else:
+                    item.setBackground(QColor("transparent"))
+
+    def load_screenshots(self):
+        """扫描截图目录，加载文件路径和元数据"""
+        self.all_screenshots = []
+        base_dir = "screenshot"
+        if not os.path.isdir(base_dir):
+            return
+        for game in os.listdir(base_dir):
+            game_dir = os.path.join(base_dir, game)
+            if not os.path.isdir(game_dir):
+                continue
+            for fname in os.listdir(game_dir):
+                if fname.lower().endswith(".png"):
+                    path = os.path.join(game_dir, fname)
+                    ts = os.path.getmtime(path)
+                    self.all_screenshots.append((path, game, ts))
+        self.all_screenshots.sort(key=lambda x: x[2], reverse=True)
+        self.current_screenshots = list(self.all_screenshots)
+
+    def on_screenshots_loaded(self, loaded_screenshots):
+        """更新 UI，显示加载完成的图片"""
+        self.listWidget.clear()
+        for thumb, path, game, ts in loaded_screenshots:
+            icon = QtGui.QIcon(thumb)
+            item = QListWidgetItem(icon, "")
+            item.setData(Qt.UserRole, path)
+            self.listWidget.addItem(item)
+    def get_row_count(self):
+        """获取每行的缩略图数量，默认6，可根据窗口宽度调整"""
+        return 6
+    def move_selection(self, offset):
+        """移动选择的截图"""
+        total_buttons = len(self.buttons)
+        new_index = self.current_index + offset
+        row_count = self.get_row_count()
+
+        # 上下键逻辑，循环跳转
+        if offset == -row_count:  # 上移一行
+            if new_index < 0:
+                column = self.current_index % row_count
+                new_index = (total_buttons - 1) - (total_buttons - 1) % row_count + column
+                if new_index >= total_buttons:
+                    new_index -= row_count
+        elif offset == row_count:  # 下移一行
+            if new_index >= total_buttons:
+                column = self.current_index % row_count
+                new_index = column
+
+        # 左右键逻辑，循环跳转
+        if offset == -1 and new_index < 0:
+            new_index = total_buttons - 1
+        elif offset == 1 and new_index >= total_buttons:
+            new_index = 0
+
+        # 更新索引并高亮
+        self.current_index = new_index
+        self.update_highlight()
+    def handle_gamepad_input(self, action):
+        """处理手柄输入"""
+        if hasattr(self, 'confirm_dialog') and self.confirm_dialog and self.confirm_dialog.isVisible():
+            self.confirm_dialog.handle_gamepad_input(action)
+            return
+        current_time = pygame.time.get_ticks()  # 获取当前时间（毫秒）
+        if current_time < self.ignore_input_until:
+            return
+        if current_time - self.last_input_time < self.input_delay:
+            return
+        if hasattr(self, 'is_fullscreen_preview') and self.is_fullscreen_preview:
+            if action == 'LEFT':
+                self.preview_index = (self.preview_index - 1) % len(self.current_screenshots)
+                self.is_fullscreen_preview.load_preview(self.preview_index)  # 修复调用
+                return
+            elif action == 'RIGHT':
+                self.preview_index = (self.preview_index + 1) % len(self.current_screenshots)
+                self.is_fullscreen_preview.load_preview(self.preview_index)  # 修复调用
+                return
+            elif action in ('A', 'B'):
+                self.is_fullscreen_preview.close()  # 修复调用
+                self.is_fullscreen_preview = None  # 清除引用
+                return
+        if action == 'A':
+            self.start_fullscreen_preview()
+        elif action == 'X':
+            self.start_filter_mode()
+        #elif action == 'Y':and self.batch_mode
+        #    self.toggle_batch_mode() 
+        elif action == 'Y':
+            self.delete_selected_items()
+        elif action == 'B':
+            self.close()
+        elif action == 'LEFT':
+            self.current_index = max(0, self.current_index - 1)
+            self.update_highlight()
+        elif action == 'RIGHT':
+            self.current_index = min(len(self.buttons) - 1, self.current_index + 1)
+            self.update_highlight()
+        elif action == 'UP':
+            self.move_selection(-self.get_row_count())
+        elif action == 'DOWN':
+            self.move_selection(self.get_row_count())
+
+    
+        self.last_input_time = current_time
+    
+    def start_fullscreen_preview(self):
+        """显示当前选中图片的全屏预览对话框"""
+        current_item = self.listWidget.currentItem()
+        if not current_item:
+            return
+        path = current_item.data(Qt.UserRole)
+        try:
+            index = [item[0] for item in self.current_screenshots].index(path)
+        except ValueError:
+            index = 0
+        self.preview_index = index
+    
+        self.is_fullscreen_preview = QtWidgets.QDialog(self, flags=Qt.Dialog)
+        self.is_fullscreen_preview.setWindowFlag(Qt.Window)
+        self.is_fullscreen_preview.showFullScreen()
+        
+        # 创建主布局
+        main_layout = QtWidgets.QVBoxLayout(self.is_fullscreen_preview)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        #self.is_fullscreen_preview.setAttribute(Qt.WA_TranslucentBackground)
+        #self.is_fullscreen_preview.setStyleSheet("""
+        #    QDialog {
+        #    background-color: rgba(0, 0, 0, 0.6); /* 设置半透明背景 */
+        #    }
+        #""")
+        
+        # 添加信息栏到顶部
+        info_bar = QtWidgets.QLabel(self.is_fullscreen_preview)
+        info_bar.setStyleSheet("""
+            QLabel {
+                background-color: rgba(0, 0, 0, 200);
+                color: white;
+                font-size: 16px;
+                padding: 10px;
+                border-bottom: 1px solid #333;
+            }
+        """)
+        info_bar.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        info_bar.setFixedHeight(40)  # 设置固定高度
+        main_layout.addWidget(info_bar)
+        
+        # 创建图片标签
+        label = QtWidgets.QLabel(self.is_fullscreen_preview)
+        label.setAlignment(Qt.AlignCenter)
+        label.setStyleSheet("background-color: black;")
+        main_layout.addWidget(label)
+    
+        def load_preview(idx):
+            path = self.current_screenshots[idx][0]
+            pix = QtGui.QPixmap(path)
+            screen = QtWidgets.QApplication.primaryScreen().size()
+            # 计算90%的尺寸
+            scaled_width = int(screen.width() * 0.9)
+            scaled_height = int(screen.height() * 0.9)
+            scaled = pix.scaled(scaled_width, scaled_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            label.setPixmap(scaled)
+    
+            # 更新信息栏内容
+            game_name = self.current_screenshots[idx][1]
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self.current_screenshots[idx][2]))
+            info_bar.setText(f"{game_name} / {timestamp}  （{idx + 1}/{len(self.current_screenshots)}）    ←→/切换图片    A,B/返回")
+    
+        # 将 load_preview 方法绑定到 is_fullscreen_preview 对象
+        self.is_fullscreen_preview.load_preview = load_preview
+        self.is_fullscreen_preview.load_preview(self.preview_index)
+    
+        def preview_key(event):
+            key = event.key()
+            if key == Qt.Key_Left:
+                self.preview_index = (self.preview_index - 1) % len(self.current_screenshots)
+                self.is_fullscreen_preview.load_preview(self.preview_index)
+            elif key == Qt.Key_Right:
+                self.preview_index = (self.preview_index + 1) % len(self.current_screenshots)
+                self.is_fullscreen_preview.load_preview(self.preview_index)
+            elif key in (Qt.Key_Escape, Qt.Key_A, Qt.Key_B):
+                self.is_fullscreen_preview.close()
+    
+        self.is_fullscreen_preview.keyPressEvent = preview_key
+        self.is_fullscreen_preview.raise_()
+    
+        def preview_key(event):
+            key = event.key()
+            if key == Qt.Key_Left:
+                self.preview_index = (self.preview_index - 1) % len(self.current_screenshots)
+                self.is_fullscreen_preview.load_preview(self.preview_index)
+            elif key == Qt.Key_Right:
+                self.preview_index = (self.preview_index + 1) % len(self.current_screenshots)
+                self.is_fullscreen_preview.load_preview(self.preview_index)
+            elif key in (Qt.Key_Escape, Qt.Key_A, Qt.Key_B):
+                self.is_fullscreen_preview.close()
+    
+        self.is_fullscreen_preview.keyPressEvent = preview_key
+        self.is_fullscreen_preview.raise_()
+
+    def start_filter_mode(self):
+        """弹出对话框选择游戏名进行筛选"""
+        # 构建游戏名列表，包括"全部游戏"选项
+        games = ["全部游戏"] + sorted({g for (_, g, _) in self.all_screenshots})
+        game, ok = QtWidgets.QInputDialog.getItem(self, "筛选游戏", "选择游戏：", games, 0, False)
+        if ok and game:
+            if game == "全部游戏":
+                self.current_screenshots = list(self.all_screenshots)
+            else:
+                self.current_screenshots = [item for item in self.all_screenshots if item[1] == game]
+        # 更新列表控件
+        self.listWidget.clear()
+        for path, game, ts in self.current_screenshots:
+            icon = QtGui.QIcon(QtGui.QPixmap(path).scaled(self.icon_size, self.icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            item = QListWidgetItem(icon, "")
+            item.setData(Qt.UserRole, path)
+            self.listWidget.addItem(item)
+
+
+    #def toggle_batch_mode(self):
+    #    """切换批量多选模式"""
+    #    if not self.batch_mode:
+    #        # 进入多选模式
+    #        self.batch_mode = True
+    #        self.listWidget.setSelectionMode(QtWidgets.QAbstractItemView.MultiSelection)
+    #    else:
+    #        # 退出多选模式
+    #        self.batch_mode = False
+    #        self.listWidget.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+    #        self.listWidget.clearSelection()
+    def delete_selected_items(self):
+        """删除选中的截图文件"""
+        items = self.listWidget.selectedItems()
+        if not items:
+            return
+        # 弹出确认对话框
+        for item in items:
+            path = item.data(Qt.UserRole)  # 修复：从选中项获取路径
+            self.confirm_dialog = ConfirmDialog(f"确认删除选中的截图？\n{path}")
+            if self.confirm_dialog.exec_():
+                if os.path.exists(path):
+                    os.remove(path)
+                row = self.listWidget.row(item)
+                self.listWidget.takeItem(row)
+                # 同时从数据列表移除
+                self.all_screenshots = [s for s in self.all_screenshots if s[0] != path]
+                self.current_screenshots = [s for s in self.current_screenshots if s[0] != path]
+                self.reload_screenshots()
 class ConfirmDialog(QDialog):
     def __init__(self, variable1, scale_factor=1.0):
         super().__init__()
@@ -581,11 +941,11 @@ class GameSelector(QWidget):
                 self.grid_layout.addWidget(button, 0, index)
                 self.buttons.append(button)
             
-            # 添加“更多”按钮
+            # 添加"更多"按钮
             more_button = QPushButton("🟦🟦\n🟦🟦")
             more_button.setFont(QFont("Microsoft YaHei", 40))
             more_button.setFixedSize(int(140 * self.scale_factor2), int(140 * self.scale_factor2))
-            more_button.clicked.connect(self.switch_to_all_software)  # 绑定“更多”按钮的功能
+            more_button.clicked.connect(self.switch_to_all_software)  # 绑定"更多"按钮的功能
             self.grid_layout.addWidget(more_button, 0, len(sorted_games[:self.buttonsindexset]))  # 添加到最后一列
             self.buttons.append(more_button)
 
@@ -708,20 +1068,20 @@ class GameSelector(QWidget):
                 }}
             """)
             if i == 0:
-                btn.setText("🖱️")
-                btn.clicked.connect(self.mouse_simulation)
-            elif i == 1:
-                btn.setText("🔇")
-                btn.clicked.connect(self.toggle_mute)
-            elif i == 2:
                 btn.setText("🔉")
                 btn.clicked.connect(self.decrease_volume)
-            elif i == 3:
+            elif i == 1:
                 btn.setText("🔊")
                 btn.clicked.connect(self.increase_volume)
+            elif i == 2:
+                btn.setText("🔇")
+                btn.clicked.connect(self.toggle_mute)
+            elif i == 3:
+                btn.setText("🖱️")
+                btn.clicked.connect(self.mouse_simulation)
             elif i == 4:
-                btn.setText("🔒")
-                btn.clicked.connect(self.lock_system)
+                btn.setText("🗺️")
+                btn.clicked.connect(self.show_img_window)
             elif i == 5:
                 btn.setText("💤")
                 btn.clicked.connect(self.sleep_system)
@@ -776,7 +1136,7 @@ class GameSelector(QWidget):
             controller_name = controller_data['controller'].get_name()
             self.update_controller_status(controller_name)
         # 右侧文字
-        right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.94")
+        right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.95")
         right_label.setStyleSheet(f"""
             QLabel {{
                 font-family: "Microsoft YaHei"; 
@@ -827,6 +1187,12 @@ class GameSelector(QWidget):
         self.tray_icon.setContextMenu(tray_menu)  # 设置托盘菜单
         self.tray_icon.show()  # 显示托盘图标
 
+    def show_img_window(self):
+        current_time = pygame.time.get_ticks()
+        self.ignore_input_until = current_time + 500
+        if not hasattr(self, 'screenshot_window'):
+            self.screenshot_window = ScreenshotWindow(self)
+        self.screenshot_window.show()
     def update_time(self):
         """更新时间显示"""
         current_time = QDateTime.currentDateTime().toString(" HH : mm   dddd")
@@ -845,7 +1211,7 @@ class GameSelector(QWidget):
         hwnd = int(self.winId())
         ctypes.windll.user32.ShowWindow(hwnd, 0)  # 0=SW_HIDE
     def switch_to_all_software(self):
-        """切换到“所有软件”界面"""
+        """切换到"所有软件"界面"""
         self.scale_factor2 = self.scale_factor  # 用于按钮和图像的缩放因数
         self.current_index = 0
         self.more_section = 1
@@ -1012,7 +1378,7 @@ class GameSelector(QWidget):
         left_button_down = False
         right_button_down = False
         screen_width, screen_height = pyautogui.size()
-        pyautogui.moveTo(int(screen_width/2), int(screen_height/1.5))  # 移动鼠标到屏幕中心
+        pyautogui.moveTo(int(screen_width/2), int(screen_height/2))  # 移动鼠标到屏幕中心
         time.sleep(0.7) 
         #print(f'所有按键: {joystick.get_button(mapping.button_a)}, {joystick.get_button(mapping.button_b)}, {joystick.get_button(mapping.button_x)}, {joystick.get_button(mapping.button_y)}, {joystick.get_button(mapping.start)}, {joystick.get_button(mapping.back)}')
         #print(f"X轴: {x_axis:.2f}, Y轴: {y_axis:.2f}, 右扳机: {rt_val:.2f}, 左扳机: {lt_val:.2f}, 滚动: {scrolling_up}, {scrolling_down}")
@@ -1027,12 +1393,12 @@ class GameSelector(QWidget):
                         joystick.init()
                         joysticks.append(joystick)
                         joystick_states[joystick.get_instance_id()] = {"scrolling_up": False, "scrolling_down": False}
-                        print(f"手柄已连接: {joystick.get_name()}")
+                        #print(f"手柄已连接: {joystick.get_name()}")
     
                     elif event.type == pygame.JOYDEVICEREMOVED:
                         for joystick in joysticks:
                             if joystick.get_instance_id() == event.instance_id:
-                                print(f"手柄已断开: {joystick.get_name()}")
+                                #print(f"手柄已断开: {joystick.get_name()}")
                                 joysticks.remove(joystick)
                                 del joystick_states[event.instance_id]
                                 break
@@ -1133,20 +1499,28 @@ class GameSelector(QWidget):
                     # 读取右摇杆轴值（2: X 轴，3: Y 轴）
                     rx_axis = joystick.get_axis(2)  # 右摇杆 X 轴
                     ry_axis = joystick.get_axis(3)  # 右摇杆 Y 轴
-
-                    # 根据左扳机值切换灵敏度（优先级高于右扳机）
-                    if lt_val > 0.8:  # 如果左扳机值大于 0.8，设置为高灵敏度
-                        sensitivity = SENS_HIGH
-                    elif rt_val > 0.5:  # 如果右扳机值大于 0.5，设置为低灵敏度
-                        sensitivity = SENS_LOW
-                        sensitivity1 = SENS_HIGH
+                    def backandstart_pressed():
+                        """检查 BACK 和 START 按钮是否被按下"""
+                        if joystick.get_button(mapping.back):  # BACK+lt打开快速设置
+                            pyautogui.hotkey('win', 'a')  # 按下CTRL+A键
+                            screen_width, screen_height = pyautogui.size()
+                            pyautogui.moveTo(screen_width * 7 / 8, screen_height * 6 / 8)  # 移动鼠标至屏幕右下角（1/8的位置）
+                            time.sleep(0.5)  # 延迟0.2秒，避免重复触发
                         if joystick.get_button(mapping.start):  # START+rt打开放大镜
                             if not self.is_magnifier_open():
                                 self.open_magnifier()
                             else:
                                 self.close_magnifier()
                             time.sleep(0.5)  # 延迟0.2秒，避免重复触发
-                    #elif rt_val > 0.5 and lt_val > 0.8:  # 如果两个扳机都按下(这样按有病吧？)
+                    # 根据左扳机值切换灵敏度（优先级高于右扳机）
+                    if lt_val > 0.5:  # 如果左扳机值大于 0.5，设置为高灵敏度
+                        sensitivity = SENS_HIGH
+                        backandstart_pressed()
+                    elif rt_val > 0.5:  # 如果右扳机值大于 0.5，设置为低灵敏度
+                        sensitivity = SENS_LOW
+                        sensitivity1 = SENS_HIGH
+                        backandstart_pressed()
+                    #elif rt_val > 0.5 and lt_val > 0.5:  # 如果两个扳机都按下
                     #    sensitivity = SENS_HIGH
                     #    sensitivity1 = SENS_HIGH
                     else:  # 默认设置
@@ -1165,6 +1539,7 @@ class GameSelector(QWidget):
                         time.sleep(0.5)  # 延迟0.2秒，避免重复触发
                     if joystick.get_button(mapping.back):  # SELECT键模拟win+tab
                         pyautogui.hotkey('win', 'tab')
+                        pyautogui.moveTo(int(screen_width/2), int(screen_height/2))  # 移动鼠标到屏幕中心
                         time.sleep(0.5)  # 延迟0.2秒，避免重复触发
 
                     # 使用右摇杆控制鼠标移动（低灵敏度）
@@ -1230,8 +1605,8 @@ class GameSelector(QWidget):
         """降低系统音量"""
         ctypes.windll.user32.keybd_event(0xAE, 0, 0, 0)  # VK_VOLUME_DOWN
         ctypes.windll.user32.keybd_event(0xAE, 0, 2, 0)  # KEYEVENTF_KEYUP
-    def lock_system(self):
-        ctypes.windll.user32.LockWorkStation()
+    #def lock_system(self):
+    #    ctypes.windll.user32.LockWorkStation()
 
     def sleep_system(self):
         #os.system("rundll32.exe powrprof.dll,SetSuspendState 0,1,0")
@@ -1331,7 +1706,7 @@ class GameSelector(QWidget):
         #    self.setWindowOpacity(1)
         # 更新游戏名称标签
         if self.current_section == 0:  # 游戏选择区域
-            if self.more_section == 0 and self.current_index == self.buttonsindexset:  # 如果是“更多”按钮
+            if self.more_section == 0 and self.current_index == self.buttonsindexset:  # 如果是"更多"按钮
                 self.game_name_label.setText("所有软件")
             else:
                 self.game_name_label.setText(sorted_games[self.current_index]["name"])
@@ -1694,10 +2069,10 @@ class GameSelector(QWidget):
                 with focus_lock:
                     if exe_name == "DesktopGame.exe":
                         focus = True
-                        print("焦点在游戏窗口")
+                        #print("焦点在游戏窗口")
                     else:
                         focus = False
-                        print("焦点不在游戏窗口")
+                        #print("焦点不在游戏窗口")
             time.sleep(0.1)  # 稍微休眠，避免线程占用过多 CPU
     
     # 启动焦点判断线程
@@ -1738,7 +2113,7 @@ class GameSelector(QWidget):
         image_path = game.get("image-path", "")
         self.ignore_input_until = pygame.time.get_ticks() + 600
 
-        if self.more_section == 0 and self.current_index == self.buttonsindexset: # 如果点击的是“更多”按钮
+        if self.more_section == 0 and self.current_index == self.buttonsindexset: # 如果点击的是"更多"按钮
             self.switch_to_all_software()
             return
         #冻结相关
@@ -1870,7 +2245,7 @@ class GameSelector(QWidget):
                 #冻结相关
                 if self.freeze:
                     if os.path.exists("pssuspend64.exe"):
-                        pass_exe=['DesktopGame.exe', 'ZFGameBrowser.exe', 'amdow.exe', 'audiodg.exe', 'cmd.exe', 'cncmd.exe', 'copyq.exe', 'frpc.exe', 'gamingservicesnet.exe', 'memreduct.exe', 'mmcrashpad_handler64.exe','GameBarPresenceWriter.exe', 'HipsTray.exe', 'HsFreezer.exe', 'HsFreezerMagiaMove.exe', 'PhoneExperienceHost.exe','PixPin.exe', 'PresentMon-x64.exe','msedgewebview2.exe', 'plugin_host-3.3.exe', 'plugin_host-3.8.exe','explorer.exe','System Idle Process', 'System', 'svchost.exe', 'Registry', 'smss.exe', 'csrss.exe', 'wininit.exe', 'winlogon.exe', 'services.exe', 'lsass.exe', 'atiesrxx.exe', 'amdfendrsr.exe', 'atieclxx.exe', 'MemCompression', 'ZhuDongFangYu.exe', 'wsctrlsvc.exe', 'AggregatorHost.exe', 'wlanext.exe', 'conhost.exe', 'spoolsv.exe', 'reWASDService.exe', 'AppleMobileDeviceService.exe', 'ABService.exe', 'mDNSResponder.exe', 'Everything.exe', 'SunloginClient.exe', 'RtkAudUService64.exe', 'gamingservices.exe', 'SearchIndexer.exe', 'MoUsoCoreWorker.exe', 'SecurityHealthService.exe', 'HsFreezerEx.exe', 'GameInputSvc.exe', 'TrafficProt.exe', 'HipsDaemon.exe','python.exe', 'pythonw.exe', 'qmbrowser.exe', 'reWASDEngine.exe', 'sihost.exe', 'sublime_text.exe', 'taskhostw.exe', 'SearchProtocolHost.exe','crash_handler.exe', 'crashpad_handler.exe', 'ctfmon.exe', 'dasHost.exe', 'dllhost.exe', 'dwm.exe', 'fontdrvhost.exe','RuntimeBroker.exe','taskhostw.exe''WeChatAppEx.exe', 'WeChatOCR.exe', 'WeChatPlayer.exe', 'WeChatUtility.exe', 'WidgetService.exe', 'Widgets.exe', 'WmiPrvSE.exe', 'Xmp.exe','QQScreenshot.exe', 'RadeonSoftware.exe', 'SakuraFrpService.exe', 'SakuraLauncher.exe', 'SearchHost.exe', 'SecurityHealthSystray.exe', 'ShellExperienceHost.exe', 'StartMenuExperienceHost.exe', 'SystemSettings.exe', 'SystemSettingsBroker.exe', 'TextInputHost.exe', 'TrafficMonitor.exe', 'UserOOBEBroker.exe','WeChatAppEx.exe','360zipUpdate.exe', 'AMDRSServ.exe', 'AMDRSSrcExt.exe', 'APlayer.exe', 'ApplicationFrameHost.exe', 'CPUMetricsServer.exe', 'ChsIME.exe', 'DownloadSDKServer.exe','QMWeiyun.exe'];save_input=[]
+                        pass_exe=['DesktopGame.exe', 'ZFGameBrowser.exe', 'amdow.exe', 'audiodg.exe', 'cmd.exe', 'cncmd.exe', 'copyq.exe', 'frpc.exe', 'gamingservicesnet.exe', 'memreduct.exe', 'mmcrashpad_handler64.exe','GameBarPresenceWriter.exe', 'HipsTray.exe', 'HsFreezer.exe', 'HsFreezerMagiaMove.exe', 'PhoneExperienceHost.exe','PixPin.exe', 'PresentMon-x64.exe','msedgewebview2.exe', 'plugin_host-3.3.exe', 'plugin_host-3.8.exe','explorer.exe','System Idle Process', 'System', 'svchost.exe', 'Registry', 'smss.exe', 'csrss.exe', 'wininit.exe', 'winlogon.exe', 'services.exe', 'lsass.exe', 'atiesrxx.exe', 'amdfendrsr.exe', 'atieclxx.exe', 'MemCompression', 'ZhuDongFangYu.exe', 'wsctrlsvc.exe', 'AggregatorHost.exe', 'wlanext.exe', 'conhost.exe', 'spoolsv.exe', 'reWASDService.exe', 'AppleMobileDeviceService.exe', 'ABService.exe', 'mDNSResponder.exe', 'Everything.exe', 'SunloginClient.exe', 'RtkAudUService64.exe', 'gamingservices.exe', 'SearchIndexer.exe', 'MoUsoCoreWorker.exe', 'SecurityHealthService.exe', 'HsFreezerEx.exe', 'GameInputSvc.exe', 'TrafficProt.exe', 'HipsDaemon.exe','python.exe', 'pythonw.exe', 'qmbrowser.exe', 'reWASDEngine.exe', 'sihost.exe', 'sublime_text.exe', 'taskhostw.exe', 'SearchProtocolHost.exe','crash_handler.exe', 'crashpad_handler.exe', 'ctfmon.exe', 'dasHost.exe', 'dllhost.exe', 'dwm.exe', 'fontdrvhost.exe','RuntimeBroker.exe','taskhostw.exe''WeChatAppEx.exe', 'WeChatOCR.exe', 'WeChatPlayer.exe', 'WeChatUtility.exe', 'WidgetService.exe', 'Widgets.exe', 'WmiPrvSE.exe', 'Xmp.exe','QQScreenshot.exe', 'RadeonSoftware.exe', 'SakuraFrpService.exe', 'SakuraLauncher.exe', 'SearchHost.exe', 'SecurityHealthSystray.exe', 'ShellExperienceHost.exe', 'StartMenuExperienceHost.exe', 'SystemSettings.exe', 'SystemSettingsBroker.exe', 'TextInputHost.exe', 'TrafficMonitor.exe', 'UserOOBEBroker.exe','WeChatAppEx.exe','360zipUpdate.exe', 'AMDRSServ.exe', 'AMDRSSrcExt.exe', 'APlayer.exe', 'ApplicationFrameHost.exe', 'CPUMetricsServer.exe', 'ChsIME.exe', 'DownloadSDKServer.exe','QMWeiyun.exe']
                         if exe_name in pass_exe:
                             print(f"当前窗口 {exe_name} 在冻结列表中，跳过冻结")
                             return True
@@ -1919,28 +2294,204 @@ class GameSelector(QWidget):
         
         if current_time - self.last_input_time < self.input_delay:
             return
+        # 检查 LS 和 RS 键是否同时按下
+        if action in ('LS', 'RS'):
+            # 获取当前手柄对象和映射
+            for controller_data in self.controller_thread.controllers.values():
+                controller = controller_data['controller']
+                mapping = controller_data['mapping']
+                ls_pressed = controller.get_button(mapping.left_stick_in)
+                rs_pressed = controller.get_button(mapping.right_stick_in)
+                if ls_pressed and rs_pressed:
+                    self.ignore_input_until = pygame.time.get_ticks() + 3000 
+                    print("LS和RS同时按下！正在截图...")
+                    screenshot = pyautogui.screenshot()
+                
+                    # 智能识别当前游戏名称
+                    def get_current_game_name():
+                        try:
+                            hwnd = win32gui.GetForegroundWindow()
+                            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                            exe_path = psutil.Process(pid).exe()
+                            exe_path = exe_path.lower()
+                            # 在 valid_apps 里查找匹配的游戏名
+                            for app in valid_apps:
+                                if app["path"].lower() == exe_path:
+                                    return app["name"]
+                        except Exception as e:
+                            print(f"识别游戏名失败: {e}")
+                        return "other"
+                
+                    game_name = get_current_game_name()
+                    # 生成保存路径
+                    now_str = time.strftime("%Y%m%d_%H%M%S")
+                    screenshot_dir = os.path.join(program_directory, "screenshot", game_name)
+                    os.makedirs(screenshot_dir, exist_ok=True)
+                    screenshot_path = os.path.join(screenshot_dir, f"{now_str}.png")
+                    screenshot.save(screenshot_path)
+                    print(f"截图已保存到 {screenshot_path}")
+                
+                    # 新增：截图悬浮窗
+                    class ScreenshotDialog(QDialog):
+                        def __init__(self, image_path, parent=None):
+                            super().__init__(parent)
+                            self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+                            self.setAttribute(Qt.WA_TranslucentBackground)
+                            self.setModal(False)
+                            self.setFixedSize(480, 160)
+                    
+                            # 用QWidget做内容容器，设置背景和圆角
+                            content_widget = QWidget(self)
+                            content_widget.setObjectName("content_widget")
+                            content_widget.setGeometry(0, 0, 480, 160)
+                            content_widget.setStyleSheet("""
+                                QWidget#content_widget {
+                                    background-color: rgba(30, 30, 30, 230);
+                                    border-radius: 12px;
+                                }
+                            """)
+                    
+                            main_layout = QHBoxLayout(content_widget)
+                            main_layout.setContentsMargins(16, 16, 16, 16)  # 适当内边距
+                    
+                            # 左侧图片
+                            pixmap = QPixmap(image_path).scaled(180, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                            img_label = QLabel()
+                            img_label.setPixmap(pixmap)
+                            img_label.setFixedSize(180, 120)
+                            img_label.setStyleSheet("background: transparent; margin: 0px; padding: 0px;")
+                            main_layout.addWidget(img_label)
+                    
+                            # 右侧文字
+                            text_layout = QVBoxLayout()
+                            text_layout.setContentsMargins(0, 0, 0, 0)
+                            tip_label = QLabel(f"  截图已保存\n  {game_name}\n  {now_str}.png")
+                            tip_label.setStyleSheet("color: white; font-size: 18px; font-weight: bold; background: transparent; margin: 0px; padding: 0px;")
+                            tip_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                            text_layout.addWidget(tip_label)
+                            main_layout.addLayout(text_layout)
+                    
+                            self.move(20, 20)
+                            self.show()
+                    
+                            QTimer.singleShot(2000, self.close)
+                
+                    ScreenshotDialog(screenshot_path, self)
         # 检查 Back 和 Start 键是否同时按下
         if action in ('BACK', 'START'):
-            if self.back_start_pressed_time is None:
-                self.back_start_pressed_time = time.time()  # 记录按下时间
-                self.back_start_action = {action}  # 初始化按下的键集合
-            else:
-                self.back_start_action.add(action)  # 添加当前按下的键
-                if len(self.back_start_action) == 2:  # 检查是否同时按下两个键
-                    elapsed_time = time.time() - self.back_start_pressed_time
-                    if 2 <= elapsed_time <= 3: 
-                        self.mouse_simulation(True)  # 开启鼠标映射
-                        self.back_start_pressed_time = None  # 重置按键按下时间
-                        self.back_start_action = set()
-                    elif elapsed_time > 3: 
-                        print("重置状态")
-                        self.back_start_pressed_time = None
-                        self.back_start_action = set()
-        else:  # 如果松开了任意一个键
-            print("松开了 Back 或 Start 键")
-            self.back_start_pressed_time = None  # 重置计时
-            self.back_start_action = set()
-
+            # 获取当前手柄对象和映射
+            for controller_data in self.controller_thread.controllers.values():
+                controller = controller_data['controller']
+                mapping = controller_data['mapping']
+                back_pressed = controller.get_button(mapping.back)
+                start_pressed = controller.get_button(mapping.start)
+                if back_pressed and start_pressed:
+                    print("Back和Start同时按下！")
+                    # 弹出进度条悬浮窗
+                    class ProgressDialog(QDialog):
+                        def __init__(self, parent=None):
+                            super().__init__(parent)
+                            self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+                            self.setAttribute(Qt.WA_TranslucentBackground)
+                            self.setWindowOpacity(0.85)
+                            self.setModal(True)
+                    
+                            # 内容容器，设置背景和圆角
+                            content_widget = QWidget(self)
+                            content_widget.setObjectName("content_widget")
+                            content_widget.setGeometry(0, 0, 420, 120)
+                            content_widget.setStyleSheet("""
+                                QWidget#content_widget {
+                                    background-color: rgba(30, 30, 30, 230);
+                                    border-radius: 10px;
+                                }
+                            """)
+                    
+                            # 主布局放在内容容器上
+                            main_layout = QVBoxLayout(content_widget)
+                            main_layout.setContentsMargins(10, 10, 10, 10)
+                    
+                            # 创建提示标签
+                            self.prompt_label = QLabel("持续按住触发鼠标模拟...")
+                            self.prompt_label.setStyleSheet("color: white; font-size: 14px; background: transparent;")
+                            self.prompt_label.setAlignment(Qt.AlignCenter)
+                            main_layout.addWidget(self.prompt_label)
+                    
+                            # 创建进度条容器
+                            progress_container = QFrame()
+                            progress_container.setStyleSheet("""
+                                QFrame {
+                                    background-color: rgba(0, 0, 0, 125);
+                                    border: 1px solid black;
+                                    border-radius: 5px;
+                                }
+                            """)
+                            progress_layout = QVBoxLayout(progress_container)
+                            progress_layout.setContentsMargins(10, 5, 10, 5)
+                    
+                            # 创建进度条标签
+                            self.label = QLabel("0%")
+                            self.label.setStyleSheet("""
+                                QLabel {
+                                    background-color: green;
+                                    color: white;
+                                    font-size: 16px;
+                                    border-radius: 3px;
+                                }
+                            """)
+                            self.label.setAlignment(Qt.AlignCenter)
+                            self.label.setFixedHeight(30)
+                            progress_layout.addWidget(self.label)
+                    
+                            main_layout.addWidget(progress_container)
+                    
+                            # 设置窗口大小
+                            self.setFixedSize(440, 120)
+                    
+                            # 居中显示窗口
+                            screen = QApplication.primaryScreen().geometry()
+                            x = (screen.width() - self.width()) // 2
+                            y = (screen.height() - self.height()) // 2
+                            self.move(x, y)
+                    
+                            self.show()
+                            
+                        def update_progress(self, percent):
+                            # 更新进度条宽度
+                            width = int(400 * percent / 100)
+                            self.label.setFixedWidth(width)
+                            self.label.setText(f"{percent}%")
+                            QApplication.processEvents()
+                            
+                    # 只弹出一次
+                    if not hasattr(self, '_back_start_progress') or self._back_start_progress is None:
+                        self._back_start_progress = ProgressDialog(self)
+                        QApplication.processEvents()
+                        pressed = True
+                        for i in range(0, 101, 2):
+                            # 实时检测按键是否松开
+                            back_pressed = controller.get_button(mapping.back)
+                            start_pressed = controller.get_button(mapping.start)
+                            if not (back_pressed and start_pressed):
+                                pressed = False
+                                break
+                            self._back_start_progress.update_progress(i)
+                            time.sleep(0.01)
+                        self._back_start_progress.close()
+                        self._back_start_progress = None
+                        if pressed:
+                            print("Back和Start已持续按下2秒！")
+                            # 执行鼠标模拟
+                            self.mouse_simulation(True)
+                        else:
+                            # 按键提前松开，执行后续代码
+                            self.back_start_pressed_time = None
+                            break
+                    break
+                else:
+                    self.back_start_pressed_time = None
+                    break
+        print(f"处理手柄输入: {action}")
         if getattrs:
             with focus_lock:  #焦点检查-只有打包后才能使用
                 if not focus: 
@@ -2002,7 +2553,18 @@ class GameSelector(QWidget):
         
         if hasattr(self, 'confirm_dialog') and self.confirm_dialog.isVisible():  # 如果确认弹窗显示中
             print("确认弹窗显示中")
+            self.ignore_input_until = current_time + 500
             self.confirm_dialog.handle_gamepad_input(action)
+            return
+        if hasattr(self, 'screenshot_window') and self.screenshot_window.isVisible():
+            # 如果 screenshot_window 有 confirm_dialog，优先转发
+            if hasattr(self.screenshot_window, 'confirm_dialog') and self.screenshot_window.confirm_dialog and self.screenshot_window.confirm_dialog.isVisible():
+                self.screenshot_window.handle_gamepad_input(action)
+                self.ignore_input_until = pygame.time.get_ticks() + 300 
+                return
+            print("截图悬浮窗显示中")
+            self.ignore_input_until = current_time + 300
+            self.screenshot_window.handle_gamepad_input(action)
             return
         
         if self.in_floating_window and self.floating_window:
@@ -2038,10 +2600,11 @@ class GameSelector(QWidget):
         # 新增焦点切换逻辑
         if action == 'DOWN' and self.current_section == 0 and self.more_section == 0:
             self.current_section = 1  # 切换到控制按钮区域
-            if self.current_index < 3:
-                self.current_index = int(self.current_index * 2)
-            else:
-                self.current_index = 6
+            #if self.current_index < 3:
+            #    self.current_index = int(self.current_index * 2)
+            #else:
+            #    self.current_index = 6
+            self.current_index = 3
             self.update_highlight()
             print("当前区域：控制按钮区域")
         elif action == 'UP' and self.current_section == 1 and self.more_section == 0:
@@ -2216,11 +2779,11 @@ class GameSelector(QWidget):
                     self.grid_layout.addWidget(button, 0, index)
                     self.buttons.append(button)
 
-                # 添加“更多”按钮
+                # 添加"更多"按钮
                 more_button = QPushButton("🟦🟦\n🟦🟦")
                 more_button.setFont(QFont("Microsoft YaHei", 40))
                 more_button.setFixedSize(int(140 * self.scale_factor2), int(140 * self.scale_factor2))
-                more_button.clicked.connect(self.switch_to_all_software)  # 绑定“更多”按钮的功能
+                more_button.clicked.connect(self.switch_to_all_software)  # 绑定"更多"按钮的功能
                 self.grid_layout.addWidget(more_button, 0, len(sorted_games[:self.buttonsindexset]))  # 添加到最后一列
                 self.buttons.append(more_button)
             else:
@@ -2541,16 +3104,16 @@ class GameControllerThread(QThread):
                                     current_time = time.time()
                                     if current_time - self.last_hat_time > self.hat_delay:
                                         if hat[1] == 1:  # 上
-                                            print("HAT UP signal emitted")  # hat 上
+                                            #print("HAT UP signal emitted")  # hat 上
                                             self.gamepad_signal.emit('UP')
                                         elif hat[1] == -1:  # 下
-                                            print("HAT DOWN signal emitted")  # hat 下
+                                            #print("HAT DOWN signal emitted")  # hat 下
                                             self.gamepad_signal.emit('DOWN')
                                         if hat[0] == -1:  # 左
-                                            print("HAT LEFT signal emitted")  # hat 左
+                                            #print("HAT LEFT signal emitted")  # hat 左
                                             self.gamepad_signal.emit('LEFT')
                                         elif hat[0] == 1:  # 右
-                                            print("HAT RIGHT signal emitted")  # hat 右
+                                            #print("HAT RIGHT signal emitted")  # hat 右
                                             self.gamepad_signal.emit('RIGHT')
                                         self.last_hat_time = current_time
                                     else:
@@ -2574,11 +3137,11 @@ class GameControllerThread(QThread):
                     if time.time() - self.last_move_time > self.move_delay:
                         # 左摇杆
                         if left_y < -self.axis_threshold:
-                            print("LEFT STICK UP signal emitted")  # 左摇杆上
+                            #print("LEFT STICK UP signal emitted")  # 左摇杆上
                             self.gamepad_signal.emit('UP')
                             self.last_move_time = current_time
                         elif left_y > self.axis_threshold:
-                            print("LEFT STICK DOWN signal emitted")  # 左摇杆下
+                            #print("LEFT STICK DOWN signal emitted")  # 左摇杆下
                             self.gamepad_signal.emit('DOWN')
                             self.last_move_time = current_time
                         if left_x < -self.axis_threshold:
@@ -3454,7 +4017,7 @@ class ControllerMapping:
             self.right_stick_y = 1
             self.guide = 12
             
-        print(f"Detected controller: {self.controller_name}")
+        #print(f"Detected controller: {self.controller_name}")
 
 class SettingsWindow(QWidget):
     def __init__(self, parent=None):
@@ -3657,7 +4220,7 @@ class SettingsWindow(QWidget):
             int(20 * self.parent().scale_factor)
         )
     
-        # 添加“+添加自定义进程”按钮
+        # 添加"+添加自定义进程"按钮
         add_btn = QPushButton("+添加自定义进程")
         add_btn.setStyleSheet(f"""
             QPushButton {{
