@@ -391,6 +391,11 @@ class ScreenshotWindow(QDialog):
             row5.addWidget(btn)
         left_panel_layout.addLayout(row5)
         #self.left_panel.setFixedWidth(800)
+        self.info_label = QLabel("上面的按钮均不可操作，敬请期待正式版", self)
+        self.info_label.setStyleSheet("color: #aaa; font-size: 10px; padding: 8px;")
+        self.info_label.setAlignment(Qt.AlignLeft)
+        left_panel_layout.addWidget(self.info_label)
+        #
 
         # 截图列表控件
         self.listWidget = QtWidgets.QListWidget(self)
@@ -1266,7 +1271,7 @@ class GameSelector(QWidget):
         # 获取屏幕的分辨率
         screen = QDesktopWidget().screenGeometry()
         # 设置窗口大小为屏幕分辨率
-        self.resize(screen.width(), screen.height())
+        self.resize(1, 1)  # 初始设置为1x1，后续会调整为全屏
         self.setWindowFlags(Qt.FramelessWindowHint)  # 全屏无边框
         self.setStyleSheet("background-color: #1e1e1e;")  # 设置深灰背景色
         self.killexplorer = settings.get("killexplorer", False)
@@ -1283,6 +1288,7 @@ class GameSelector(QWidget):
         if STARTUP:
             hwnd = int(self.winId())
             ctypes.windll.user32.ShowWindow(hwnd, 0) # 0=SW_HIDE
+        self.resize(screen.width(), screen.height()) # 设置窗口大小为屏幕分辨率
         # 游戏索引和布局
         self.player = {}
         self.current_index = 0  # 从第一个按钮开始
@@ -1313,7 +1319,7 @@ class GameSelector(QWidget):
         self.right_layout.setAlignment(Qt.AlignRight)
 
         # 创建更多按钮
-        self.more_button = QPushButton("更多")
+        self.more_button = QPushButton("工具")
         self.more_button.setFixedSize(int(120 * self.scale_factor), int(40 * self.scale_factor))
         self.more_button.setStyleSheet(f"""
             QPushButton {{
@@ -1651,7 +1657,7 @@ class GameSelector(QWidget):
             controller_name = controller_data['controller'].get_name()
             self.update_controller_status(controller_name)
         # 右侧文字
-        right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.95")
+        right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.95-Preview")
         right_label.setStyleSheet(f"""
             QLabel {{
                 font-family: "Microsoft YaHei"; 
@@ -1692,14 +1698,42 @@ class GameSelector(QWidget):
         # 在 GameSelector 的 __init__ 方法中添加以下代码
         self.tray_icon = QSystemTrayIcon(self)
         self.tray_icon.setIcon(QIcon("fav.ico"))  # 设置托盘图标为 fav.ico
+        self.tray_icon.setToolTip("DeskGamix")
         def create_tray_menu():
             tray_menu = QMenu(self)
             sorted_games = self.sort_games()
             if sorted_games:
                 tray_menu.addSeparator()
-                for idx, game in enumerate(sorted_games[:self.buttonsindexset]):
+                #for idx, game in enumerate(sorted_games[:self.buttonsindexset]):    #正序显示的代码
+                for idx, game in enumerate(reversed(sorted_games[:self.buttonsindexset])):
                     game_action = tray_menu.addAction(game["name"])
-                    game_action.triggered.connect(lambda checked, i=idx: self.launch_game(i))
+                    #def launch_and_close_tray(i=idx):    #正序显示的代码
+                    def launch_and_close_tray(i=len(sorted_games[:self.buttonsindexset])-1-idx):
+                        self.launch_game(i)
+                        self.tray_icon.contextMenu().hide()
+                    game_action.triggered.connect(launch_and_close_tray)
+            tray_menu.addSeparator()
+            # 新增“工具”子菜单
+            tools_menu = QMenu("工具", self)
+            tools_menu.setStyleSheet("""
+                QMenu, QMenu::item {
+                    color: white;
+                    background-color: #232323;
+                }
+                QMenu::item:selected,
+                QMenu QMenu::item:selected {
+                    color: black;
+                    background-color: #93ffff;
+                }
+            """)
+            # 获取morefloder下的快捷方式
+            for app in more_apps:
+                tool_action = tools_menu.addAction(app["name"])
+                def launch_tool(path=app["path"]):
+                    self.hide_window()
+                    subprocess.Popen(path, shell=True)
+                tool_action.triggered.connect(launch_tool)
+            tray_menu.addMenu(tools_menu)
             tray_menu.addSeparator()
             restart_action = tray_menu.addAction("重启程序")
             restart_action.triggered.connect(self.restart_program)
@@ -1707,16 +1741,26 @@ class GameSelector(QWidget):
             restore_action.triggered.connect(self.show_window)
             exit_action = tray_menu.addAction("退出")
             exit_action.triggered.connect(self.exitdef)
-            tray_menu.setStyleSheet("QMenu { color: white; }")
+            tray_menu.setStyleSheet("""
+                QMenu, QMenu::item {
+                    color: white;
+                    background-color: #232323;
+                }
+                QMenu::item:selected,
+                QMenu QMenu::item:selected {
+                    color: black;
+                    background-color: #93ffff;
+                }
+            """)
             return tray_menu
-
-        self.tray_icon = QSystemTrayIcon(self)
-        self.tray_icon.setIcon(QIcon("fav.ico"))  # 设置托盘图标为 fav.ico
 
         # 初始菜单
         self.tray_icon.setContextMenu(create_tray_menu())
 
         def tray_icon_activated(reason):
+            if self.is_mouse_simulation_running:
+                self.is_mouse_simulation_running = False
+                return
             if reason == QSystemTrayIcon.Context:  # 右键
                 self.tray_icon.setContextMenu(create_tray_menu())
             elif reason == QSystemTrayIcon.Trigger:  # 左键
@@ -1935,6 +1979,7 @@ class GameSelector(QWidget):
         pygame.joystick.init()
         if pygame.joystick.get_count() == 0:
             self.show_window()
+            self.is_mouse_simulation_running = False
             return
         joysticks = []
         for i in range(pygame.joystick.get_count()):
@@ -1986,7 +2031,8 @@ class GameSelector(QWidget):
         #print(f"{mapping.guide} {mapping.right_stick_in} {mapping.left_stick_in} {mapping.start} {mapping.back} {mapping.button_a} {mapping.button_b} {mapping.button_x} {mapping.button_y}")
         running = True  # 添加状态标志
         try:
-            while running:
+            while running and self.is_mouse_simulation_running:
+
                 # 动态检测新手柄加入或移除
                 for event in pygame.event.get():
                     if event.type == pygame.JOYDEVICEADDED:
@@ -3432,13 +3478,12 @@ class GameSelector(QWidget):
         self.floating_window.create_buttons()
         self.floating_window.update_highlight()
 
-    def execute_more_item(self, file=None):
+    def execute_more_item(self, file=None, enable_mouse_sim=True):
         """执行更多选项中的项目"""
         if not self.floating_window:
             return
     
-        sorted_files = self.floating_window.sort_files()  # 提前定义 sorted_files
-    
+        sorted_files = self.floating_window.sort_files()
         if file:
             current_file = file
         else:
@@ -3451,15 +3496,15 @@ class GameSelector(QWidget):
             # 更新最近使用列表
             if "more_last_used" not in settings:
                 settings["more_last_used"] = []
-
+    
             if current_file["name"] in settings["more_last_used"]:
                 settings["more_last_used"].remove(current_file["name"])
             settings["more_last_used"].insert(0, current_file["name"])
-
+    
             # 保存设置
             with open(settings_path, "w", encoding="utf-8") as f:
                 json.dump(settings, f, indent=4)
-
+    
             # 执行文件
             print(f"执行文件: {current_file['path']}")
             self.hide_window()
@@ -3468,7 +3513,8 @@ class GameSelector(QWidget):
         self.floating_window.update_highlight()
         self.floating_window.hide()
         self.in_floating_window = False
-        self.mouse_simulation(True)  # 开启鼠标映射
+        if enable_mouse_sim:
+            self.mouse_simulation(True)
 
     def can_toggle_window(self):
         """检查是否可以切换悬浮窗状态"""
@@ -3990,7 +4036,7 @@ class FloatingWindow(QWidget):
                 btn.setText(f"⭐🟢 {file['name']}")
             self.buttons.append(btn)
             self.layout.addWidget(btn)
-            btn.clicked.connect(lambda checked, f=file: self.parent().execute_more_item(f))
+            btn.clicked.connect(lambda checked, f=file: self.parent().execute_more_item(f, enable_mouse_sim=False))
 
         if settitype:
             # 重新添加按钮到布局
@@ -4757,7 +4803,7 @@ class SettingsWindow(QWidget):
                 background-color: #555555;
             }}
         """)
-        self.quick_add_running_btn.clicked.connect(self.quick_add_running_game)
+        #self.quick_add_running_btn.clicked.connect(self.quick_add_running_game)
         self.layout.addWidget(self.quick_add_running_btn)
 
         # 添加切换 killexplorer 状态的按钮
