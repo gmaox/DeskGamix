@@ -391,7 +391,7 @@ class ScreenshotWindow(QDialog):
             row5.addWidget(btn)
         left_panel_layout.addLayout(row5)
         #self.left_panel.setFixedWidth(800)
-        self.info_label = QLabel("上面的按钮均不可操作，敬请期待正式版", self)
+        self.info_label = QLabel("备份相关按钮均不可操作，敬请期待正式版", self)
         self.info_label.setStyleSheet("color: #aaa; font-size: 10px; padding: 8px;")
         self.info_label.setAlignment(Qt.AlignLeft)
         left_panel_layout.addWidget(self.info_label)
@@ -1657,7 +1657,7 @@ class GameSelector(QWidget):
             controller_name = controller_data['controller'].get_name()
             self.update_controller_status(controller_name)
         # 右侧文字
-        right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.95-Preview")
+        right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.95-Alpha")
         right_label.setStyleSheet(f"""
             QLabel {{
                 font-family: "Microsoft YaHei"; 
@@ -1709,8 +1709,8 @@ class GameSelector(QWidget):
                     game_action = tray_menu.addAction(game["name"])
                     #def launch_and_close_tray(i=idx):    #正序显示的代码
                     def launch_and_close_tray(i=len(sorted_games[:self.buttonsindexset])-1-idx):
-                        self.launch_game(i)
                         self.tray_icon.contextMenu().hide()
+                        self.launch_game(i)
                     game_action.triggered.connect(launch_and_close_tray)
             tray_menu.addSeparator()
             # 新增“工具”子菜单
@@ -1726,12 +1726,12 @@ class GameSelector(QWidget):
                     background-color: #93ffff;
                 }
             """)
-            # 获取morefloder下的快捷方式
             for app in more_apps:
                 tool_action = tools_menu.addAction(app["name"])
-                def launch_tool(path=app["path"]):
+                def launch_tool(checked=False, path=app["path"]):
                     self.hide_window()
-                    subprocess.Popen(path, shell=True)
+                    if isinstance(path, str) and path.strip():
+                        subprocess.Popen(path, shell=True)
                 tool_action.triggered.connect(launch_tool)
             tray_menu.addMenu(tools_menu)
             tray_menu.addSeparator()
@@ -4803,7 +4803,7 @@ class SettingsWindow(QWidget):
                 background-color: #555555;
             }}
         """)
-        #self.quick_add_running_btn.clicked.connect(self.quick_add_running_game)
+        self.quick_add_running_btn.clicked.connect(self.quick_add_running_game)
         self.layout.addWidget(self.quick_add_running_btn)
 
         # 添加切换 killexplorer 状态的按钮
@@ -4892,10 +4892,122 @@ class SettingsWindow(QWidget):
         self.close_program_button.clicked.connect(self.close_program)
         self.layout.addWidget(self.close_program_button)
         
-        self.asdasgg_label = QLabel("提示：在手柄映射时通过系统\n托盘图标可打开主页面进行设置")
-        self.asdasgg_label.setStyleSheet(f"color: white; font-size: {int(14 * parent.scale_factor)}px;")
-        self.asdasgg_label.setFixedHeight(int(50 * parent.scale_factor))  # 固定高度为30像素
+        self.asdasgg_label = QLabel(
+            '<span style="color: white;">'
+            '<a href="#" style="color: white; text-decoration: none;">（提示＆关于）</a>'
+            '</span>'
+        )
+        self.asdasgg_label.setTextFormat(Qt.RichText)
+        self.asdasgg_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        self.asdasgg_label.setOpenExternalLinks(False)
+        self.asdasgg_label.setFixedHeight(int(30 * parent.scale_factor))
+        self.asdasgg_label.setAlignment(Qt.AlignCenter)
+        self.asdasgg_label.linkActivated.connect(lambda _: self.show_about_dialog())
         self.layout.addWidget(self.asdasgg_label)
+
+    def show_about_dialog(self):
+        """显示关于窗口"""
+        about_dialog = QDialog(self)
+        about_dialog.setWindowTitle("关于 DeskGamix")
+        about_dialog.setWindowFlags(Qt.FramelessWindowHint | Qt.Popup)
+        about_dialog.setStyleSheet(f"""
+            QDialog {{
+                background-color: rgba(46, 46, 46, 0.98);
+                border-radius: {int(15 * self.parent().scale_factor)}px;
+                border: {int(2 * self.parent().scale_factor)}px solid #444444;
+            }}
+        """)
+        about_dialog.setFixedWidth(int(1200 * self.parent().scale_factor))
+        layout = QVBoxLayout(about_dialog)
+        layout.setSpacing(int(18 * self.parent().scale_factor))
+        layout.setContentsMargins(
+            int(30 * self.parent().scale_factor),
+            int(30 * self.parent().scale_factor),
+            int(30 * self.parent().scale_factor),
+            int(30 * self.parent().scale_factor)
+        )
+    
+        # 顶部图标和标题
+        icon_title_layout = QHBoxLayout()
+        icon_label = QLabel()
+        icon_pix = QPixmap("fav.ico").scaled(int(36 * self.parent().scale_factor), int(36 * self.parent().scale_factor), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        icon_label.setPixmap(icon_pix)
+        icon_label.setFixedSize(int(36 * self.parent().scale_factor), int(36 * self.parent().scale_factor))
+        icon_title_layout.addWidget(icon_label, alignment=Qt.AlignLeft | Qt.AlignVCenter)
+        title_label = QLabel("DeskGamix")
+        title_label.setStyleSheet(f"color: white; font-size: {int(26 * self.parent().scale_factor)}px; font-weight: bold;")
+        icon_title_layout.addWidget(title_label, alignment=Qt.AlignLeft | Qt.AlignVCenter)
+        icon_title_layout.addStretch()
+        layout.addLayout(icon_title_layout)
+    
+        # 软件简介
+        intro = QLabel("桌面游戏启动器\n"
+                       "支持手柄一键启动、收藏、截图等功能，"
+                       "支持自定义快捷方式、进程管理、游戏冻结等多种实用功能。\n"
+                       "专为Windows手柄操作优化。\n长按start+back打开鼠标映射。"
+                       "在手柄鼠标映射启用时点击系统托盘图标可停止映射\n\n"
+                       "手柄鼠标映射键位操作示意图：")
+        intro.setStyleSheet(f"color: white; font-size: {int(18 * self.parent().scale_factor)}px;")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+    
+        # 手柄映射示意图
+        #'<a href="https://wwse.lanzn.com/b00uz4bjmd" style="color:#93ffff;">蓝奏（密码:85jl）</a>　|　'
+        title_label = QLabel(
+            '<a href="https://github.com/gmaox/DeskGamix" style="color:#93ffff;">GitHub</a>　|　'
+            '<a href="https://space.bilibili.com/258889407" style="color:#93ffff;">B站主页</a>'
+        )
+        title_label.setStyleSheet(f"color: white; font-size: {int(26 * self.parent().scale_factor)}px; ")
+        title_label.setOpenExternalLinks(True)
+        icon_title_layout.addWidget(title_label, alignment=Qt.AlignLeft | Qt.AlignVCenter)
+        img_label = QLabel()
+        try:
+            pixmap = QPixmap("1.png").scaled(
+                int(1150 * self.parent().scale_factor),
+                int(660 * self.parent().scale_factor),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
+            img_label.setPixmap(pixmap)
+        except Exception:
+            img_label.setText("未找到1.png")
+        img_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(img_label)
+    
+        # 链接
+        #link_label = QLabel(
+        #    '<a href="https://github.com/DeskGamix/DeskGamix" style="color:#93ffff;">GitHub主页</a>　|　'
+        #    '<a href="https://space.bilibili.com/349308" style="color:#93ffff;">B站主页</a>'
+        #)
+        #link_label.setStyleSheet(f"color: #93ffff; font-size: {int(18 * self.parent().scale_factor)}px;")
+        #link_label.setAlignment(Qt.AlignCenter)
+        #link_label.setOpenExternalLinks(True)
+        #layout.addWidget(link_label)
+    
+        ## 关闭按钮
+        #close_btn = QPushButton("关闭")
+        #close_btn.setStyleSheet(f"""
+        #    QPushButton {{
+        #        background-color: #444444;
+        #        color: white;
+        #        border-radius: {int(8 * self.parent().scale_factor)}px;
+        #        font-size: {int(16 * self.parent().scale_factor)}px;
+        #        padding: {int(10 * self.parent().scale_factor)}px {int(30 * self.parent().scale_factor)}px;
+        #    }}
+        #    QPushButton:hover {{
+        #        background-color: #555555;
+        #    }}
+        #""")
+        #close_btn.clicked.connect(about_dialog.accept)
+        #layout.addWidget(close_btn, alignment=Qt.AlignCenter)
+    
+        about_dialog.setLayout(layout)
+        # 居中显示
+        parent_geom = self.parent().geometry()
+        x = parent_geom.x() + (parent_geom.width() - about_dialog.width()) // 2
+        y = 100 * self.parent().scale_factor
+        about_dialog.move(x, y)
+        about_dialog.exec_()
 
     def quick_add_running_game(self):
         """快速添加运行中游戏"""
