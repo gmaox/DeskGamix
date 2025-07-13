@@ -10,7 +10,7 @@ import pygame
 import win32gui,win32process,psutil,win32api
 from PyQt5.QtWidgets import QApplication, QListWidgetItem, QMessageBox, QSystemTrayIcon, QMenu , QVBoxLayout, QDialog, QGridLayout, QWidget, QPushButton, QLabel, QDesktopWidget, QHBoxLayout, QFileDialog, QSlider, QLineEdit, QProgressBar, QScrollArea, QFrame
 from PyQt5.QtGui import QFont, QPixmap, QIcon, QColor
-from PyQt5.QtCore import QDateTime, QSize, Qt, QThread, pyqtSignal, QTimer, QPoint  
+from PyQt5.QtCore import QDateTime, QSize, Qt, QThread, pyqtSignal, QTimer, QPoint, QProcess 
 import subprocess, time, os,win32con, ctypes, re, win32com.client, ctypes, time, pyautogui
 from ctypes import wintypes
 #& C:/Users/86150/AppData/Local/Programs/Python/Python38/python.exe -m PyInstaller --add-data "fav.ico;." --add-data '1.png;.' -w DesktopGame.py -i '.\fav.ico' --uac-admin --noconfirm
@@ -244,6 +244,7 @@ class ScreenshotLoaderThread(QThread):
 class ScreenshotWindow(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.active_dialog = None  # 新增：记录当前弹窗
         self.filter_game_name = None  # 当前筛选的游戏名
         self.setWindowTitle("截图浏览")
         self.setWindowFlags(Qt.FramelessWindowHint)
@@ -267,15 +268,242 @@ class ScreenshotWindow(QDialog):
 
         BTN_HEIGHT = 90  # 统一按钮高度
 
-        # 定义所有按钮的槽函数
-        def on_backup_save_clicked(): pass
-        def on_backup_restore_clicked(): pass
+        def on_backup_save_clicked():
+            open_maobackup("--quick-dgaction")
+        def on_backup_restore_clicked(): 
+            open_maobackup("--quick-dgrestore")
+        def open_maobackup(sysargv):
+            exe_path = os.path.join(program_directory, "maobackup.exe")
+            game_name = self.game_name_label.text()
+            if os.path.exists(exe_path):
+                process = QProcess(self)
+                process.setProgram(exe_path)
+                process.setArguments([sysargv, game_name])
+                process.setProcessChannelMode(QProcess.MergedChannels)
+                buffer = b''
+
+                def handle_ready_read():
+                    nonlocal buffer
+                    buffer += process.readAllStandardOutput().data()
+                    while b'\n' in buffer:
+                        line, buffer = buffer.split(b'\n', 1)
+                        try:
+                            msg = json.loads(line.decode(errors='ignore'))
+                            if msg.get("type") in ("error", "info", "warning"):
+                                self.confirm_dialog = ConfirmDialog("※"+msg.get("message", "")).exec_()
+                            elif msg.get("type") == "confirm":
+                                self.confirm_dialog = ConfirmDialog("※"+msg.get("message", ""))
+                                result = self.confirm_dialog.exec_()
+                                process.write(("yes\n" if result == QDialog.Accepted else "no\n").encode())
+                                process.waitForBytesWritten(100)
+                        except Exception as e:
+                            print("解析JSON失败：", e)
+
+                def handle_finished(exitCode, exitStatus):
+                    # 可在此处理进程结束后的逻辑
+                    pass
+
+                process.readyReadStandardOutput.connect(handle_ready_read)
+                process.finished.connect(handle_finished)
+                process.start()
+            else:
+                self.confirm_dialog = ConfirmDialog("未找到maobackup.exe").exec_()
         def on_view_backup_list_clicked(): pass
-        def on_mapping_clicked(): pass
-        def on_freeze_clicked(): pass
+        def on_mapping_clicked():
+            game_name = self.game_name_label.text()
+            # 读取 set.json 的 on_mapping_clicked 列表
+            if "on_mapping_clicked" not in settings:
+                settings["on_mapping_clicked"] = []
+            if game_name in settings["on_mapping_clicked"]:
+                settings["on_mapping_clicked"].remove(game_name)
+                self.btn_mapping.setText("游玩时开启映射(×)")
+            else:
+                settings["on_mapping_clicked"].append(game_name)
+                self.btn_mapping.setText("游玩时开启映射(✔)")
+            # 保存到 set.json
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump(settings, f, indent=4, ensure_ascii=False)
+        def on_freeze_clicked():
+            game_name = self.game_name_label.text()
+            options = ["跟随全局", "不冻结", "内置核心冻结", "调用雪藏冻结"]
+            if "freeze_mode" not in settings:
+                settings["freeze_mode"] = {}
+            current_mode = settings["freeze_mode"].get(game_name, "跟随全局")
+        
+            dialog = QtWidgets.QDialog(self)
+            dialog.setWindowTitle("选择冻结方式")
+            dialog.setWindowFlags(Qt.FramelessWindowHint | Qt.Popup)
+            dialog.setStyleSheet("""
+                QDialog {
+                    background-color: rgba(46, 46, 46, 0.98);
+                    border-radius: 12px;
+                    border: 2px solid #444444;
+                }
+            """)
+            layout = QtWidgets.QVBoxLayout(dialog)
+            layout.setSpacing(12)
+            layout.setContentsMargins(20, 20, 20, 20)
+        
+            info_label = QLabel("请选择该游戏的冻结方式")
+            info_label.setStyleSheet("color: #aaa; font-size: 18px;")
+            layout.addWidget(info_label)
+        
+            dialog.buttons = []
+            dialog.current_index = 0
+        
+            def update_highlight():
+                for i, btn in enumerate(dialog.buttons):
+                    if i == dialog.current_index:
+                        btn.setStyleSheet("background-color: #93ffff; color: #222; font-size: 18px; border-radius: 8px;")
+                    else:
+                        btn.setStyleSheet("background-color: #444444; color: white; font-size: 18px; border-radius: 8px;")
+            dialog.update_highlight = update_highlight
+        
+            def select_option(idx):
+                mode = options[idx]
+                settings["freeze_mode"][game_name] = mode
+                with open(settings_path, "w", encoding="utf-8") as f:
+                    json.dump(settings, f, indent=4, ensure_ascii=False)
+                self.btn_freeze.setText(f"冻结方式({mode})")
+                dialog.accept()
+        
+            for idx, opt in enumerate(options):
+                btn = QPushButton(opt)
+                btn.clicked.connect(lambda checked=False, idx=idx: select_option(idx))
+                layout.addWidget(btn)
+                dialog.buttons.append(btn)
+        
+            dialog.setLayout(layout)
+            dialog.update_highlight()
+        
+            def keyPressEvent(event):
+                if event.key() in (Qt.Key_Up, Qt.Key_W):
+                    dialog.current_index = (dialog.current_index - 1) % len(dialog.buttons)
+                    dialog.update_highlight()
+                elif event.key() in (Qt.Key_Down, Qt.Key_S):
+                    dialog.current_index = (dialog.current_index + 1) % len(dialog.buttons)
+                    dialog.update_highlight()
+                elif event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+                    dialog.buttons[dialog.current_index].click()
+            dialog.keyPressEvent = keyPressEvent
+        
+            def handle_gamepad_input(action):
+                if action in ('UP',):
+                    dialog.current_index = (dialog.current_index - 1) % len(dialog.buttons)
+                    dialog.update_highlight()
+                elif action in ('DOWN',):
+                    dialog.current_index = (dialog.current_index + 1) % len(dialog.buttons)
+                    dialog.update_highlight()
+                elif action in ('A',):
+                    dialog.buttons[dialog.current_index].click()
+                elif action in ('B',):
+                    dialog.close()
+            dialog.handle_gamepad_input = handle_gamepad_input
+            self.active_dialog = dialog  # 记录当前弹窗
+            dialog.exec_()
+            self.active_dialog = None    # 关闭后清空
+            
         def on_custom_proc_clicked(): 
             self.parent().custom_valid_show(self.game_name_label.text()) if self.parent() and hasattr(self.parent(), "custom_valid_show") else None 
-        def on_tools_clicked(): pass
+            self.close()  # 关闭当前窗口
+        def on_tools_clicked():
+            game_name = self.game_name_label.text()
+            if "custom_tools" not in settings:
+                settings["custom_tools"] = []
+            found = next((item for item in settings["custom_tools"] if item["name"] == game_name), None)
+            tools = found["tools"] if found else []
+            tool_names = [app["name"] for app in more_apps]
+            tool_paths = {app["name"]: app["path"] for app in more_apps}
+        
+            dialog = QtWidgets.QDialog(self)
+            dialog.setWindowTitle("选择要关联的工具")
+            dialog.setWindowFlags(Qt.FramelessWindowHint | Qt.Popup)
+            dialog.setStyleSheet("""
+                QDialog {
+                    background-color: rgba(46, 46, 46, 0.98);
+                    border-radius: 12px;
+                    border: 2px solid #444444;
+                }
+            """)
+            layout = QtWidgets.QVBoxLayout(dialog)
+            layout.setSpacing(12)
+            layout.setContentsMargins(20, 20, 20, 20)
+        
+            info_label = QLabel("点击工具添加到游戏连携启动")
+            info_label.setStyleSheet("color: #aaa; font-size: 18px;")
+            layout.addWidget(info_label)
+        
+            dialog.buttons = []
+            dialog.current_index = 0
+        
+            def update_btn_text(btn, tool_name):
+                if any(t["name"] == tool_name for t in tools):
+                    btn.setText(f"✔ {tool_name}")
+                else:
+                    btn.setText(tool_name)
+        
+            def update_highlight():
+                for i, btn in enumerate(dialog.buttons):
+                    if i == dialog.current_index:
+                        btn.setStyleSheet("background-color: #93ffff; color: #222; font-size: 18px; border-radius: 8px;")
+                    else:
+                        btn.setStyleSheet("background-color: #444444; color: white; font-size: 18px; border-radius: 8px;")
+            dialog.update_highlight = update_highlight
+        
+            def on_click(tool):
+                if any(t["name"] == tool for t in tools):
+                    tools[:] = [t for t in tools if t["name"] != tool]
+                else:
+                    tool_entry = {"name": tool, "path": tool_paths[tool]}
+                    if found:
+                        found["tools"].append(tool_entry)
+                    else:
+                        settings["custom_tools"].append({"name": game_name, "tools": [tool_entry]})
+                with open(settings_path, "w", encoding="utf-8") as f:
+                    json.dump(settings, f, indent=4, ensure_ascii=False)
+                count = len(found["tools"]) if found else 1
+                self.btn_tools.setText(f"附加工具启动({count})")
+                for idx, btn in enumerate(dialog.buttons):
+                    update_btn_text(btn, tool_names[idx])
+                dialog.update_highlight()
+        
+            for tool_name in tool_names:
+                btn = QPushButton()
+                update_btn_text(btn, tool_name)
+                btn.clicked.connect(lambda checked=False, tool=tool_name: on_click(tool))
+                layout.addWidget(btn)
+                dialog.buttons.append(btn)
+        
+            dialog.setLayout(layout)
+            dialog.update_highlight()
+        
+            def keyPressEvent(event):
+                if event.key() in (Qt.Key_Up, Qt.Key_W):
+                    dialog.current_index = (dialog.current_index - 1) % len(dialog.buttons)
+                    dialog.update_highlight()
+                elif event.key() in (Qt.Key_Down, Qt.Key_S):
+                    dialog.current_index = (dialog.current_index + 1) % len(dialog.buttons)
+                    dialog.update_highlight()
+                elif event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+                    dialog.buttons[dialog.current_index].click()
+            dialog.keyPressEvent = keyPressEvent
+        
+            def handle_gamepad_input(action):
+                if action in ('UP',):
+                    dialog.current_index = (dialog.current_index - 1) % len(dialog.buttons)
+                    dialog.update_highlight()
+                elif action in ('DOWN',):
+                    dialog.current_index = (dialog.current_index + 1) % len(dialog.buttons)
+                    dialog.update_highlight()
+                elif action in ('A',):
+                    dialog.buttons[dialog.current_index].click()
+                elif action in ('B',):
+                    dialog.close()
+            dialog.handle_gamepad_input = handle_gamepad_input
+            self.active_dialog = dialog  # 记录当前弹窗
+            dialog.exec_()
+            self.active_dialog = None    # 关闭后清空
+            
         def on_cover_clicked():
             self.qsaa_thread = QuickStreamAppAddThread(args=["-choosecover", str(self.game_name_label.text())])
             if self.parent() and hasattr(self.parent(), "deep_reload_games"):
@@ -422,32 +650,43 @@ class ScreenshotWindow(QDialog):
         left_panel_layout.addWidget(self.info_label2)
         # 第二排：映射/冻结
         row2 = QHBoxLayout()
-        btn_mapping = QPushButton("游玩时开启映射(×)", self.left_panel)
-        btn_mapping.setFixedHeight(BTN_HEIGHT)
-        btn_mapping.setStyleSheet(btn_style)
-        btn_mapping.clicked.connect(on_mapping_clicked)
-        row2.addWidget(btn_mapping)
+        self.btn_mapping = QPushButton("游玩时开启映射(×)", self.left_panel)
+        self.btn_mapping.setFixedHeight(BTN_HEIGHT)
+        self.btn_mapping.setStyleSheet(btn_style)
+        # 新增：根据 set.json 设置初始状态
+        if "on_mapping_clicked" in settings and self.game_name_label.text() in settings["on_mapping_clicked"]:
+            self.btn_mapping.setText("游玩时开启映射(✔)")
+        self.btn_mapping.clicked.connect(on_mapping_clicked)
+        row2.addWidget(self.btn_mapping)
 
-        btn_freeze = QPushButton("冻结方式(默认)", self.left_panel)
-        btn_freeze.setFixedHeight(BTN_HEIGHT)
-        btn_freeze.setStyleSheet(btn_style)
-        btn_freeze.clicked.connect(on_freeze_clicked)
-        row2.addWidget(btn_freeze)
+        self.btn_freeze = QPushButton("冻结方式(跟随全局)", self.left_panel)
+        if "freeze_mode" in settings and self.game_name_label.text() in settings["freeze_mode"]:
+            self.btn_freeze.setText(f"冻结方式({settings['freeze_mode'][self.game_name_label.text()]})")
+        self.btn_freeze.setFixedHeight(BTN_HEIGHT)
+        self.btn_freeze.setStyleSheet(btn_style)
+        self.btn_freeze.clicked.connect(on_freeze_clicked)
+        row2.addWidget(self.btn_freeze)
         left_panel_layout.addLayout(row2)
 
         # 第三排：配置自定义进程 + 附加工具启动
         row3 = QHBoxLayout()
-        btn_custom_proc = QPushButton("配置自定义进程(×)", self.left_panel)
-        btn_custom_proc.setFixedHeight(BTN_HEIGHT)
-        btn_custom_proc.setStyleSheet(btn_style)
-        btn_custom_proc.clicked.connect(on_custom_proc_clicked)
-        row3.addWidget(btn_custom_proc)
+        self.btn_custom_proc = QPushButton("配置自定义进程(×)", self.left_panel)
+        if "custom_valid_apps" in settings and any(item["name"] == self.game_name_label.text() for item in settings["custom_valid_apps"]):
+            self.btn_custom_proc.setText("配置自定义进程(✔)")
+        self.btn_custom_proc.setFixedHeight(BTN_HEIGHT)
+        self.btn_custom_proc.setStyleSheet(btn_style)
+        self.btn_custom_proc.clicked.connect(on_custom_proc_clicked)
+        row3.addWidget(self.btn_custom_proc)
 
-        btn_tools = QPushButton("附加工具启动(0)", self.left_panel)
-        btn_tools.setFixedHeight(BTN_HEIGHT)
-        btn_tools.setStyleSheet(btn_style)
-        btn_tools.clicked.connect(on_tools_clicked)
-        row3.addWidget(btn_tools)
+        self.btn_tools = QPushButton("附加工具启动(0)", self.left_panel)
+        if "custom_tools" in settings:
+            for item in settings["custom_tools"]:
+                if item["name"] == self.game_name_label.text():
+                    self.btn_tools.setText(f"附加工具启动({len(item['tools'])})")
+        self.btn_tools.setFixedHeight(BTN_HEIGHT)
+        self.btn_tools.setStyleSheet(btn_style)
+        self.btn_tools.clicked.connect(on_tools_clicked)
+        row3.addWidget(self.btn_tools)
         left_panel_layout.addLayout(row3)
         self.info_label1 = QLabel("---------------------------------------------游戏数据相关---------------------------------------------", self)
         self.info_label1.setStyleSheet("color: #aaa; font-size: 16px; padding: 0px;")
@@ -762,15 +1001,19 @@ class ScreenshotWindow(QDialog):
 
     def handle_gamepad_input(self, action):
         """处理手柄输入，支持左侧按钮和截图框切换"""
-        if hasattr(self, 'confirm_dialog') and self.confirm_dialog and self.confirm_dialog.isVisible():
-            self.confirm_dialog.handle_gamepad_input(action)
-            return
         current_time = pygame.time.get_ticks()
         if current_time < self.ignore_input_until:
             return
         if current_time - self.last_input_time < self.input_delay:
             return
-
+        if hasattr(self, 'confirm_dialog') and self.confirm_dialog and self.confirm_dialog.isVisible():
+            self.confirm_dialog.handle_gamepad_input(action)
+            return
+        # 新增：如果有弹窗，转发给弹窗
+        if hasattr(self, "active_dialog") and self.active_dialog is not None:
+            if hasattr(self.active_dialog, "handle_gamepad_input"):
+                self.active_dialog.handle_gamepad_input(action)
+            return
         # 全屏预览等原有逻辑...
         if hasattr(self, 'is_fullscreen_preview') and self.is_fullscreen_preview:
             if getattr(self, "has_load_more_button", False):
@@ -820,6 +1063,7 @@ class ScreenshotWindow(QDialog):
                 self.update_left_panel_button_styles()
             elif action in ('A',):
                 self.left_panel_buttons[self.current_button_index].click()
+                self.ignore_input_until = pygame.time.get_ticks() + 350  
             elif action in ('LEFT',):
                 if self.current_button_index == 0:
                     return
@@ -1088,6 +1332,28 @@ class ScreenshotWindow(QDialog):
             self.filter_game_name = game if ok and game != "全部游戏" else None
         if ok and game:
             self.game_name_label.setText(game)
+            # 新增：同步按钮状态
+            if "freeze_mode" in settings and game in settings["freeze_mode"]:
+                self.btn_freeze.setText(f"冻结方式({settings['freeze_mode'][game]})")
+            else:
+                self.btn_freeze.setText("冻结方式(跟随全局)")
+            if "custom_tools" in settings:
+                for item in settings["custom_tools"]:
+                    if item["name"] == game:
+                        self.btn_tools.setText(f"附加工具启动({len(item['tools'])})")
+                        break
+                else:
+                    self.btn_tools.setText("附加工具启动(0)")
+            else:
+                self.btn_tools.setText("附加工具启动(0)")
+            if "custom_valid_apps" in settings and game in [item["name"] for item in settings["custom_valid_apps"]]:
+                self.btn_custom_proc.setText("配置自定义进程(✔)")
+            else:
+                self.btn_custom_proc.setText("配置自定义进程(×)")
+            if "on_mapping_clicked" in settings and game in settings["on_mapping_clicked"]:
+                self.btn_mapping.setText("游玩时开启映射(✔)")
+            else:
+                self.btn_mapping.setText("游玩时开启映射(×)")
             # 新增：显示游玩时间
             play_time = settings.get("play_time", {}).get(game, 0)
             if play_time < 60:
@@ -1213,6 +1479,8 @@ class ConfirmDialog(QDialog):
         # 显示提示文本
         self.label = QLabel(self.variable1)
         self.label.setAlignment(Qt.AlignCenter)  # 设置文本居中
+        if "※" in self.variable1:
+            self.label.setStyleSheet("font-size: 24px; color: #FFFFFF; margin-bottom: 40px; text-align: center;")
         layout.addWidget(self.label)
 
         # 创建按钮区域
@@ -2913,6 +3181,9 @@ class GameSelector(QWidget):
 
         self.reload_interface()
         self.ignore_input_until = pygame.time.get_ticks() + 1000
+        # 新增：如果该游戏在 on_mapping_clicked 里，自动开启鼠标映射
+        if "on_mapping_clicked" in settings and game_name in settings["on_mapping_clicked"]:
+            self.mouse_simulation()
         if game_cmd:
             #self.showMinimized()
             subprocess.Popen(game_cmd, shell=True)
