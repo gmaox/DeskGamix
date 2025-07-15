@@ -801,7 +801,7 @@ class ScreenshotWindow(QDialog):
                 self.has_load_more_button = False
             self.left_panel.show()
             self.listWidget.setFixedWidth(int(self.width() / 1.7) - 74)
-            self.icon_size = int(256 * getattr(self, 'scale_factor', 1.0) * 1.8)
+            self.icon_size = int(256 * getattr(self, 'scale_factor', 1.0) * 1.75)
         else:
             self.current_screenshots = list(self.all_screenshots)
             self.left_panel.hide()
