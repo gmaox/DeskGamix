@@ -13,7 +13,7 @@ from PyQt5.QtGui import QFont, QPixmap, QIcon, QColor
 from PyQt5.QtCore import QDateTime, QSize, Qt, QThread, pyqtSignal, QTimer, QPoint, QProcess 
 import subprocess, time, os,win32con, ctypes, re, win32com.client, ctypes, time, pyautogui
 from ctypes import wintypes
-#& C:/Users/86150/AppData/Local/Programs/Python/Python38/python.exe -m PyInstaller --add-data "fav.ico;." --add-data '1.png;.' -w DesktopGame.py -i '.\fav.ico' --uac-admin --noconfirm
+#& C:/Users/86150/AppData/Local/Programs/Python/Python38/python.exe -m PyInstaller --add-data "fav.ico;." --add-data '1.png;.' --add-data 'pssuspend64.exe;.' -w DesktopGame.py -i '.\fav.ico' --uac-admin --noconfirm
 # 定义 Windows API 函数
 SetWindowPos = ctypes.windll.user32.SetWindowPos
 SetForegroundWindow = ctypes.windll.user32.SetForegroundWindow
@@ -272,43 +272,13 @@ class ScreenshotWindow(QDialog):
             open_maobackup("--quick-dgaction")
         def on_backup_restore_clicked(): 
             open_maobackup("--quick-dgrestore")
+        def on_view_backup_list_clicked(): 
+            open_maobackup("-backuplist")
         def open_maobackup(sysargv):
             exe_path = os.path.join(program_directory, "maobackup.exe")
             game_name = self.game_name_label.text()
-            if os.path.exists(exe_path):
-                process = QProcess(self)
-                process.setProgram(exe_path)
-                process.setArguments([sysargv, game_name])
-                process.setProcessChannelMode(QProcess.MergedChannels)
-                buffer = b''
-
-                def handle_ready_read():
-                    nonlocal buffer
-                    buffer += process.readAllStandardOutput().data()
-                    while b'\n' in buffer:
-                        line, buffer = buffer.split(b'\n', 1)
-                        try:
-                            msg = json.loads(line.decode(errors='ignore'))
-                            if msg.get("type") in ("error", "info", "warning"):
-                                self.confirm_dialog = ConfirmDialog("※"+msg.get("message", "")).exec_()
-                            elif msg.get("type") == "confirm":
-                                self.confirm_dialog = ConfirmDialog("※"+msg.get("message", ""))
-                                result = self.confirm_dialog.exec_()
-                                process.write(("yes\n" if result == QDialog.Accepted else "no\n").encode())
-                                process.waitForBytesWritten(100)
-                        except Exception as e:
-                            print("解析JSON失败：", e)
-
-                def handle_finished(exitCode, exitStatus):
-                    # 可在此处理进程结束后的逻辑
-                    pass
-
-                process.readyReadStandardOutput.connect(handle_ready_read)
-                process.finished.connect(handle_finished)
-                process.start()
-            else:
-                self.confirm_dialog = ConfirmDialog("未找到maobackup.exe").exec_()
-        def on_view_backup_list_clicked(): pass
+            self.parent().startopenmaobackup(sysargv, game_name, exe_path)
+            self.close()  # 关闭当前窗口
         def on_mapping_clicked():
             game_name = self.game_name_label.text()
             # 读取 set.json 的 on_mapping_clicked 列表
@@ -325,7 +295,8 @@ class ScreenshotWindow(QDialog):
                 json.dump(settings, f, indent=4, ensure_ascii=False)
         def on_freeze_clicked():
             game_name = self.game_name_label.text()
-            options = ["跟随全局", "不冻结", "内置核心冻结", "调用雪藏冻结"]
+            #options = ["跟随全局", "不冻结", "内置核心冻结", "调用雪藏冻结"]
+            options = ["跟随全局"]
             if "freeze_mode" not in settings:
                 settings["freeze_mode"] = {}
             current_mode = settings["freeze_mode"].get(game_name, "跟随全局")
@@ -1427,7 +1398,7 @@ class ConfirmDialog(QDialog):
         self.variable1 = variable1
         self.scale_factor = scale_factor
         self.setWindowTitle("游戏确认")
-        self.setWindowFlags(Qt.FramelessWindowHint)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool)
         self.setFixedSize(int(800 * self.scale_factor), int(400 * self.scale_factor))  # 更新后的固定尺寸
         self.setStyleSheet("""
             QDialog {
@@ -1551,6 +1522,8 @@ class ConfirmDialog(QDialog):
             self.update_highlight()
         elif action == 'A':
             self.buttons[self.current_index].click()
+        elif action == 'B':
+            self.reject()
         # 更新最后一次按键时间
         self.last_input_time = current_time
 
@@ -1615,10 +1588,6 @@ class MouseSimulationThread(QThread):
         self.parent.is_mouse_simulation_running = True
         pygame.init()
         pygame.joystick.init()
-        if pygame.joystick.get_count() == 0:
-            self.parent.show_window()
-            self.parent.is_mouse_simulation_running = False
-            return
         joysticks = []
         for i in range(pygame.joystick.get_count()):
             joystick = pygame.joystick.Joystick(i)
@@ -1837,7 +1806,7 @@ class GameSelector(QWidget):
         self.ignore_input_until = 0  # 初始化防抖时间戳
         self.current_section = 0  # 0=游戏选择区域，1=控制按钮区域
 
-        self.setWindowIcon(QIcon('fav.ico'))
+        self.setWindowIcon(QIcon('./_internal/fav.ico'))
         #if STARTUP:
         #    self.setWindowOpacity(0.0)  # 设置窗口透明度为全透明
         self.scale_factor = settings.get("scale_factor", 1.0)  # 从设置中读取缩放因数
@@ -2172,7 +2141,7 @@ class GameSelector(QWidget):
                 btn.clicked.connect(self.increase_volume)
             elif i == 2:
                 btn.setText("🔇")
-                btn.clicked.connect(self.deep_reload_games)
+                btn.clicked.connect(self.toggle_mute)
             elif i == 3:
                 btn.setText("🖱️")
                 btn.clicked.connect(lambda checked=False: (self.hide_window(), self.mouse_simulation()))
@@ -2273,7 +2242,7 @@ class GameSelector(QWidget):
         #    QTimer.singleShot(100, self.hide)
         # 在 GameSelector 的 __init__ 方法中添加以下代码
         self.tray_icon = QSystemTrayIcon(self)
-        self.tray_icon.setIcon(QIcon("fav.ico"))  # 设置托盘图标为 fav.ico
+        self.tray_icon.setIcon(QIcon("./_internal/fav.ico"))  # 设置托盘图标为 fav.ico
         self.tray_icon.setToolTip("DeskGamix")
         def create_tray_menu():
             tray_menu = QMenu(self)
@@ -2347,6 +2316,55 @@ class GameSelector(QWidget):
         self.play_time_timer.timeout.connect(self.update_play_time)
         self.play_time_timer.start(60 * 1000)  # 60秒
 
+    def startopenmaobackup(self, sysargv, game_name, exe_path):
+        # 检查是否已有maobackup.exe进程在运行
+        for proc in psutil.process_iter(['name', 'exe']):
+            try:
+                if proc.info['name'] and proc.info['name'].lower() == 'maobackup.exe':
+                    # 弹窗询问是否关闭
+                    self.confirm_dialog = ConfirmDialog("maobackup已经启动，是否要关闭？")
+                    result = self.confirm_dialog.exec_()
+                    if result == QDialog.Accepted:
+                        proc.terminate()
+                        proc.wait()
+                    else:
+                        return
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+        if os.path.exists(exe_path):
+            process = QProcess(self)
+            process.setProgram(exe_path)
+            process.setArguments([sysargv, game_name])
+            process.setProcessChannelMode(QProcess.MergedChannels)
+            buffer = b''
+
+            def handle_ready_read():
+                nonlocal buffer
+                buffer += process.readAllStandardOutput().data()
+                while b'\n' in buffer:
+                    line, buffer = buffer.split(b'\n', 1)
+                    try:
+                        msg = json.loads(line.decode(errors='ignore'))
+                        if msg.get("type") in ("error", "info", "warning"):
+                            self.confirm_dialog = ConfirmDialog("※"+msg.get("message", ""))
+                            result = self.confirm_dialog.exec_()
+                        elif msg.get("type") == "confirm":
+                            self.confirm_dialog = ConfirmDialog("※"+msg.get("message", ""))
+                            result = self.confirm_dialog.exec_()
+                            process.write(("yes\n" if result == QDialog.Accepted else "no\n").encode())
+                            process.waitForBytesWritten(100)
+                    except Exception as e:
+                        print("解析JSON失败：", e)
+
+            def handle_finished(exitCode, exitStatus):
+                # 可在此处理进程结束后的逻辑
+                pass
+
+            process.readyReadStandardOutput.connect(handle_ready_read)
+            process.finished.connect(handle_finished)
+            process.start()
+        else:
+            self.confirm_dialog = ConfirmDialog("未找到maobackup.exe").exec_()
     def deep_reload_games(self):
         """深度刷新游戏库：重新读取apps.json并刷新界面"""
         load_apps()  # 重新加载有效应用列表
@@ -2553,6 +2571,9 @@ class GameSelector(QWidget):
 
     def mouse_simulation(self):
         """开启鼠标映射（线程方式）"""
+        if pygame.joystick.get_count() == 0:
+            print("没有检测到手柄，无法开启鼠标映射")
+            return
         if self.is_mouse_simulation_running:
             print("鼠标映射已在运行，忽略重复调用")
             return
@@ -2642,7 +2663,8 @@ class GameSelector(QWidget):
 
         # 修改：点击时先判断光标位置
         def on_button_clicked(checked=False, idx=index):
-            if self.current_index != idx:
+            if self.current_index != idx or self.current_section != 0:
+                self.current_section = 0
                 self.current_index = idx
                 self.update_highlight()
             else:
@@ -3130,7 +3152,7 @@ class GameSelector(QWidget):
             self.switch_to_all_software()
             return
         #冻结相关
-        if os.path.exists("pssuspend64.exe"):
+        if os.path.exists("./_internal/pssuspend64.exe"):
             for app in valid_apps:
                 if app["name"] == game_name:
                     game_path = app["path"]
@@ -3145,7 +3167,7 @@ class GameSelector(QWidget):
                             if process.status() == psutil.STATUS_STOPPED:
                                 # 恢复挂起
                                 subprocess.Popen(
-                                    ['pssuspend64.exe', '-r', os.path.basename(game_path)],
+                                    ['./_internal/pssuspend64.exe', '-r', os.path.basename(game_path)],
                                     creationflags=subprocess.CREATE_NO_WINDOW
                                 )
                                 time.sleep(0.5)  # 等待恢复
@@ -3184,6 +3206,23 @@ class GameSelector(QWidget):
         # 新增：如果该游戏在 on_mapping_clicked 里，自动开启鼠标映射
         if "on_mapping_clicked" in settings and game_name in settings["on_mapping_clicked"]:
             self.mouse_simulation()
+        # 启动关联工具（避免重复启动）
+        for item in settings.get("custom_tools", []):
+            if item["name"] == game_name:
+                for tool in item.get("tools", []):
+                    tool_path = tool.get("path")
+                    if tool_path and os.path.exists(tool_path):
+                        # 检查是否已运行
+                        already_running = False
+                        for proc in psutil.process_iter(['exe']):
+                            try:
+                                if proc.info['exe'] and os.path.abspath(proc.info['exe']) == os.path.abspath(tool_path):
+                                    already_running = True
+                                    break
+                            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                                continue
+                        if not already_running:
+                            subprocess.Popen(tool_path, shell=True)
         if game_cmd:
             #self.showMinimized()
             subprocess.Popen(game_cmd, shell=True)
@@ -3256,7 +3295,7 @@ class GameSelector(QWidget):
                 ShowWindow(hwnd, SW_MINIMIZE)
                 #冻结相关
                 if self.freeze:
-                    if os.path.exists("pssuspend64.exe"):
+                    if os.path.exists("./_internal/pssuspend64.exe"):
                         pass_exe=['DesktopGame.exe', 'ZFGameBrowser.exe', 'amdow.exe', 'audiodg.exe', 'cmd.exe', 'cncmd.exe', 'copyq.exe', 'frpc.exe', 'gamingservicesnet.exe', 'memreduct.exe', 'mmcrashpad_handler64.exe','GameBarPresenceWriter.exe', 'HipsTray.exe', 'HsFreezer.exe', 'HsFreezerMagiaMove.exe', 'PhoneExperienceHost.exe','PixPin.exe', 'PresentMon-x64.exe','msedgewebview2.exe', 'plugin_host-3.3.exe', 'plugin_host-3.8.exe','explorer.exe','System Idle Process', 'System', 'svchost.exe', 'Registry', 'smss.exe', 'csrss.exe', 'wininit.exe', 'winlogon.exe', 'services.exe', 'lsass.exe', 'atiesrxx.exe', 'amdfendrsr.exe', 'atieclxx.exe', 'MemCompression', 'ZhuDongFangYu.exe', 'wsctrlsvc.exe', 'AggregatorHost.exe', 'wlanext.exe', 'conhost.exe', 'spoolsv.exe', 'reWASDService.exe', 'AppleMobileDeviceService.exe', 'ABService.exe', 'mDNSResponder.exe', 'Everything.exe', 'SunloginClient.exe', 'RtkAudUService64.exe', 'gamingservices.exe', 'SearchIndexer.exe', 'MoUsoCoreWorker.exe', 'SecurityHealthService.exe', 'HsFreezerEx.exe', 'GameInputSvc.exe', 'TrafficProt.exe', 'HipsDaemon.exe','python.exe', 'pythonw.exe', 'qmbrowser.exe', 'reWASDEngine.exe', 'sihost.exe', 'sublime_text.exe', 'taskhostw.exe', 'SearchProtocolHost.exe','crash_handler.exe', 'crashpad_handler.exe', 'ctfmon.exe', 'dasHost.exe', 'dllhost.exe', 'dwm.exe', 'fontdrvhost.exe','RuntimeBroker.exe','taskhostw.exe''WeChatAppEx.exe', 'WeChatOCR.exe', 'WeChatPlayer.exe', 'WeChatUtility.exe', 'WidgetService.exe', 'Widgets.exe', 'WmiPrvSE.exe', 'Xmp.exe','QQScreenshot.exe', 'RadeonSoftware.exe', 'SakuraFrpService.exe', 'SakuraLauncher.exe', 'SearchHost.exe', 'SecurityHealthSystray.exe', 'ShellExperienceHost.exe', 'StartMenuExperienceHost.exe', 'SystemSettings.exe', 'SystemSettingsBroker.exe', 'TextInputHost.exe', 'TrafficMonitor.exe', 'UserOOBEBroker.exe','WeChatAppEx.exe','360zipUpdate.exe', 'AMDRSServ.exe', 'AMDRSSrcExt.exe', 'APlayer.exe', 'ApplicationFrameHost.exe', 'CPUMetricsServer.exe', 'ChsIME.exe', 'DownloadSDKServer.exe','QMWeiyun.exe']
                         if exe_name in pass_exe:
                             print(f"当前窗口 {exe_name} 在冻结列表中，跳过冻结")
@@ -3282,7 +3321,7 @@ class GameSelector(QWidget):
 
                         if not is_stopped:
                             subprocess.Popen(
-                                ['pssuspend64.exe', exe_name],
+                                ['./_internal/pssuspend64.exe', exe_name],
                                 creationflags=subprocess.CREATE_NO_WINDOW
                             )
                     else:
@@ -3664,6 +3703,7 @@ class GameSelector(QWidget):
                         self.hide_window()
                 elif action == 'Y':
                     self.toggle_favorite()  # 收藏/取消收藏游戏
+                    self.ignore_input_until = pygame.time.get_ticks() + 300 
                 elif action == 'X':  # X键开悬浮窗
                     self.show_more_window()  # 打开悬浮窗
                 elif action == 'START':  # START键打开游戏详情
@@ -3746,7 +3786,7 @@ class GameSelector(QWidget):
             # 创建确认弹窗
             self.confirm_dialog = ConfirmDialog(f"是否关闭下列程序？\n{game_name}")
             result = self.confirm_dialog.exec_()  # 显示弹窗并获取结果
-            self.ignore_input_until = pygame.time.get_ticks() + 350  # 设置屏蔽时间为800毫秒
+            self.ignore_input_until = pygame.time.get_ticks()
             if not result == QDialog.Accepted:  # 如果按钮没被点击
                 return
             for app in valid_apps:
@@ -5288,7 +5328,7 @@ class SettingsWindow(QWidget):
         # 顶部图标和标题
         icon_title_layout = QHBoxLayout()
         icon_label = QLabel()
-        icon_pix = QPixmap("fav.ico").scaled(int(36 * self.parent().scale_factor), int(36 * self.parent().scale_factor), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        icon_pix = QPixmap("./_internal/fav.ico").scaled(int(36 * self.parent().scale_factor), int(36 * self.parent().scale_factor), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         icon_label.setPixmap(icon_pix)
         icon_label.setFixedSize(int(36 * self.parent().scale_factor), int(36 * self.parent().scale_factor))
         icon_title_layout.addWidget(icon_label, alignment=Qt.AlignLeft | Qt.AlignVCenter)
