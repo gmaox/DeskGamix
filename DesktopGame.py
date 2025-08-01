@@ -6500,10 +6500,10 @@ class SettingsWindow(QWidget):
         self.close_program_button.setText("正在退出程序...")
         self.close_program_button.setEnabled(False)  # 禁用按钮以防止重复点击
         # 如果开启了沉浸模式
-        if self.parent().killexplorer and hasattr(self, 'winTaskbar'):
+        if self.parent().killexplorer and hasattr(self.parent(), 'winTaskbar'):
             self.parent().winTaskbar.on_back_to_desktop()
         # 退出程序
-        QTimer.singleShot(1000, QApplication.quit)
+        QTimer.singleShot(500, QApplication.quit)
 
 
 # 应用程序入口
