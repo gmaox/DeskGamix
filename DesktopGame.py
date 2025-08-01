@@ -8,7 +8,7 @@ from PyQt5 import QtWidgets
 from PyQt5 import QtGui
 import pygame
 import win32gui,win32process,psutil,win32api
-from PyQt5.QtWidgets import QApplication, QListWidgetItem, QMessageBox, QSystemTrayIcon, QMenu , QVBoxLayout, QDialog, QGridLayout, QWidget, QPushButton, QLabel, QDesktopWidget, QHBoxLayout, QFileDialog, QSlider, QLineEdit, QProgressBar, QScrollArea, QFrame
+from PyQt5.QtWidgets import QApplication, QListWidgetItem, QMessageBox, QScroller, QSystemTrayIcon, QMenu , QVBoxLayout, QDialog, QGridLayout, QWidget, QPushButton, QLabel, QDesktopWidget, QHBoxLayout, QFileDialog, QSlider, QLineEdit, QProgressBar, QScrollArea, QFrame
 from PyQt5.QtGui import QFont, QPixmap, QIcon, QColor
 from PyQt5.QtCore import QDateTime, QSize, Qt, QThread, pyqtSignal, QTimer, QPoint, QProcess 
 import subprocess, time, os,win32con, ctypes, re, win32com.client, ctypes, time, pyautogui
@@ -1647,10 +1647,10 @@ class MouseSimulationThread(QThread):
                     mapping = ControllerMapping(joystick)
                     if joystick.get_button(mapping.guide) or joystick.get_button(mapping.right_stick_in) or joystick.get_button(mapping.left_stick_in):
                         running = False
-                        if self.parent.is_virtual_keyboard_open():
-                            self.parent.close_virtual_keyboard()
-                        if self.parent.is_magnifier_open():
-                            self.parent.close_magnifier()
+                        if self.is_virtual_keyboard_open():
+                            self.close_virtual_keyboard()
+                        if self.is_magnifier_open():
+                            self.close_magnifier()
                         right_bottom_x = screen_width - 1
                         right_bottom_y = screen_height - 1
                         pyautogui.moveTo(right_bottom_x, right_bottom_y)
@@ -1674,10 +1674,10 @@ class MouseSimulationThread(QThread):
                     if mapping.has_hat:
                         hat_value = joystick.get_hat(0)
                         if hat_value == (-1, 0):
-                            self.parent.decrease_volume()
+                            self.decrease_volume()
                             time.sleep(0.2)
                         elif hat_value == (1, 0):
-                            self.parent.increase_volume()
+                            self.increase_volume()
                             time.sleep(0.2)
                         elif joystick.get_button(mapping.button_x) or hat_value == (0, -1):
                             scrolling_down = True
@@ -1688,10 +1688,10 @@ class MouseSimulationThread(QThread):
                             scrolling_up = False
                     else:
                         if joystick.get_button(mapping.dpad_left):
-                            self.parent.decrease_volume()
+                            self.decrease_volume()
                             time.sleep(0.2)
                         elif joystick.get_button(mapping.dpad_right):
-                            self.parent.increase_volume()
+                            self.increase_volume()
                             time.sleep(0.2)
                         if joystick.get_button(mapping.button_x) or joystick.get_button(mapping.dpad_down):
                             scrolling_down = True
@@ -1714,10 +1714,10 @@ class MouseSimulationThread(QThread):
                             pyautogui.moveTo(screen_width * 7 / 8, screen_height * 6 / 8)
                             time.sleep(0.5)
                         if joystick.get_button(mapping.start):
-                            if not self.parent.is_magnifier_open():
-                                self.parent.open_magnifier()
+                            if not self.is_magnifier_open():
+                                self.open_magnifier()
                             else:
-                                self.parent.close_magnifier()
+                                self.close_magnifier()
                             time.sleep(0.5)
                     if lt_val > 0.5:
                         sensitivity = SENS_HIGH
@@ -1730,14 +1730,14 @@ class MouseSimulationThread(QThread):
                         sensitivity = SENS_MEDIUM
                         sensitivity1 = SENS_LOW
                     if joystick.get_button(mapping.start):
-                        if self.parent.is_magnifier_open():
-                            self.parent.close_magnifier()
+                        if self.is_magnifier_open():
+                            self.close_magnifier()
                         else:
-                            if self.parent.is_virtual_keyboard_open():
-                                self.parent.close_virtual_keyboard()
+                            if self.is_virtual_keyboard_open():
+                                self.close_virtual_keyboard()
                             else:
                                 pyautogui.moveTo(int(screen_width/2), int(screen_height/1.5))
-                                self.parent.open_virtual_keyboard()
+                                self.open_virtual_keyboard()
                         time.sleep(0.5)
                     if joystick.get_button(mapping.back):
                         pyautogui.hotkey('win', 'tab')
@@ -1745,18 +1745,18 @@ class MouseSimulationThread(QThread):
                         time.sleep(0.5)
                     dx = dy = 0
                     if abs(rx_axis) > DEADZONE:
-                        self.parent.move_mouse_once()
+                        self.move_mouse_once()
                         dx = rx_axis * sensitivity1
                     if abs(ry_axis) > DEADZONE:
-                        self.parent.move_mouse_once()
+                        self.move_mouse_once()
                         dy = ry_axis * sensitivity1
                     pyautogui.moveRel(dx, dy)
                     dx = dy = 0
                     if abs(x_axis) > DEADZONE:
-                        self.parent.move_mouse_once()
+                        self.move_mouse_once()
                         dx = x_axis * sensitivity
                     if abs(y_axis) > DEADZONE:
-                        self.parent.move_mouse_once()
+                        self.move_mouse_once()
                         dy = y_axis * sensitivity
                     pyautogui.moveRel(dx, dy)
                     if scrolling_up:
@@ -1772,6 +1772,94 @@ class MouseSimulationThread(QThread):
             print("鼠标已退出")
     def stop(self):
         self._running = False
+    def is_virtual_keyboard_open(self):
+        """检查是否已经打开虚拟键盘"""
+        for process in psutil.process_iter(['name']):
+            try:
+                if process.info['name'] and process.info['name'].lower() == 'osk.exe':
+                    return True
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+        return False
+    def close_virtual_keyboard(self):
+        """关闭虚拟键盘"""
+        for process in psutil.process_iter(['name']):
+            try:
+                if process.info['name'] and process.info['name'].lower() == 'osk.exe':
+                    process.terminate()  # 终止虚拟键盘进程
+                    process.wait()  # 等待进程完全关闭
+                    print("虚拟键盘已关闭")
+                    return
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+    def open_virtual_keyboard(self):
+        """开启系统虚拟键盘"""
+        try:
+            ctypes.windll.shell32.ShellExecuteW(None, "open", "osk.exe", None, None, 1)
+        except FileNotFoundError:
+            print("无法找到虚拟键盘程序")
+    def move_mouse_once(self):
+        """模拟鼠标移动，避免光标不显示"""
+        class MOUSEINPUT(ctypes.Structure):
+            _fields_ = [("dx", ctypes.c_long),
+                        ("dy", ctypes.c_long),
+                        ("mouseData", ctypes.c_ulong),
+                        ("dwFlags", ctypes.c_ulong),
+                        ("time", ctypes.c_ulong),
+                        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+
+        class INPUT_UNION(ctypes.Union):
+            _fields_ = [("mi", MOUSEINPUT)]
+
+        class INPUT(ctypes.Structure):
+            _fields_ = [("type", ctypes.c_ulong),
+                        ("u", INPUT_UNION)]
+
+        def send(dx, dy):
+            extra = ctypes.c_ulong(0)
+            mi = MOUSEINPUT(dx, dy, 0, 0x0001, 0, ctypes.pointer(extra))  # 0x0001 = MOUSEEVENTF_MOVE
+            inp = INPUT(0, INPUT_UNION(mi))  # 0 = INPUT_MOUSE
+            ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+
+        send(1, 0)   # 向右移动1像素
+        send(-1, 0)  # 向左移动1像素
+    def is_magnifier_open(self):
+        """检查放大镜是否已打开"""
+        for process in psutil.process_iter(['name']):
+            try:
+                if process.info['name'] and process.info['name'].lower() == 'magnify.exe':
+                    return True
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+        return False
+
+    def open_magnifier(self):
+        """打开系统放大镜"""
+        try:
+            ctypes.windll.shell32.ShellExecuteW(None, "open", "magnify.exe", None, None, 1)
+        except FileNotFoundError:
+            print("无法找到放大镜程序")
+
+    def close_magnifier(self):
+        """关闭系统放大镜"""
+        for process in psutil.process_iter(['name']):
+            try:
+                if process.info['name'] and process.info['name'].lower() == 'magnify.exe':
+                    process.terminate()
+                    process.wait()
+                    print("放大镜已关闭")
+                    return
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+    def increase_volume(self):
+        """增加系统音量"""
+        ctypes.windll.user32.keybd_event(0xAF, 0, 0, 0)  # VK_VOLUME_UP
+        ctypes.windll.user32.keybd_event(0xAF, 0, 2, 0)  # KEYEVENTF_KEYUP
+    
+    def decrease_volume(self):
+        """降低系统音量"""
+        ctypes.windll.user32.keybd_event(0xAE, 0, 0, 0)  # VK_VOLUME_DOWN
+        ctypes.windll.user32.keybd_event(0xAE, 0, 2, 0)  # KEYEVENTF_KEYUP
 class QuickStreamAppAddThread(QThread):
     finished_signal = pyqtSignal()
 
@@ -2017,7 +2105,7 @@ class GameSelector(QWidget):
 
         else:
             # 添加一个提示按钮
-            no_games_button = QPushButton("请点击-更多-按钮添加含有快捷方式的目录后\n使用-设置-刷新游戏-按钮添加主页面游戏")
+            no_games_button = QPushButton("没有发现游戏\n点击设置-管理-按钮 了解该软件游戏库工作原理")
             no_games_button.setFixedSize(int(700 * self.scale_factor), int(200 * self.scale_factor))
             no_games_button.setStyleSheet(f"""
                 QPushButton {{
@@ -2046,8 +2134,13 @@ class GameSelector(QWidget):
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFixedHeight(int(320 * self.scale_factor *2.4))  # 设置高度为90% 
         self.scroll_area.setFixedWidth(int(self.width()))  # 设置宽度为100%
-        self.scroll_area.setAttribute(Qt.WA_AcceptTouchEvents)  # 滚动支持
         self.scroll_area.setContentsMargins(0, 0, 0, 0)  # 设置边距为0
+        # 启用触摸滑动手势
+        QScroller.grabGesture(self.scroll_area.viewport(), QScroller.LeftMouseButtonGesture)
+        self.scroll_area.horizontalScrollBar().valueChanged.connect(self.update_additional_game_name_label_position)
+        # 垂直的self.scroll_area.verticalScrollBar().valueChanged.connect(self.update_additional_game_name_label_position)
+
+
 
         # 隐藏滚动条和边框
         self.scroll_area.setStyleSheet("""
@@ -2202,7 +2295,7 @@ class GameSelector(QWidget):
             controller_name = controller_data['controller'].get_name()
             self.update_controller_status(controller_name)
         # 右侧文字
-        right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.95-Alpha")
+        right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.95-Alpha2")
         right_label.setStyleSheet(f"""
             QLabel {{
                 font-family: "Microsoft YaHei"; 
@@ -2316,6 +2409,23 @@ class GameSelector(QWidget):
         self.play_time_timer.timeout.connect(self.update_play_time)
         self.play_time_timer.start(60 * 1000)  # 60秒
 
+    def update_additional_game_name_label_position(self):
+        """在滚动时同步更新additional_game_name_label的位置"""
+        if (
+            hasattr(self, 'additional_game_name_label')
+            and isinstance(self.additional_game_name_label, QLabel)
+            and self.current_section == 0
+            and self.more_section == 0
+            and self.buttons
+            and 0 <= self.current_index < len(self.buttons)
+        ):
+            current_button = self.buttons[self.current_index]
+            button_width = current_button.width()
+            button_pos = current_button.mapToGlobal(QPoint(0, 0))
+            self.additional_game_name_label.move(
+                button_pos.x() + (button_width - self.additional_game_name_label.width()) // 2,
+                button_pos.y() - self.game_name_label.height() - 20
+            )
     def startopenmaobackup(self, sysargv, game_name, exe_path):
         # 检查是否已有maobackup.exe进程在运行
         for proc in psutil.process_iter(['name', 'exe']):
@@ -2495,79 +2605,6 @@ class GameSelector(QWidget):
                         widget = item.itemAt(j).widget()
                         if widget:
                             widget.setVisible(show)
-    def is_virtual_keyboard_open(self):
-        """检查是否已经打开虚拟键盘"""
-        for process in psutil.process_iter(['name']):
-            try:
-                if process.info['name'] and process.info['name'].lower() == 'osk.exe':
-                    return True
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
-        return False
-    def close_virtual_keyboard(self):
-        """关闭虚拟键盘"""
-        for process in psutil.process_iter(['name']):
-            try:
-                if process.info['name'] and process.info['name'].lower() == 'osk.exe':
-                    process.terminate()  # 终止虚拟键盘进程
-                    process.wait()  # 等待进程完全关闭
-                    print("虚拟键盘已关闭")
-                    return
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
-    def move_mouse_once(self):
-        """模拟鼠标移动，避免光标不显示"""
-        class MOUSEINPUT(ctypes.Structure):
-            _fields_ = [("dx", ctypes.c_long),
-                        ("dy", ctypes.c_long),
-                        ("mouseData", ctypes.c_ulong),
-                        ("dwFlags", ctypes.c_ulong),
-                        ("time", ctypes.c_ulong),
-                        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
-
-        class INPUT_UNION(ctypes.Union):
-            _fields_ = [("mi", MOUSEINPUT)]
-
-        class INPUT(ctypes.Structure):
-            _fields_ = [("type", ctypes.c_ulong),
-                        ("u", INPUT_UNION)]
-
-        def send(dx, dy):
-            extra = ctypes.c_ulong(0)
-            mi = MOUSEINPUT(dx, dy, 0, 0x0001, 0, ctypes.pointer(extra))  # 0x0001 = MOUSEEVENTF_MOVE
-            inp = INPUT(0, INPUT_UNION(mi))  # 0 = INPUT_MOUSE
-            ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
-
-        send(1, 0)   # 向右移动1像素
-        send(-1, 0)  # 向左移动1像素
-    def is_magnifier_open(self):
-        """检查放大镜是否已打开"""
-        for process in psutil.process_iter(['name']):
-            try:
-                if process.info['name'] and process.info['name'].lower() == 'magnify.exe':
-                    return True
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
-        return False
-
-    def open_magnifier(self):
-        """打开系统放大镜"""
-        try:
-            ctypes.windll.shell32.ShellExecuteW(None, "open", "magnify.exe", None, None, 1)
-        except FileNotFoundError:
-            print("无法找到放大镜程序")
-
-    def close_magnifier(self):
-        """关闭系统放大镜"""
-        for process in psutil.process_iter(['name']):
-            try:
-                if process.info['name'] and process.info['name'].lower() == 'magnify.exe':
-                    process.terminate()
-                    process.wait()
-                    print("放大镜已关闭")
-                    return
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
 
     def mouse_simulation(self):
         """开启鼠标映射（线程方式）"""
@@ -2591,12 +2628,6 @@ class GameSelector(QWidget):
             self.mouse_window.close()
             self.mouse_window = None
             
-    def open_virtual_keyboard(self):
-        """开启系统虚拟键盘"""
-        try:
-            ctypes.windll.shell32.ShellExecuteW(None, "open", "osk.exe", None, None, 1)
-        except FileNotFoundError:
-            print("无法找到虚拟键盘程序")
     def toggle_mute(self):
         """静音或恢复声音"""
         try:
@@ -3152,7 +3183,7 @@ class GameSelector(QWidget):
             self.switch_to_all_software()
             return
         #冻结相关
-        if os.path.exists("./_internal/pssuspend64.exe"):
+        if os.path.exists("./_internal/pssuspend64.exe") and self.freeze:
             for app in valid_apps:
                 if app["name"] == game_name:
                     game_path = app["path"]
@@ -3225,7 +3256,8 @@ class GameSelector(QWidget):
                             subprocess.Popen(tool_path, shell=True)
         if game_cmd:
             #self.showMinimized()
-            subprocess.Popen(game_cmd, shell=True)
+            # subprocess.Popen(game_cmd, shell=True)
+            os.startfile(game_cmd)  # 使用os.startfile启动游戏
             #self.showFullScreen()
             return
         # 新增：处理detached字段，优先启动detached中的.url
@@ -3521,7 +3553,7 @@ class GameSelector(QWidget):
                         self._back_start_progress = ProgressDialog(self)
                         QApplication.processEvents()
                         pressed = True
-                        for i in range(0, 101, 2):
+                        for i in range(0, 101, 3):
                             # 实时检测按键是否松开
                             back_pressed = controller.get_button(mapping.back)
                             start_pressed = controller.get_button(mapping.start)
