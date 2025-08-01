@@ -2216,9 +2216,7 @@ class GameSelector(QWidget):
         self.freezeapp = None
         self.winTaskbar = TaskbarWindow()
         if self.killexplorer == True and STARTUP == False:
-            hide_desktop_icons()
-            hide_taskbar()
-            self.winTaskbar.show()
+            self.wintaskbarshow()
         self.showFullScreen()
         # 确保窗口捕获焦点
         self.setFocusPolicy(Qt.StrongFocus)
@@ -2601,7 +2599,7 @@ class GameSelector(QWidget):
             controller_name = controller_data['controller'].get_name()
             self.update_controller_status(controller_name)
         # 右侧文字
-        right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.95-Alpha2")
+        right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.95-Beta")
         right_label.setStyleSheet(f"""
             QLabel {{
                 font-family: "Microsoft YaHei"; 
@@ -2707,6 +2705,8 @@ class GameSelector(QWidget):
                 self.tray_icon.setContextMenu(create_tray_menu())
             elif reason == QSystemTrayIcon.Trigger:  # 左键
                 self.show_window()
+                if self.killexplorer == True:
+                    self.wintaskbarshow()
 
         self.tray_icon.activated.connect(tray_icon_activated)
         self.tray_icon.show()  # 显示托盘图标
@@ -2715,6 +2715,10 @@ class GameSelector(QWidget):
         self.play_time_timer.timeout.connect(self.update_play_time)
         self.play_time_timer.start(60 * 1000)  # 60秒
 
+    def wintaskbarshow(self):
+        hide_desktop_icons()
+        hide_taskbar()
+        self.winTaskbar.show()
     def update_additional_game_name_label_position(self):
         """在滚动时同步更新additional_game_name_label的位置"""
         if (
@@ -3876,9 +3880,7 @@ class GameSelector(QWidget):
                     #self.ignore_input_until = pygame.time.get_ticks() + 500 
                     #if STARTUP:subprocess.run(["taskkill", "/f", "/im", "explorer.exe"])#STARTUP = False
                     if self.killexplorer == True:
-                        hide_desktop_icons()
-                        hide_taskbar()
-                        self.winTaskbar.show()
+                        self.wintaskbarshow()
                     #if STARTUP:
                     #    self.exitdef(False)
                     #    # 无参数重启
@@ -4074,6 +4076,8 @@ class GameSelector(QWidget):
     def exitdef(self):
         """退出程序"""
         # 停止所有线程
+        if self.killexplorer == True and hasattr(self, 'winTaskbar'):
+            self.winTaskbar.on_back_to_desktop()
         if hasattr(self, 'monitor_thread'):
             self.monitor_thread.stop()
             self.monitor_thread.wait()
@@ -4081,8 +4085,6 @@ class GameSelector(QWidget):
             self.controller_thread.stop()
             self.controller_thread.wait()
         
-        if self.killexplorer == True and hasattr(self, 'winTaskbar'):
-            self.winTaskbar.on_back_to_desktop()
             
         #self.close()
         QApplication.quit()
@@ -6501,7 +6503,7 @@ class SettingsWindow(QWidget):
         if self.parent().killexplorer and hasattr(self, 'winTaskbar'):
             self.parent().winTaskbar.on_back_to_desktop()
         # 退出程序
-        QTimer.singleShot(500, QApplication.quit)
+        QTimer.singleShot(1000, QApplication.quit)
 
 
 # 应用程序入口
