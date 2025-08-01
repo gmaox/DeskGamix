@@ -8,7 +8,7 @@ from PyQt5 import QtWidgets
 from PyQt5 import QtGui
 import pygame
 import win32gui,win32process,psutil,win32api
-from PyQt5.QtWidgets import QApplication, QListWidgetItem, QMessageBox, QScroller, QSystemTrayIcon, QMenu , QVBoxLayout, QDialog, QGridLayout, QWidget, QPushButton, QLabel, QDesktopWidget, QHBoxLayout, QFileDialog, QSlider, QLineEdit, QProgressBar, QScrollArea, QFrame
+from PyQt5.QtWidgets import QApplication, QListWidgetItem, QMainWindow, QMessageBox, QScroller, QSystemTrayIcon, QMenu , QVBoxLayout, QDialog, QGridLayout, QWidget, QPushButton, QLabel, QDesktopWidget, QHBoxLayout, QFileDialog, QSlider, QLineEdit, QProgressBar, QScrollArea, QFrame
 from PyQt5.QtGui import QFont, QPixmap, QIcon, QColor
 from PyQt5.QtCore import QDateTime, QSize, Qt, QThread, pyqtSignal, QTimer, QPoint, QProcess 
 import subprocess, time, os,win32con, ctypes, re, win32com.client, ctypes, time, pyautogui
@@ -162,10 +162,284 @@ load_morefloder_shortcuts()
 print(more_apps)
 print(valid_apps)
 
+def get_desktop_listview():
+    # 先找WorkerW窗口
+    def callback(hwnd, result):
+        if win32gui.GetClassName(hwnd) == "WorkerW":
+            defview = win32gui.FindWindowEx(hwnd, 0, "SHELLDLL_DefView", None)
+            if defview:
+                result.append(defview)
+    result = []
+    win32gui.EnumWindows(callback, result)
+    if result:
+        return win32gui.FindWindowEx(result[0], 0, "SysListView32", None)
+    # 兼容老方式
+    progman = win32gui.FindWindow("Progman", None)
+    defview = win32gui.FindWindowEx(progman, 0, "SHELLDLL_DefView", None)
+    if defview:
+        return win32gui.FindWindowEx(defview, 0, "SysListView32", None)
+    return None
 
-# 焦点判断线程的标志变量
-focus = True
-focus_lock = threading.Lock()
+def hide_desktop_icons():
+    listview = get_desktop_listview()
+    if listview:
+        win32gui.ShowWindow(listview, win32con.SW_HIDE)
+
+def show_desktop_icons():
+    listview = get_desktop_listview()
+    if listview:
+        win32gui.ShowWindow(listview, win32con.SW_SHOW)
+def toggle_taskbar():
+    # 获取任务栏窗口句柄
+    taskbar = win32gui.FindWindow("Shell_TrayWnd", None)
+    # 获取当前任务栏状态
+    is_visible = win32gui.IsWindowVisible(taskbar)
+    # 切换显示状态
+    ctypes.windll.user32.ShowWindow(taskbar, 0 if is_visible else 5)  # 0=隐藏, 5=显示
+
+def hide_taskbar():
+    taskbar = win32gui.FindWindow("Shell_TrayWnd", None)
+    ctypes.windll.user32.ShowWindow(taskbar, 0)  # 隐藏
+
+def show_taskbar():
+    taskbar = win32gui.FindWindow("Shell_TrayWnd", None)
+    ctypes.windll.user32.ShowWindow(taskbar, 5)  # 显示
+
+# 获取系统的屏幕边界
+def get_screen_rect():
+    user32 = ctypes.windll.user32
+    return (0, 0, user32.GetSystemMetrics(0), user32.GetSystemMetrics(1))
+
+# 获取当前的工作区域（最大化时的边界）
+def get_work_area():
+    # 获取整个屏幕区域
+    user32 = ctypes.windll.user32
+    screen_rect = (0, 0, user32.GetSystemMetrics(0), user32.GetSystemMetrics(1))
+    # 获取任务栏窗口句柄
+    taskbar = win32gui.FindWindow("Shell_TrayWnd", None)
+    if not taskbar:
+        return screen_rect
+    # 获取任务栏位置和大小
+    rect = win32gui.GetWindowRect(taskbar)
+    # 判断任务栏在屏幕的哪一边
+    left, top, right, bottom = rect
+    sw, sh = screen_rect[2], screen_rect[3]
+    # 默认工作区为全屏
+    work_left, work_top, work_right, work_bottom = 0, 0, sw, sh
+    # 判断任务栏位置
+    if left <= 0 and right >= sw:  # 顶部或底部
+        if top == 0:
+            work_top = bottom  # 任务栏在顶部
+        else:
+            work_bottom = top  # 任务栏在底部
+    elif top <= 0 and bottom >= sh:  # 左侧或右侧
+        if left == 0:
+            work_left = right  # 任务栏在左侧
+        else:
+            work_right = left  # 任务栏在右侧
+    return (work_left, work_top, work_right, work_bottom)
+
+# 设置工作区域
+def set_work_area(left, top, right, bottom):
+    SPI_SETWORKAREA = 0x002F
+    rect = ctypes.wintypes.RECT(left, top, right, bottom)
+    res = ctypes.windll.user32.SystemParametersInfoW(SPI_SETWORKAREA, 0, ctypes.byref(rect), 1)
+    return res != 0
+
+class TaskbarWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowFlags(
+            Qt.FramelessWindowHint |
+            Qt.Tool |
+            Qt.WindowStaysOnBottomHint |
+            Qt.WindowDoesNotAcceptFocus
+        )
+        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnBottomHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setWindowOpacity(0.7)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #2E2E2E;
+                border: 1px solid #222;
+            }
+            QLabel {
+                color: #CCCCCC;
+                font-size: 22px;
+            }
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #aaa, stop:1 #888);
+                border: 1px solid #222;
+                font-size: 26px;
+                min-width: 120px;
+                min-height: 60px;
+            }
+            QPushButton:hover {
+                background: #bbb;
+            }
+            QSlider::groove:horizontal {
+                height: 10px;
+                border: 1px solid #666;
+                background: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #999, stop:1 #666
+                );
+                border-radius: 5px;
+            }
+            QSlider::handle:horizontal {
+                background: #ffffff;
+                border: 2px solid #000;
+                width: 14px;
+                height: 14px;
+                margin: -5px 0;
+                border-radius: 7px;
+            }
+        """)
+        def get_desktop_parent():
+            progman = win32gui.FindWindow("Progman", None)
+            defview = win32gui.FindWindowEx(progman, 0, "SHELLDLL_DefView", None)
+            if defview:
+                return defview
+            # 查找WorkerW
+            result = []
+            def callback(hwnd, result):
+                if win32gui.GetClassName(hwnd) == "WorkerW":
+                    child = win32gui.FindWindowEx(hwnd, 0, "SHELLDLL_DefView", None)
+                    if child:
+                        result.append(child)
+            win32gui.EnumWindows(callback, result)
+            if result:
+                return result[0]
+            return win32gui.GetDesktopWindow()
+        desktop_parent = get_desktop_parent()
+        self.winId()  # 确保窗口已创建
+        ctypes.windll.user32.SetParent(int(self.winId()), desktop_parent)
+        # taskbar = win32gui.FindWindow("Shell_TrayWnd", None)
+        # rect = win32gui.GetWindowRect(taskbar)
+        # taskbar_height = rect[3] - rect[1]
+        # taskbar_width = rect[2] - rect[0]
+        # self.resize(taskbar_width, taskbar_height)
+        # self.move(rect[0], rect[1])
+        screen = QApplication.primaryScreen().geometry()
+        # 让主窗口全屏
+        self.setGeometry(0, 0, screen.width(), screen.height())
+        self.setWindowOpacity(0.9)
+
+        # 主部件和布局
+        central = QWidget(self)
+        self.setCentralWidget(central)
+        layout = QHBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        # 创建一个居中容器用于放置按钮
+        btn_container = QWidget(self.centralWidget())
+        btn_layout = QHBoxLayout(btn_container)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(10)
+
+        # 回到桌面按钮
+        btn_desktop = QPushButton("🖥️回到桌面", self)
+        btn_desktop.setStyleSheet("font-size: 15px;")
+        btn_desktop.clicked.connect(self.on_back_to_desktop)
+        btn_layout.addWidget(btn_desktop)
+
+        # Win+Tab按钮
+        btn_wintab = QPushButton("🗒️任务视图", self)
+        btn_wintab.setStyleSheet("font-size: 15px;")
+        btn_wintab.clicked.connect(self.on_win_tab)
+        btn_layout.addWidget(btn_wintab)
+
+        # 打开资源管理器按钮
+        btn_explorer = QPushButton("📦️打开前端", self)
+        btn_explorer.setStyleSheet("font-size: 15px;")
+        btn_explorer.clicked.connect(self.on_open_dgmix)
+        btn_layout.addWidget(btn_explorer)
+
+        # 将按钮容器添加到主布局并居中
+        layout.addWidget(btn_container, alignment=Qt.AlignCenter)
+
+        # 全屏隐藏按钮（中空，四个区域覆盖，按钮区域不覆盖）
+        self.btn_hide_top = QPushButton("", self)
+        self.btn_hide_top.setStyleSheet("background: rgba(0,0,0,0.01); border: none;")
+        self.btn_hide_top.clicked.connect(self.on_hide_all)
+        self.btn_hide_top.setVisible(True)
+
+        self.btn_hide_bottom = QPushButton("", self)
+        self.btn_hide_bottom.setStyleSheet("background: rgba(0,0,0,0.01); border: none;")
+        self.btn_hide_bottom.clicked.connect(self.on_hide_all)
+        self.btn_hide_bottom.setVisible(True)
+
+        self.btn_hide_left = QPushButton("", self)
+        self.btn_hide_left.setStyleSheet("background: rgba(0,0,0,0.01); border: none;")
+        self.btn_hide_left.clicked.connect(self.on_hide_all)
+        self.btn_hide_left.setVisible(True)
+
+        self.btn_hide_right = QPushButton("", self)
+        self.btn_hide_right.setStyleSheet("background: rgba(0,0,0,0.01); border: none;")
+        self.btn_hide_right.clicked.connect(self.on_hide_all)
+        self.btn_hide_right.setVisible(True)
+
+        # 跟随窗口和btn_container大小变化调整隐藏按钮大小和位置
+        self.resizeEvent = self._resizeEvent
+
+        # 重写show方法，在显示窗口时执行相关代码
+        old_show = self.show
+        def new_show():
+            # 获取屏幕工作区，保存供恢复
+            self._original_work_area = get_work_area()
+            screen_rect = get_screen_rect()
+            set_work_area(*screen_rect)
+            old_show()
+        self.show = new_show
+
+    def _resizeEvent(self, event):
+        # 获取btn_container的几何信息
+        btn_container = self.centralWidget().findChild(QWidget)
+        if btn_container:
+            # 重新计算中间空白区域的位置和大小
+            screen = QApplication.primaryScreen().geometry()
+            width = int(screen.width() * 0.33)
+            height = int(screen.height() * 0.1)
+            x = (screen.width() - width) // 2
+            y = (screen.height() - height) // 2
+            btn_container.setGeometry(x, y, width, height)
+            btn_container.setFixedSize(width, height)
+            c_geo = btn_container.geometry()
+            # 顶部按钮
+            self.btn_hide_top.setGeometry(
+                0, 0, self.width(), c_geo.top()
+            )
+            # 底部按钮
+            self.btn_hide_bottom.setGeometry(
+                0, c_geo.bottom() + 1, self.width(), self.height() - c_geo.bottom() - 1
+            )
+            # 左侧按钮
+            self.btn_hide_left.setGeometry(
+                0, c_geo.top(), c_geo.left(), c_geo.height()
+            )
+            # 右侧按钮
+            self.btn_hide_right.setGeometry(
+                c_geo.right() + 1, c_geo.top(), self.width() - c_geo.right() - 1, c_geo.height()
+            )
+        if hasattr(super(), 'resizeEvent'):
+            super().resizeEvent(event)
+    def on_back_to_desktop(self):
+        show_desktop_icons()
+        show_taskbar()
+        set_work_area(*getattr(self, "_original_work_area", get_work_area()))
+        self.close()
+    def on_win_tab(self):
+        # 模拟 Win+Tab
+        pyautogui.hotkey('win', 'tab')
+    def on_hide_all(self):
+        # 模拟 Win+D
+        pyautogui.hotkey('win', 'd')
+    def on_open_dgmix(self):
+        global GSHWND
+        ctypes.windll.user32.ShowWindow(GSHWND, 9) # 9=SW_RESTORE            
+        ctypes.windll.user32.SetForegroundWindow(GSHWND)
+
 # 游戏运行状态监听线程
 class MonitorRunningAppsThread(QThread):
     play_reload_signal = pyqtSignal()  # 用于通知主线程重载
@@ -227,10 +501,18 @@ class ScreenshotLoaderThread(QThread):
         super().__init__()
         self.screenshots = screenshots
         self.icon_size = icon_size
+        self.running = True
+
+    def stop(self):
+        """停止线程"""
+        self.running = False
+        self.wait()  # 等待线程结束
 
     def run(self):
         loaded_screenshots = []
         for path, game, ts in self.screenshots:
+            if not self.running:  # 检查是否需要停止
+                break
             try:
                 pixmap = QtGui.QPixmap(path)
                 thumb = pixmap.scaled(
@@ -239,7 +521,8 @@ class ScreenshotLoaderThread(QThread):
                 loaded_screenshots.append((thumb, path, game, ts))
             except Exception as e:
                 print(f"加载图片失败: {path}, 错误: {e}")
-        self.screenshot_loaded.emit(loaded_screenshots)
+        if self.running:  # 只有在没有停止的情况下才发送信号
+            self.screenshot_loaded.emit(loaded_screenshots)
 
 class ScreenshotWindow(QDialog):
     def __init__(self, parent=None):
@@ -278,7 +561,7 @@ class ScreenshotWindow(QDialog):
             exe_path = os.path.join(program_directory, "maobackup.exe")
             game_name = self.game_name_label.text()
             self.parent().startopenmaobackup(sysargv, game_name, exe_path)
-            self.close()  # 关闭当前窗口
+            self.safe_close()  # 关闭当前窗口
         def on_mapping_clicked():
             game_name = self.game_name_label.text()
             # 读取 set.json 的 on_mapping_clicked 列表
@@ -376,7 +659,7 @@ class ScreenshotWindow(QDialog):
             
         def on_custom_proc_clicked(): 
             self.parent().custom_valid_show(self.game_name_label.text()) if self.parent() and hasattr(self.parent(), "custom_valid_show") else None 
-            self.close()  # 关闭当前窗口
+            self.safe_close()  # 关闭当前窗口
         def on_tools_clicked():
             game_name = self.game_name_label.text()
             if "custom_tools" not in settings:
@@ -568,7 +851,7 @@ class ScreenshotWindow(QDialog):
             self.qsaa_thread = QuickStreamAppAddThread(args=["-delete", str(self.game_name_label.text())])
             if self.parent() and hasattr(self.parent(), "deep_reload_games"):
                 self.qsaa_thread.finished_signal.connect(self.parent().deep_reload_games)
-                self.qsaa_thread.finished_signal.connect(self.close)
+                self.qsaa_thread.finished_signal.connect(self.safe_close)
             self.qsaa_thread.start()
 
 
@@ -1056,7 +1339,7 @@ class ScreenshotWindow(QDialog):
                     self.update_left_panel_button_styles()
                     self.update_highlight()
             elif action in ('B',):
-                self.close()
+                self.safe_close()
             self.last_input_time = current_time
             return
 
@@ -1069,7 +1352,7 @@ class ScreenshotWindow(QDialog):
             elif action == 'Y':
                 self.delete_selected_items()
             elif action == 'B':
-                self.close()
+                self.safe_close()
             elif action == 'UP':
                 self.move_selection(-self.get_row_count())
             elif action == 'DOWN':
@@ -1089,7 +1372,7 @@ class ScreenshotWindow(QDialog):
                     self.current_index = min(len(self.buttons) - 1, self.current_index + 1)
                     self.update_highlight()
             elif action == 'START':
-                self.close()
+                self.safe_close()
             self.last_input_time = current_time
 
     def handle_info_bar_link(self, link):
@@ -1158,6 +1441,7 @@ class ScreenshotWindow(QDialog):
 
     def start_fullscreen_preview(self):
         """显示当前选中图片的全屏预览对话框"""
+        global FSPREVIEWHWND
         current_item = self.listWidget.currentItem()
         if not current_item:
             return
@@ -1171,6 +1455,7 @@ class ScreenshotWindow(QDialog):
         self.is_fullscreen_preview = QtWidgets.QDialog(self, flags=Qt.Dialog)
         self.is_fullscreen_preview.setWindowFlag(Qt.Window)
         self.is_fullscreen_preview.showFullScreen()
+        FSPREVIEWHWND = int(self.is_fullscreen_preview.winId())
         
         # 创建主布局
         main_layout = QtWidgets.QVBoxLayout(self.is_fullscreen_preview)
@@ -1392,6 +1677,24 @@ class ScreenshotWindow(QDialog):
                     self.all_screenshots = [s for s in self.all_screenshots if s[0] != path]
                     self.current_screenshots = [s for s in self.current_screenshots if s[0] != path]
                     self.reload_screenshots()
+
+    def safe_close(self):
+        """安全关闭窗口，确保停止所有后台线程"""
+        # 检查并停止 ScreenshotLoaderThread
+        if hasattr(self, 'loader_thread') and self.loader_thread:
+            if self.loader_thread.isRunning():
+                self.loader_thread.stop()
+        # 关闭窗口
+        self.close()
+
+    def closeEvent(self, event):
+        """窗口关闭事件，确保停止所有后台线程"""
+        # 检查并停止 ScreenshotLoaderThread
+        if hasattr(self, 'loader_thread') and self.loader_thread:
+            if self.loader_thread.isRunning():
+                self.loader_thread.stop()
+        # 调用父类的 closeEvent
+        super().closeEvent(event)
 class ConfirmDialog(QDialog):
     def __init__(self, variable1, scale_factor=1.0):
         super().__init__()
@@ -1886,14 +2189,14 @@ class QuickStreamAppAddThread(QThread):
         self.finished_signal.emit()
 class GameSelector(QWidget): 
     def __init__(self):
-        global play_reload
+        global play_reload, GSHWND
         super().__init__()
         self.back_start_pressed_time = None  # 初始化按键按下时间
         self.back_start_action = set()
         self.is_mouse_simulation_running = False
         self.ignore_input_until = 0  # 初始化防抖时间戳
         self.current_section = 0  # 0=游戏选择区域，1=控制按钮区域
-
+        GSHWND = int(self.winId())
         self.setWindowIcon(QIcon('./_internal/fav.ico'))
         #if STARTUP:
         #    self.setWindowOpacity(0.0)  # 设置窗口透明度为全透明
@@ -1911,8 +2214,11 @@ class GameSelector(QWidget):
         self.killexplorer = settings.get("killexplorer", False)
         self.freeze = settings.get("freeze", False)
         self.freezeapp = None
+        self.winTaskbar = TaskbarWindow()
         if self.killexplorer == True and STARTUP == False:
-            subprocess.run(["taskkill", "/f", "/im", "explorer.exe"])
+            hide_desktop_icons()
+            hide_taskbar()
+            self.winTaskbar.show()
         self.showFullScreen()
         # 确保窗口捕获焦点
         self.setFocusPolicy(Qt.StrongFocus)
@@ -3014,10 +3320,8 @@ class GameSelector(QWidget):
             #    self.scroll_area.horizontalScrollBar().setValue(scroll_value + (button_pos.x() + button_width - scroll_area_width))
     def keyPressEvent(self, event):
         """处理键盘事件"""
-        if getattrs:
-            with focus_lock:  #焦点检查-只有打包后才能使用
-                if not focus: 
-                    return
+        if not self.gsfocus(): # 检测当前窗口是否为游戏选择界面
+            return
         if self.in_floating_window and self.floating_window:
             # 添加防抖检查
             if not self.floating_window.can_process_input():
@@ -3117,33 +3421,15 @@ class GameSelector(QWidget):
         # 更新索引并高亮
         self.current_index = new_index
         self.update_highlight()
-    # 焦点检测线程
-    def focus_thread():
-        global focus
-        while True:
-            # 获取当前活动窗口句柄
-            hwnd = win32gui.GetForegroundWindow()
-            if not hwnd:
-                print("未找到活动窗口")
-                #return False  # 未找到活动窗口
-                focus = False
-            else:
-                _, pid = win32process.GetWindowThreadProcessId(hwnd)
-                process = psutil.Process(pid)
-                exe_path = process.exe()
-                exe_name = os.path.basename(exe_path)
-                with focus_lock:
-                    if exe_name == "DesktopGame.exe":
-                        focus = True
-                        #print("焦点在游戏窗口")
-                    else:
-                        focus = False
-                        #print("焦点不在游戏窗口")
-            time.sleep(0.1)  # 稍微休眠，避免线程占用过多 CPU
+    # 焦点检测
+    def gsfocus(self):
+        # 获取当前活动窗口句柄
+        hwnd = win32gui.GetForegroundWindow()
+        if hwnd == GSHWND or globals().get("FSPREVIEWHWND", None) is not None and hwnd == globals().get("FSPREVIEWHWND"):
+            return True
+        else:
+            return False
     
-    # 启动焦点判断线程
-    thread = threading.Thread(target=focus_thread, daemon=True)
-    thread.start()   
     def restore_window(self, game_path):
         self.hide_window()
         for process in psutil.process_iter(['pid', 'exe']):
@@ -3577,62 +3863,57 @@ class GameSelector(QWidget):
                     self.back_start_pressed_time = None
                     break
         print(f"处理手柄输入: {action}")
-        if getattrs:
-            with focus_lock:  #焦点检查-只有打包后才能使用
-                if not focus: 
-                    if action == 'GUIDE':
-                        if ADMIN:
-                            try:
-                                # 将所有界面标记归零（没必要似乎
-                                #self.current_index = 0
-                                #self.current_section = 0
-                                #self.more_section = 0
-                                self.in_floating_window = False
-                                if current_time < ((self.ignore_input_until)+2000):
-                                    return
-                                self.ignore_input_until = pygame.time.get_ticks() + 500 
-                                if STARTUP:
-                                    if self.killexplorer == True:
-                                        subprocess.run(["taskkill", "/f", "/im", "explorer.exe"])
-                                        STARTUP = False
-
-                                #if STARTUP:
-                                #    self.exitdef(False)
-                                #    # 无参数重启
-                                #    subprocess.Popen([sys.executable])
-                                #self.showFullScreen()
-                                ## 记录当前窗口的 Z 顺序
-                                #z_order = []
-                                #def enum_windows_callback(hwnd, lParam):
-                                #    z_order.append(hwnd)
-                                #    return True
-                                #win32gui.EnumWindows(enum_windows_callback, None)
-                                self.is_current_window_fullscreen()
-                                hwnd = int(self.winId())
-                                ctypes.windll.user32.ShowWindow(hwnd, 9) # 9=SW_RESTORE            
-                                result = ctypes.windll.user32.SetForegroundWindow(hwnd)
-                                screen_width, screen_height = pyautogui.size()
-                                # 设置右下角坐标
-                                right_bottom_x = screen_width - 1  # 最右边
-                                right_bottom_y = screen_height - 1  # 最底部
-                                pyautogui.moveTo(right_bottom_x, right_bottom_y)
-                                if result:
-                                    print("窗口已成功带到前台")
-                                else:
-                                    print("未能将窗口带到前台，正在尝试设置为最上层")
-                                    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
-                                    time.sleep(0.2)
-                                # 移动鼠标到屏幕右下角并进行右键点击
-                                    pyautogui.rightClick(right_bottom_x, right_bottom_y)
-                                    # 恢复原来的 Z 顺序
-                                    #for hwnd in reversed(z_order):
-                                    SetWindowPos(hwnd, -2, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
-                            except Exception as e:
-                                print(f"Error: {e}")
-                        else:
-                            self.showFullScreen()
-                            self.last_input_time = current_time
-                    return
+        if not self.gsfocus():  # 检测当前窗口是否为游戏选择界面
+            if action == 'GUIDE':
+                try:
+                    # 将所有界面标记归零（没必要似乎
+                    #self.current_index = 0
+                    #self.current_section = 0
+                    #self.more_section = 0
+                    self.in_floating_window = False
+                    #if current_time < ((self.ignore_input_until)+2000):
+                    #    return
+                    #self.ignore_input_until = pygame.time.get_ticks() + 500 
+                    #if STARTUP:subprocess.run(["taskkill", "/f", "/im", "explorer.exe"])#STARTUP = False
+                    if self.killexplorer == True:
+                        hide_desktop_icons()
+                        hide_taskbar()
+                        self.winTaskbar.show()
+                    #if STARTUP:
+                    #    self.exitdef(False)
+                    #    # 无参数重启
+                    #    subprocess.Popen([sys.executable])
+                    #self.showFullScreen()
+                    ## 记录当前窗口的 Z 顺序
+                    #z_order = []
+                    #def enum_windows_callback(hwnd, lParam):
+                    #    z_order.append(hwnd)
+                    #    return True
+                    #win32gui.EnumWindows(enum_windows_callback, None)
+                    self.is_current_window_fullscreen()
+                    hwnd = int(self.winId())
+                    ctypes.windll.user32.ShowWindow(hwnd, 9) # 9=SW_RESTORE            
+                    result = ctypes.windll.user32.SetForegroundWindow(hwnd)
+                    screen_width, screen_height = pyautogui.size()
+                    # 设置右下角坐标
+                    right_bottom_x = screen_width - 1  # 最右边
+                    right_bottom_y = screen_height - 1  # 最底部
+                    pyautogui.moveTo(right_bottom_x, right_bottom_y)
+                    if result:
+                        print("窗口已成功带到前台")
+                    else:
+                        print("未能将窗口带到前台，正在尝试设置为最上层")
+                        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
+                        time.sleep(0.2)
+                    # 移动鼠标到屏幕右下角并进行右键点击
+                        pyautogui.rightClick(right_bottom_x, right_bottom_y)
+                        # 恢复原来的 Z 顺序
+                        #for hwnd in reversed(z_order):
+                        SetWindowPos(hwnd, -2, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
+                except Exception as e:
+                    print(f"Error: {e}")
+            self.ignore_input_until = current_time + 500
+            return
         
         if hasattr(self, 'confirm_dialog') and self.confirm_dialog.isVisible():  # 如果确认弹窗显示中
             print("确认弹窗显示中")
@@ -3800,8 +4081,9 @@ class GameSelector(QWidget):
             self.controller_thread.stop()
             self.controller_thread.wait()
         
-        if self.killexplorer == True:
-            subprocess.run(["start", "explorer.exe"], shell=True)
+        if self.killexplorer == True and hasattr(self, 'winTaskbar'):
+            self.winTaskbar.on_back_to_desktop()
+            
         #self.close()
         QApplication.quit()
         #def exitdef(self,rerun=True):
@@ -5237,22 +5519,22 @@ class SettingsWindow(QWidget):
         self.layout.addWidget(self.quick_add_running_btn)
 
         # 添加切换 killexplorer 状态的按钮
-        #self.killexplorer_button = QPushButton(f"沉浸模式 {'√' if settings.get('killexplorer', False) else '×'}")
-        #self.killexplorer_button.setStyleSheet(f"""
-        #    QPushButton {{
-        #        background-color: #444444;
-        #        color: white;
-        #        text-align: center;
-        #        padding: {int(10 * parent.scale_factor)}px;
-        #        border: none;
-        #        font-size: {int(16 * parent.scale_factor)}px;
-        #    }}
-        #    QPushButton:hover {{
-        #        background-color: #555555;
-        #    }}
-        #""")
-        #self.killexplorer_button.clicked.connect(self.toggle_killexplorer)
-        #self.layout.addWidget(self.killexplorer_button)
+        self.killexplorer_button = QPushButton(f"沉浸模式 {'√' if settings.get('killexplorer', False) else '×'}")
+        self.killexplorer_button.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #444444;
+                color: white;
+                text-align: center;
+                padding: {int(10 * parent.scale_factor)}px;
+                border: none;
+                font-size: {int(16 * parent.scale_factor)}px;
+            }}
+            QPushButton:hover {{
+                background-color: #555555;
+            }}
+        """)
+        self.killexplorer_button.clicked.connect(self.toggle_killexplorer)
+        self.layout.addWidget(self.killexplorer_button)
         #self.custom_valid_apps_button = QPushButton("-自定义游戏进程列表-")
         #self.custom_valid_apps_button.setStyleSheet(f"""
         #    QPushButton {{
@@ -6157,6 +6439,11 @@ class SettingsWindow(QWidget):
         # 保存设置
         with open(settings_path, "w", encoding="utf-8") as f:
             json.dump(settings, f, indent=4)
+        self.parent().killexplorer = settings["killexplorer"]
+        if self.parent().killexplorer == True:
+            hide_desktop_icons()
+            hide_taskbar()
+            self.parent().winTaskbar.show()
 
     def toggle_freeze(self):
         """切换 freeze 状态并保存设置"""
@@ -6210,11 +6497,11 @@ class SettingsWindow(QWidget):
         """完全关闭程序"""
         self.close_program_button.setText("正在退出程序...")
         self.close_program_button.setEnabled(False)  # 禁用按钮以防止重复点击
-        # 如果开启了沉浸模式，需要恢复explorer
-        if self.parent().killexplorer:
-            subprocess.run(["start", "explorer.exe"], shell=True)
+        # 如果开启了沉浸模式
+        if self.parent().killexplorer and hasattr(self, 'winTaskbar'):
+            self.parent().winTaskbar.on_back_to_desktop()
         # 退出程序
-        QTimer.singleShot(500, QApplication.quit())
+        QTimer.singleShot(500, QApplication.quit)
 
 
 # 应用程序入口
