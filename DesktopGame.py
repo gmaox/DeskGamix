@@ -6,10 +6,10 @@ import threading
 import winreg
 from PyQt5 import QtWidgets
 from PyQt5 import QtGui
-import pygame
+import pygame, math
 import win32gui,win32process,psutil,win32api
 from PyQt5.QtWidgets import QApplication, QListWidgetItem, QMainWindow, QMessageBox, QScroller, QSystemTrayIcon, QMenu , QVBoxLayout, QDialog, QGridLayout, QWidget, QPushButton, QLabel, QDesktopWidget, QHBoxLayout, QFileDialog, QSlider, QLineEdit, QProgressBar, QScrollArea, QFrame
-from PyQt5.QtGui import QFont, QPixmap, QIcon, QColor
+from PyQt5.QtGui import QPainter, QPen, QBrush, QFont, QPixmap, QIcon, QColor
 from PyQt5.QtCore import QDateTime, QSize, Qt, QThread, pyqtSignal, QTimer, QPoint, QProcess 
 import subprocess, time, os,win32con, ctypes, re, win32com.client, ctypes, time, pyautogui
 from ctypes import wintypes
@@ -1857,312 +1857,7 @@ class ConfirmDialog(QDialog):
                         width: 100%;
                     }
                 """)
-class MouseWindow(QDialog):
-    def __init__(self):
-        super().__init__()
-        self.initUI()
 
-    def initUI(self):
-        # Create a label to display the text
-        self.label = QLabel("↖(L3R3关闭映射)", self)
-        self.label.setStyleSheet("font-family: 'Microsoft YaHei'; font-size: 15px; color: white; border: 1px solid black; border-radius: 0px; background-color: rgba(0, 0, 0, 125);")
-        self.label.adjustSize()
-    
-        # Get screen geometry and set the label position
-        screen_geometry = QApplication.primaryScreen().geometry()
-        label_width = self.label.width()
-        label_height = self.label.height()
-        self.label.move(screen_geometry.width() - label_width - 30, screen_geometry.height() - label_height - 30)
-
-        # Set window properties
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.WindowTransparentForInput)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setWindowOpacity(0.7)  # 设置窗口透明度为 50%
-        self.setGeometry(screen_geometry)
-        self.show()
-class MouseSimulationThread(QThread):
-    finished_signal = pyqtSignal()
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.parent = parent
-        self._running = True
-
-    def run(self):
-        self.parent.is_mouse_simulation_running = True
-        pygame.init()
-        pygame.joystick.init()
-        joysticks = []
-        for i in range(pygame.joystick.get_count()):
-            joystick = pygame.joystick.Joystick(i)
-            joystick.init()
-            joysticks.append(joystick)
-        if not joysticks:
-            print("未检测到手柄")
-        joystick_states = {joystick.get_instance_id(): {"scrolling_up": False, "scrolling_down": False} for joystick in joysticks}
-        print("鼠标映射")
-        axes = joysticks[0].get_numaxes()
-        if axes >= 6:
-            rt_axis = 5
-        else:
-            rt_axis = 2
-        if axes >= 6:
-            lt_axis = 4
-        else:
-            lt_axis = 2
-        SENS_HIGH = 100.0
-        SENS_MEDIUM = 25.0
-        SENS_LOW  = 10.0
-        sensitivity = SENS_MEDIUM
-        sensitivity1 = SENS_LOW
-        DEADZONE = 0.1
-        clock = pygame.time.Clock()
-        scrolling_up = False
-        scrolling_down = False
-        window = self.parent.mouse_window 
-        last_mouse_x, last_mouse_y = -1, -1
-        left_button_down = False
-        right_button_down = False
-        screen_width, screen_height = pyautogui.size()
-        pyautogui.moveTo(int(screen_width/2), int(screen_height/2))
-        time.sleep(0.7)
-        running = True
-        try:
-            while running and self._running and self.parent.is_mouse_simulation_running:
-                for event in pygame.event.get():
-                    if event.type == pygame.JOYDEVICEADDED:
-                        joystick = pygame.joystick.Joystick(event.device_index)
-                        joystick.init()
-                        joysticks.append(joystick)
-                        joystick_states[joystick.get_instance_id()] = {"scrolling_up": False, "scrolling_down": False}
-                    elif event.type == pygame.JOYDEVICEREMOVED:
-                        for joystick in joysticks:
-                            if joystick.get_instance_id() == event.instance_id:
-                                joysticks.remove(joystick)
-                                del joystick_states[event.instance_id]
-                                break
-                pygame.event.pump()
-                mouse_x, mouse_y = pyautogui.position()
-                if (mouse_x, mouse_y) != (last_mouse_x, last_mouse_y):
-                    window.label.move(mouse_x, mouse_y)
-                    last_mouse_x, last_mouse_y = mouse_x, mouse_y
-                joycount = pygame.joystick.get_count()
-                for joystick in joysticks:
-                    mapping = ControllerMapping(joystick)
-                    if joystick.get_button(mapping.guide) or joystick.get_button(mapping.right_stick_in) or joystick.get_button(mapping.left_stick_in):
-                        running = False
-                        if self.is_virtual_keyboard_open():
-                            self.close_virtual_keyboard()
-                        if self.is_magnifier_open():
-                            self.close_magnifier()
-                        right_bottom_x = screen_width - 1
-                        right_bottom_y = screen_height - 1
-                        pyautogui.moveTo(right_bottom_x, right_bottom_y)
-                        break
-                    if joystick.get_button(mapping.button_a) or joystick.get_button(mapping.right_bumper):
-                        if not left_button_down:
-                            pyautogui.mouseDown()
-                            left_button_down = True
-                    else:
-                        if left_button_down:
-                            pyautogui.mouseUp()
-                            left_button_down = False
-                    if joystick.get_button(mapping.button_b) or joystick.get_button(mapping.left_bumper):
-                        if not right_button_down:
-                            pyautogui.mouseDown(button='right')
-                            right_button_down = True
-                    else:
-                        if right_button_down:
-                            pyautogui.mouseUp(button='right')
-                            right_button_down = False
-                    if mapping.has_hat:
-                        hat_value = joystick.get_hat(0)
-                        if hat_value == (-1, 0):
-                            self.decrease_volume()
-                            time.sleep(0.2)
-                        elif hat_value == (1, 0):
-                            self.increase_volume()
-                            time.sleep(0.2)
-                        elif joystick.get_button(mapping.button_x) or hat_value == (0, -1):
-                            scrolling_down = True
-                        elif joystick.get_button(mapping.button_y) or hat_value == (0, 1):
-                            scrolling_up = True
-                        else:
-                            scrolling_down = False
-                            scrolling_up = False
-                    else:
-                        if joystick.get_button(mapping.dpad_left):
-                            self.decrease_volume()
-                            time.sleep(0.2)
-                        elif joystick.get_button(mapping.dpad_right):
-                            self.increase_volume()
-                            time.sleep(0.2)
-                        if joystick.get_button(mapping.button_x) or joystick.get_button(mapping.dpad_down):
-                            scrolling_down = True
-                        else:
-                            scrolling_down = False
-                        if joystick.get_button(mapping.button_y) or joystick.get_button(mapping.dpad_up):
-                            scrolling_up = True
-                        else:
-                            scrolling_up = False
-                    x_axis = joystick.get_axis(0)
-                    y_axis = joystick.get_axis(1)
-                    rt_val = joystick.get_axis(rt_axis)
-                    lt_val = joystick.get_axis(lt_axis)
-                    rx_axis = joystick.get_axis(2)
-                    ry_axis = joystick.get_axis(3)
-                    def backandstart_pressed():
-                        if joystick.get_button(mapping.back):
-                            pyautogui.hotkey('win', 'a')
-                            screen_width, screen_height = pyautogui.size()
-                            pyautogui.moveTo(screen_width * 7 / 8, screen_height * 6 / 8)
-                            time.sleep(0.5)
-                        if joystick.get_button(mapping.start):
-                            if not self.is_magnifier_open():
-                                self.open_magnifier()
-                            else:
-                                self.close_magnifier()
-                            time.sleep(0.5)
-                    if lt_val > 0.5:
-                        sensitivity = SENS_HIGH
-                        backandstart_pressed()
-                    elif rt_val > 0.5:
-                        sensitivity = SENS_LOW
-                        sensitivity1 = SENS_HIGH
-                        backandstart_pressed()
-                    else:
-                        sensitivity = SENS_MEDIUM
-                        sensitivity1 = SENS_LOW
-                    if joystick.get_button(mapping.start):
-                        if self.is_magnifier_open():
-                            self.close_magnifier()
-                        else:
-                            if self.is_virtual_keyboard_open():
-                                self.close_virtual_keyboard()
-                            else:
-                                pyautogui.moveTo(int(screen_width/2), int(screen_height/1.5))
-                                self.open_virtual_keyboard()
-                        time.sleep(0.5)
-                    if joystick.get_button(mapping.back):
-                        pyautogui.hotkey('win', 'tab')
-                        pyautogui.moveTo(int(screen_width/2), int(screen_height/2))
-                        time.sleep(0.5)
-                    dx = dy = 0
-                    if abs(rx_axis) > DEADZONE:
-                        self.move_mouse_once()
-                        dx = rx_axis * sensitivity1
-                    if abs(ry_axis) > DEADZONE:
-                        self.move_mouse_once()
-                        dy = ry_axis * sensitivity1
-                    pyautogui.moveRel(dx, dy)
-                    dx = dy = 0
-                    if abs(x_axis) > DEADZONE:
-                        self.move_mouse_once()
-                        dx = x_axis * sensitivity
-                    if abs(y_axis) > DEADZONE:
-                        self.move_mouse_once()
-                        dy = y_axis * sensitivity
-                    pyautogui.moveRel(dx, dy)
-                    if scrolling_up:
-                        pyautogui.scroll(50)
-                    if scrolling_down:
-                        pyautogui.scroll(-50)
-                    clock.tick(int(60*joycount))
-        except KeyboardInterrupt:
-            print("程序已退出。")
-        finally:
-            self.parent.is_mouse_simulation_running = False
-            self.finished_signal.emit()
-            print("鼠标已退出")
-    def stop(self):
-        self._running = False
-    def is_virtual_keyboard_open(self):
-        """检查是否已经打开虚拟键盘"""
-        for process in psutil.process_iter(['name']):
-            try:
-                if process.info['name'] and process.info['name'].lower() == 'osk.exe':
-                    return True
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
-        return False
-    def close_virtual_keyboard(self):
-        """关闭虚拟键盘"""
-        for process in psutil.process_iter(['name']):
-            try:
-                if process.info['name'] and process.info['name'].lower() == 'osk.exe':
-                    process.terminate()  # 终止虚拟键盘进程
-                    process.wait()  # 等待进程完全关闭
-                    print("虚拟键盘已关闭")
-                    return
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
-    def open_virtual_keyboard(self):
-        """开启系统虚拟键盘"""
-        try:
-            ctypes.windll.shell32.ShellExecuteW(None, "open", "osk.exe", None, None, 1)
-        except FileNotFoundError:
-            print("无法找到虚拟键盘程序")
-    def move_mouse_once(self):
-        """模拟鼠标移动，避免光标不显示"""
-        class MOUSEINPUT(ctypes.Structure):
-            _fields_ = [("dx", ctypes.c_long),
-                        ("dy", ctypes.c_long),
-                        ("mouseData", ctypes.c_ulong),
-                        ("dwFlags", ctypes.c_ulong),
-                        ("time", ctypes.c_ulong),
-                        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
-
-        class INPUT_UNION(ctypes.Union):
-            _fields_ = [("mi", MOUSEINPUT)]
-
-        class INPUT(ctypes.Structure):
-            _fields_ = [("type", ctypes.c_ulong),
-                        ("u", INPUT_UNION)]
-
-        def send(dx, dy):
-            extra = ctypes.c_ulong(0)
-            mi = MOUSEINPUT(dx, dy, 0, 0x0001, 0, ctypes.pointer(extra))  # 0x0001 = MOUSEEVENTF_MOVE
-            inp = INPUT(0, INPUT_UNION(mi))  # 0 = INPUT_MOUSE
-            ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
-
-        send(1, 0)   # 向右移动1像素
-        send(-1, 0)  # 向左移动1像素
-    def is_magnifier_open(self):
-        """检查放大镜是否已打开"""
-        for process in psutil.process_iter(['name']):
-            try:
-                if process.info['name'] and process.info['name'].lower() == 'magnify.exe':
-                    return True
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
-        return False
-
-    def open_magnifier(self):
-        """打开系统放大镜"""
-        try:
-            ctypes.windll.shell32.ShellExecuteW(None, "open", "magnify.exe", None, None, 1)
-        except FileNotFoundError:
-            print("无法找到放大镜程序")
-
-    def close_magnifier(self):
-        """关闭系统放大镜"""
-        for process in psutil.process_iter(['name']):
-            try:
-                if process.info['name'] and process.info['name'].lower() == 'magnify.exe':
-                    process.terminate()
-                    process.wait()
-                    print("放大镜已关闭")
-                    return
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
-    def increase_volume(self):
-        """增加系统音量"""
-        ctypes.windll.user32.keybd_event(0xAF, 0, 0, 0)  # VK_VOLUME_UP
-        ctypes.windll.user32.keybd_event(0xAF, 0, 2, 0)  # KEYEVENTF_KEYUP
-    
-    def decrease_volume(self):
-        """降低系统音量"""
-        ctypes.windll.user32.keybd_event(0xAE, 0, 0, 0)  # VK_VOLUME_DOWN
-        ctypes.windll.user32.keybd_event(0xAE, 0, 2, 0)  # KEYEVENTF_KEYUP
 class QuickStreamAppAddThread(QThread):
     finished_signal = pyqtSignal()
 
@@ -2389,7 +2084,6 @@ class GameSelector(QWidget):
 
         # 创建悬浮窗
         self.floating_window = None
-        self.in_floating_window = False
         # 添加游戏按钮
         self.buttons = []
         if sorted_games:  # 只在有游戏时添加按钮
@@ -2599,7 +2293,7 @@ class GameSelector(QWidget):
             controller_name = controller_data['controller'].get_name()
             self.update_controller_status(controller_name)
         # 右侧文字
-        right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.95-Beta")
+        right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.95")
         right_label.setStyleSheet(f"""
             QLabel {{
                 font-family: "Microsoft YaHei"; 
@@ -2714,6 +2408,24 @@ class GameSelector(QWidget):
         self.play_time_timer = QTimer(self)
         self.play_time_timer.timeout.connect(self.update_play_time)
         self.play_time_timer.start(60 * 1000)  # 60秒
+        # ==============================
+        # 键盘覆盖层（整合键盘逻辑至 GameSelector）
+        # ==============================
+        self.keyboard_overlay = None
+        self.keyboard_overlay_mapping = None
+        self.keyboard_overlay_thread = None
+        # 键盘覆盖层内部状态（按需初始化）
+        self._kb_rb_last_pressed = False
+        self._kb_left_state = {'x': 0.0, 'y': 0.0, 'lb': False, 'rb': False, 'radius': 0.0}
+        self._kb_right_state = {'x': 0.0, 'y': 0.0, 'lb': False, 'rb': False, 'radius': 0.0}
+        self._kb_last_outer_time = {'left': 0, 'right': 0}
+        self._kb_last_zone = {'left': 'dead', 'right': 'dead'}
+        self._kb_inner_ignore_until = {'left': 0, 'right': 0}
+        self._kb_last_x_pressed = [False, False]
+        self._kb_last_y_pressed = [False, False]
+        self._kb_last_fkey_move_time = 0
+        self._kb_ignore_start_until = 0
+        # ==============================
 
     def wintaskbarshow(self):
         hide_desktop_icons()
@@ -2916,28 +2628,748 @@ class GameSelector(QWidget):
                         if widget:
                             widget.setVisible(show)
 
-    def mouse_simulation(self):
-        """开启鼠标映射（线程方式）"""
-        if pygame.joystick.get_count() == 0:
-            print("没有检测到手柄，无法开启鼠标映射")
+
+    # ==============================
+    # 键盘覆盖层：创建/显示/关闭
+    # ==============================
+    def show_keyboard_overlay(self, mapping):
+        if self.keyboard_overlay and self.keyboard_overlay.isVisible():
             return
+        self.keyboard_overlay_mapping = mapping
+
+        # 创建覆盖层窗口
+        self.keyboard_overlay = QDialog(self)
+        self.keyboard_overlay.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.WindowTransparentForInput)
+        self.keyboard_overlay.setAttribute(Qt.WA_TranslucentBackground)
+        self.keyboard_overlay.setWindowOpacity(0.9)
+        self.keyboard_overlay.setFixedSize(675, 370)
+
+        # 居中于屏幕底部
+        screen = QApplication.primaryScreen()
+        screen_geometry = screen.geometry()
+        screen_width = screen_geometry.width()
+        screen_height = screen_geometry.height()
+        window_width = self.keyboard_overlay.width()
+        window_height = self.keyboard_overlay.height()
+        x = (screen_width - window_width) // 2
+        y = screen_height * 3 // 4 - window_height // 2
+        self.keyboard_overlay.move(x, y)
+
+        # 内容
+        wrapper = QWidget(self.keyboard_overlay)
+        layout = QVBoxLayout(wrapper)
+        layout.setSpacing(0)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        self.keyboard_widget = type(self).KeyboardWidget()
+        self.keyboard_widget.key_selected_callback = self.on_key_selected
+        layout.addWidget(self.keyboard_widget)
+
+        self.selected_key_label = QLabel("L1选择外圈按钮，R1输入选中项。A键空格，B键删除，Y键启用粘滞键，X键F1~F12")
+        self.selected_key_label.setStyleSheet(
+            "font-size: 16px; color: white; font-weight: bold; padding: 5px; background: rgba(0,0,0,0.5);"
+        )
+        self.selected_key_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.selected_key_label)
+
+        v = QVBoxLayout(self.keyboard_overlay)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.addWidget(wrapper)
+
+        # 初始化键盘映射与状态
+        self._kb_ignore_start_until = time.time() + 0.5
+        self.setup_keyboard_mappings()
+        self._kb_rb_last_pressed = False
+        self._kb_left_state = {'x': 0.0, 'y': 0.0, 'lb': False, 'rb': False, 'radius': 0.0}
+        self._kb_right_state = {'x': 0.0, 'y': 0.0, 'lb': False, 'rb': False, 'radius': 0.0}
+        self._kb_last_outer_time = {'left': 0, 'right': 0}
+        self._kb_last_zone = {'left': 'dead', 'right': 'dead'}
+        self._kb_inner_ignore_until = {'left': 0, 'right': 0}
+        self._kb_last_x_pressed = [False, False]
+        self._kb_last_y_pressed = [False, False]
+        self._kb_last_fkey_move_time = 0
+        # 保存窗口原始位置和位移状态
+        self._kb_original_position = (x, y)
+        self._kb_window_offset = 600  # 位移的距离（像素）
+        self._kb_window_shifted = False  # 窗口是否已向下位移
+        self._kb_last_back_pressed = False  # 上次back键状态
+
+        # 启动手柄监听线程（用于键盘覆盖层）
+        self.keyboard_overlay_thread = type(self).JoystickThread(self.keyboard_overlay_mapping)
+        self.keyboard_overlay_thread.joystick_updated.connect(self.on_keyboard_overlay_joystick_updated)
+        self.keyboard_overlay_thread.start()
+
+        self.keyboard_overlay.show()
+
+    def close_keyboard_overlay(self):
+        if self.keyboard_overlay_thread:
+            self.keyboard_overlay_thread.stop()
+            self.keyboard_overlay_thread.wait()
+            self.keyboard_overlay_thread = None
+        if self.keyboard_overlay:
+            self.keyboard_overlay.close()
+            self.keyboard_overlay = None
+
+    def is_keyboard_overlay_visible(self):
+        return bool(self.keyboard_overlay and self.keyboard_overlay.isVisible())
+
+    # ==============================
+    # 键盘覆盖层：映射与事件（移植自 MainWindow）
+    # ==============================
+    def setup_keyboard_mappings(self):
+        # 左摇杆映射
+        self.left_joystick_mappings = {
+            'inner': {
+                'D': 'D',
+                'S': 'S', 
+                'W': 'W',
+                'E': 'E'
+            },
+            'outer_yellow': [
+                'F', 'V', 'C', 'X', 'Z', 'A',
+                'Q', '1!', '2@', '3#', '4$', 'R'
+            ],
+            'outer_green': [
+                'G', 'B', 'alt', 'ctrl', 'shift', 'Capslock', 'tab','`~','Esc', 'Win', '5%','T', 'G'
+            ]
+        }
+        # 右摇杆映射
+        self.right_joystick_mappings = {
+            'inner': {
+                'D': 'L',
+                'S': 'K',
+                'W': 'I', 
+                'E': 'O'
+            },
+            'outer_yellow': [
+                ';:', '/?', '.>', ',<', 'M', 'J', 'U',
+                '7&', '8*', '9(', '0)', 'P'
+            ],
+            'outer_green': [
+                 "'\"", '\\|', 'Enter', 'Del','N','H','Y','6^','-_'
+                 , '=+', '[{', ']}'
+            ]
+        }
+
+    def on_keyboard_overlay_joystick_updated(self, joystick_id, x_axis, y_axis, lb_pressed, rb_pressed):
+        # 读取按键一次性事件
+        if hasattr(self, 'keyboard_overlay_thread') and self.keyboard_overlay_thread and hasattr(self.keyboard_overlay_thread, 'joysticks'):
+            if joystick_id < len(self.keyboard_overlay_thread.joysticks):
+                joystick = self.keyboard_overlay_thread.joysticks[joystick_id]
+                mapping = self.keyboard_overlay_mapping
+                lt_val = joystick.get_axis(4)
+                rt_val = joystick.get_axis(5)
+                a_pressed = True if lt_val > 0.1 else joystick.get_button(mapping.button_a)
+                b_pressed = True if rt_val > 0.1 else joystick.get_button(mapping.button_b)
+                y_pressed = joystick.get_button(mapping.button_y)
+                x_pressed = joystick.get_button(mapping.button_x)
+                start_pressed = joystick.get_button(mapping.start)
+                back_pressed = joystick.get_button(mapping.back)
+                ls_pressed = joystick.get_button(mapping.left_stick_in)
+                rs_pressed = joystick.get_button(mapping.right_stick_in)
+                guide_pressed = joystick.get_button(mapping.guide)
+
+                # D-Pad（hat 或 按钮）
+                vdvdv = 0.2
+                if hasattr(mapping, 'has_hat') and mapping.has_hat and joystick.get_numhats() > 0:
+                    hat = joystick.get_hat(0)
+                    if hat == (0, 1):
+                        pyautogui.press('up'); time.sleep(vdvdv)
+                    elif hat == (0, -1):
+                        pyautogui.press('down'); time.sleep(vdvdv)
+                    elif hat == (-1, 0):
+                        pyautogui.press('left'); time.sleep(vdvdv)
+                    elif hat == (1, 0):
+                        pyautogui.press('right'); time.sleep(vdvdv)
+                else:
+                    if joystick.get_button(mapping.dpad_up):
+                        pyautogui.press('up'); time.sleep(vdvdv)
+                    if joystick.get_button(mapping.dpad_down):
+                        pyautogui.press('down'); time.sleep(vdvdv)
+                    if joystick.get_button(mapping.dpad_left):
+                        pyautogui.press('left'); time.sleep(vdvdv)
+                    if joystick.get_button(mapping.dpad_right):
+                        pyautogui.press('right'); time.sleep(vdvdv)
+
+                # A/B/X/Y
+                if a_pressed:
+                    pyautogui.press('space'); time.sleep(vdvdv)
+                if b_pressed:
+                    pyautogui.press('backspace'); time.sleep(vdvdv)
+                if x_pressed and not self._kb_last_x_pressed[joystick_id]:
+                    self.keyboard_widget.toggle_sticky_mode()
+                self._kb_last_x_pressed[joystick_id] = x_pressed
+                if y_pressed and not self._kb_last_y_pressed[joystick_id]:
+                    self.keyboard_widget.toggle_f_keys_mode()
+                self._kb_last_y_pressed[joystick_id] = y_pressed
+
+                # 退出键：Start 或 LS/RS/Guide
+                if start_pressed and time.time() > self._kb_ignore_start_until:
+                    self.close_keyboard_overlay(); return
+                if any([ls_pressed, rs_pressed, guide_pressed]) and time.time() > self._kb_ignore_start_until:
+                    self.close_keyboard_overlay(); return
+                
+                # Back键：切换窗口位置（位移/恢复原位置）
+                # 只在joystick_id == 0时处理，避免重复触发
+                if joystick_id == 0:
+                    if back_pressed and not self._kb_last_back_pressed:
+                        # 只在按键按下瞬间触发一次
+                        if hasattr(self, '_kb_original_position') and self.keyboard_overlay:
+                            if self._kb_window_shifted:
+                                # 恢复原位置
+                                self.keyboard_overlay.move(*self._kb_original_position)
+                                self._kb_window_shifted = False
+                            else:
+                                # 位移
+                                orig_x, orig_y = self._kb_original_position
+                                offset_x = orig_x + self._kb_window_offset
+                                self.keyboard_overlay.move(offset_x, orig_y)
+                                self._kb_window_shifted = True
+                    self._kb_last_back_pressed = back_pressed
+
+        # 保存摇杆状态并驱动 UI 更新
+        radius = math.sqrt(x_axis**2 + y_axis**2)
+        if joystick_id == 0:
+            self._kb_left_state = {'x': x_axis, 'y': y_axis, 'lb': lb_pressed, 'rb': rb_pressed, 'radius': radius}
+        elif joystick_id == 1:
+            self._kb_right_state = {'x': x_axis, 'y': y_axis, 'lb': lb_pressed, 'rb': rb_pressed, 'radius': radius}
+        if self.keyboard_widget:
+            self.keyboard_widget.set_joystick_state(
+                {'x': self._kb_left_state['x'], 'y': self._kb_left_state['y']},
+                {'x': self._kb_right_state['x'], 'y': self._kb_right_state['y']}
+            )
+
+        # F 区模式 or 普通模式
+        if self.keyboard_widget and self.keyboard_widget.f_keys_enabled:
+            self.handle_f_keys_selection_overlay(self._kb_left_state['rb'])
+        else:
+            left_r = self._kb_left_state['radius']
+            right_r = self._kb_right_state['radius']
+            if left_r >= right_r:
+                s = self._kb_left_state
+                self.update_keyboard_from_joystick_overlay(s['x'], s['y'], s['lb'], s['rb'], 'left')
+            else:
+                s = self._kb_right_state
+                self.update_keyboard_from_joystick_overlay(s['x'], s['y'], s['lb'], s['rb'], 'right')
+
+    def update_keyboard_from_joystick_overlay(self, x_axis, y_axis, lb_pressed, rb_pressed, side):
+        radius = math.sqrt(x_axis**2 + y_axis**2)
+        mapped_key = None
+        now = time.time()
+        zone = 'dead'
+        if radius <= 0.2:
+            zone = 'dead'
+        elif radius < 0.75:
+            zone = 'inner'
+        else:
+            zone = 'outer'
+        mappings = self.left_joystick_mappings if side == 'left' else self.right_joystick_mappings
+        angle = None
+        if radius > 0.2:
+            angle = math.degrees(math.atan2(y_axis, x_axis))
+            if angle < 0:
+                angle += 360
+        # 外圈触发与内圈忽略
+        if zone == 'outer' and self._kb_last_zone[side] != 'outer':
+            self._kb_last_outer_time[side] = now
+            self._kb_inner_ignore_until[side] = now + 0.25
+        if zone == 'inner' and self._kb_last_zone[side] == 'dead':
+            self._kb_inner_ignore_until[side] = 0
+        # RB：执行选中按键/粘滞逻辑
+        if rb_pressed:
+            if not self._kb_rb_last_pressed:
+                label_text = self.selected_key_label.text()
+                if label_text.startswith('[') and label_text.endswith(']'):
+                    selected_key = label_text[1:-1].strip()
+                    if selected_key:
+                        if len(selected_key) == 2:
+                            selected_key = selected_key[0]
+                        if self.keyboard_widget.sticky_enabled:
+                            if selected_key in self.keyboard_widget.sticky_key_names:
+                                if selected_key in self.keyboard_widget.sticky_keys:
+                                    self.keyboard_widget.sticky_keys.remove(selected_key)
+                                else:
+                                    self.keyboard_widget.sticky_keys.add(selected_key)
+                                self.keyboard_widget.update()
+                            else:
+                                if self.keyboard_widget.sticky_keys:
+                                    sticky_modifiers = []
+                                    if 'shift' in self.keyboard_widget.sticky_keys: sticky_modifiers.append('shift')
+                                    if 'ctrl' in self.keyboard_widget.sticky_keys: sticky_modifiers.append('ctrl')
+                                    if 'alt' in self.keyboard_widget.sticky_keys: sticky_modifiers.append('alt')
+                                    if 'Win' in self.keyboard_widget.sticky_keys: sticky_modifiers.append('win')
+                                    if sticky_modifiers:
+                                        pyautogui.hotkey(*sticky_modifiers, selected_key.lower())
+                                    else:
+                                        pyautogui.press(selected_key.lower())
+                                    self.keyboard_widget.sticky_keys.clear()
+                                    self.keyboard_widget.update()
+                                else:
+                                    pyautogui.press(selected_key.lower())
+                        else:
+                            pyautogui.press(selected_key.lower())
+            self._kb_rb_last_pressed = True
+            self.keyboard_widget.update_active_key(None)
+            self._kb_last_zone[side] = zone
+            return
+        else:
+            self._kb_rb_last_pressed = False
+        # 内圈延迟
+        if zone == 'inner':
+            if now < self._kb_inner_ignore_until[side]:
+                self._kb_last_zone[side] = zone
+                return
+        # 正常映射
+        if zone == 'inner' and angle is not None:
+            if 0 <= angle < 90:
+                direction = 'D'
+            elif 90 <= angle < 180:
+                direction = 'S'
+            elif 180 <= angle < 270:
+                direction = 'W'
+            else:
+                direction = 'E'
+            mapped_key = mappings['inner'][direction]
+        elif zone == 'outer' and angle is not None:
+            sector = int(angle / 30) % 12
+            if lb_pressed:
+                mapped_key = mappings['outer_green'][sector]
+            else:
+                mapped_key = mappings['outer_yellow'][sector]
+        if mapped_key:
+            self.keyboard_widget.update_active_key(mapped_key)
+        self._kb_last_zone[side] = zone
+
+    def handle_f_keys_selection_overlay(self, rb_pressed):
+        # 选择使用X轴较大的一侧
+        left_x = self._kb_left_state['x']
+        right_x = self._kb_right_state['x']
+        x_axis = left_x if abs(left_x) >= abs(right_x) else right_x
+        threshold = 0.2
+        now = time.time()
+        if abs(x_axis) > threshold:
+            if now - self._kb_last_fkey_move_time > 0.15:
+                if x_axis > 0:
+                    self.keyboard_widget.move_f_keys_selection(1)
+                else:
+                    self.keyboard_widget.move_f_keys_selection(-1)
+                self._kb_last_fkey_move_time = now
+        if rb_pressed:
+            if not self._kb_rb_last_pressed:
+                current_f_key = self.keyboard_widget.get_current_f_key()
+                if current_f_key:
+                    pyautogui.press(current_f_key.lower())
+                self._kb_rb_last_pressed = True
+        else:
+            self._kb_rb_last_pressed = False
+        current_f_key = self.keyboard_widget.get_current_f_key()
+        if current_f_key:
+            self.selected_key_label.setText(f"[{current_f_key}]")
+
+    def on_key_selected(self, key_name):
+        if hasattr(self, 'selected_key_label') and self.selected_key_label:
+            self.selected_key_label.setText(f"[{key_name}]")
+
+    # ==============================
+    # 鼠标映射主循环（非“键盘模拟”范围）
+    # - 包含对系统快捷键的 pyautogui 触发，但不属于键盘模拟整理范畴
+    # ==============================
+    def mouse_simulation(self):
+        """开启鼠标映射"""
+        # 检查是否已经在运行
         if self.is_mouse_simulation_running:
             print("鼠标映射已在运行，忽略重复调用")
             return
-        if not hasattr(self, 'mouse_window') or self.mouse_window is None:
-            self.mouse_window = MouseWindow()
-        else:
-            self.mouse_window.show()
-        self.mouse_sim_thread = MouseSimulationThread(self)
-        self.mouse_sim_thread.finished_signal.connect(self.on_mouse_simulation_finished)
-        self.mouse_sim_thread.start()
 
-    def on_mouse_simulation_finished(self):
-        self.is_mouse_simulation_running = False
-        if hasattr(self, 'mouse_window') and self.mouse_window:
-            self.mouse_window.close()
-            self.mouse_window = None
-            
+        # 设置标志为 True，表示正在运行
+        self.is_mouse_simulation_running = True
+
+        if pygame.joystick.get_count() == 0:
+            self.show_window()
+            return
+        joysticks = []
+        for i in range(pygame.joystick.get_count()):
+            joystick = pygame.joystick.Joystick(i)
+            joystick.init()
+            joysticks.append(joystick)
+    
+        if not joysticks:
+            print("未检测到手柄")
+        joystick_states = {joystick.get_instance_id(): {"scrolling_up": False, "scrolling_down": False} for joystick in joysticks}
+        print("鼠标映射")
+
+        # 鼠标移动灵敏度（高/低）
+        SENS_HIGH = 100.0
+        SENS_MEDIUM = 25.0
+        SENS_LOW  = 10.0
+        sensitivity = SENS_MEDIUM
+        sensitivity1 = SENS_LOW
+        DEADZONE = 0.1    # 摇杆死区阈值，防止轻微漂移
+        clock = pygame.time.Clock()
+        #mapping = ControllerMapping(joystick)
+        # 初始化滚动状态变量
+        scrolling_up = False
+        scrolling_down = False
+        window = type(self).MouseWindow()
+        last_mouse_x, last_mouse_y = -1, -1  # 初始化上一次鼠标位置
+        magnifier_open = False  # 初始化放大镜状态
+        # 初始化鼠标按键状态变量
+        left_button_down = False
+        right_button_down = False
+        screen_width, screen_height = pyautogui.size()
+        pyautogui.moveTo(int(screen_width/2), int(screen_height/1.5))  # 移动鼠标到屏幕中心
+        time.sleep(0.7) 
+        #print(f'所有按键: {joystick.get_button(mapping.button_a)}, {joystick.get_button(mapping.button_b)}, {joystick.get_button(mapping.button_x)}, {joystick.get_button(mapping.button_y)}, {joystick.get_button(mapping.start)}, {joystick.get_button(mapping.back)}')
+        #print(f"X轴: {x_axis:.2f}, Y轴: {y_axis:.2f}, 右扳机: {rt_val:.2f}, 左扳机: {lt_val:.2f}, 滚动: {scrolling_up}, {scrolling_down}")
+        #print(f"{mapping.guide} {mapping.right_stick_in} {mapping.left_stick_in} {mapping.start} {mapping.back} {mapping.button_a} {mapping.button_b} {mapping.button_x} {mapping.button_y}")
+        running = True  # 添加状态标志
+        # 同时下压左右扳机计时切换标记窗口显示/隐藏
+        both_triggers_start_time = None
+        marker_hidden = False
+        both_triggers_action_done = False  # 防抖：一次长按只触发一次
+        try:
+            while running:
+                # 动态检测新手柄加入或移除
+                for event in pygame.event.get():
+                    if event.type == pygame.JOYDEVICEADDED:
+                        joystick = pygame.joystick.Joystick(event.device_index)
+                        joystick.init()
+                        # 检查是否已在列表中
+                        if joystick not in joysticks:
+                            joysticks.append(joystick)
+                            joystick_states[joystick.get_instance_id()] = {"scrolling_up": False, "scrolling_down": False}
+                            print(f"手柄已连接: {joystick.get_name()}")
+                    elif event.type == pygame.JOYDEVICEREMOVED:
+                        # 移除断开手柄及其状态
+                        for joystick in joysticks[:]:
+                            if joystick.get_instance_id() == event.instance_id:
+                                print(f"手柄已断开: {joystick.get_name()}")
+                                joysticks.remove(joystick)
+                                joystick_states.pop(event.instance_id, None)
+                                break
+                # 检查当前所有手柄，自动补充新插入的手柄
+                for i in range(pygame.joystick.get_count()):
+                    joystick = pygame.joystick.Joystick(i)
+                    if joystick not in joysticks:
+                        joystick.init()
+                        joysticks.append(joystick)
+                        joystick_states[joystick.get_instance_id()] = {"scrolling_up": False, "scrolling_down": False}
+                        print(f"检测到新手柄: {joystick.get_name()}")
+                pygame.event.pump()
+                mouse_x, mouse_y = pyautogui.position()
+                # 仅当鼠标位置发生变化时更新窗口位置
+                if (mouse_x, mouse_y) != (last_mouse_x, last_mouse_y):
+                    # 更新窗口位置
+                    window.label.move(mouse_x, mouse_y)
+                    last_mouse_x, last_mouse_y = mouse_x, mouse_y
+                # 遍历所有手柄，处理输入
+                joycount = pygame.joystick.get_count()
+                for joystick in joysticks:
+                    mapping = ControllerMapping(joystick) #切换对应的手柄映射
+                    # GUIDE 按钮退出
+                    if joystick.get_button(mapping.guide) or joystick.get_button(mapping.right_stick_in) or joystick.get_button(mapping.left_stick_in) or self.is_mouse_simulation_running == False:
+                        running = False  # 设置状态标志为 False，退出循环
+                        # 设置右下角坐标
+                        print("退出鼠标映射")
+                        if self.is_magnifier_open():
+                            self.close_magnifier()
+                            magnifier_open = False
+                        right_bottom_x = screen_width - 1  # 最右边
+                        right_bottom_y = screen_height - 1  # 最底部
+                        # 移动鼠标到屏幕右下角
+                        pyautogui.moveTo(right_bottom_x, right_bottom_y)
+                        #time.sleep(0.5)  
+                        break
+
+                    # 检查左键状态
+                    if joystick.get_button(mapping.button_a) or joystick.get_button(mapping.right_bumper):  # A键模拟左键按下
+                        if not left_button_down:  # 状态变化时触发
+                            pyautogui.mouseDown()
+                            left_button_down = True
+                    else:
+                        if left_button_down:  # 状态变化时触发
+                            pyautogui.mouseUp()
+                            left_button_down = False
+
+                    # 检查右键状态
+                    if joystick.get_button(mapping.button_b) or joystick.get_button(mapping.left_bumper):  # B键模拟右键按下
+                        if not right_button_down:  # 状态变化时触发
+                            pyautogui.mouseDown(button='right')
+                            right_button_down = True
+                    else:
+                        if right_button_down:  # 状态变化时触发
+                            pyautogui.mouseUp(button='right')
+                            right_button_down = False
+                    # 读取左摇杆轴值（0: X 轴，1: Y 轴）
+                    x_axis = joystick.get_axis(0)
+                    y_axis = joystick.get_axis(1)
+                    # 读取扳机轴值
+                    rt_val = joystick.get_axis(5)
+                    lt_val = joystick.get_axis(4)
+                    # 检查是否使用 hat 输入
+                    if mapping.has_hat:
+                        hat_value = joystick.get_hat(0)  # 获取第一个 hat 的值
+                        if magnifier_open:
+                            if not self.is_magnifier_open():
+                                magnifier_open = False
+                            # 放大镜打开时，方向键模拟 Ctrl+Alt+方向键
+                            if hat_value == (-1, 0):  # 左
+                                pyautogui.hotkey('ctrl', 'alt', 'left')
+                                time.sleep(0.2)
+                            elif hat_value == (1, 0):  # 右
+                                pyautogui.hotkey('ctrl', 'alt', 'right')
+                                time.sleep(0.2)
+                            elif hat_value == (0, -1):  # 下
+                                pyautogui.hotkey('ctrl', 'alt', 'down')
+                                time.sleep(0.2)
+                            elif hat_value == (0, 1):  # 上
+                                pyautogui.hotkey('ctrl', 'alt', 'up')
+                                time.sleep(0.2)
+                            # 滚动行为不变
+                            if joystick.get_button(mapping.button_x) or hat_value == (0, -1):
+                                scrolling_down = True
+                            else:
+                                scrolling_down = False
+                            if joystick.get_button(mapping.button_y) or hat_value == (0, 1):
+                                scrolling_up = True
+                            else:
+                                scrolling_up = False
+                        else:
+                            if hat_value == (-1, 0):  # 左
+                                if lt_val > 0.5 or rt_val > 0.5:
+                                    pyautogui.hotkey('left')
+                                else:
+                                    self.decrease_volume()
+                                time.sleep(0.2)
+                            elif hat_value == (1, 0):  # 右
+                                if lt_val > 0.5 or rt_val > 0.5:
+                                    pyautogui.hotkey('right')
+                                else:
+                                    self.increase_volume()
+                                time.sleep(0.2)
+                            elif joystick.get_button(mapping.button_x) or hat_value == (0, -1):  # 下
+                                scrolling_down = True
+                            elif joystick.get_button(mapping.button_y) or hat_value == (0, 1):  # 上
+                                scrolling_up = True
+                            else:
+                                scrolling_down = False
+                                scrolling_up = False
+                    else:
+                        if magnifier_open:
+                            if not self.is_magnifier_open():
+                                magnifier_open = False
+                            # 放大镜打开时，方向键模拟 Ctrl+Alt+方向键
+                            if joystick.get_button(mapping.dpad_left):
+                                pyautogui.hotkey('ctrl', 'alt', 'left')
+                                time.sleep(0.2)
+                            elif joystick.get_button(mapping.dpad_right):
+                                pyautogui.hotkey('ctrl', 'alt', 'right')
+                                time.sleep(0.2)
+                            elif joystick.get_button(mapping.dpad_down):
+                                pyautogui.hotkey('ctrl', 'alt', 'down')
+                                time.sleep(0.2)
+                            elif joystick.get_button(mapping.dpad_up):
+                                pyautogui.hotkey('ctrl', 'alt', 'up')
+                                time.sleep(0.2)
+                            # 滚动行为不变
+                            if joystick.get_button(mapping.button_x) or joystick.get_button(mapping.dpad_down):
+                                scrolling_down = True
+                            else:
+                                scrolling_down = False
+                            if joystick.get_button(mapping.button_y) or joystick.get_button(mapping.dpad_up):
+                                scrolling_up = True
+                            else:
+                                scrolling_up = False
+                        else:
+                            if joystick.get_button(mapping.dpad_left):
+                                if lt_val > 0.5 or rt_val > 0.5:
+                                    pyautogui.hotkey('left')
+                                else:
+                                    self.decrease_volume()
+                                time.sleep(0.2)
+                            elif joystick.get_button(mapping.dpad_right):
+                                if lt_val > 0.5 or rt_val > 0.5:
+                                    pyautogui.hotkey('right')
+                                else:
+                                    self.increase_volume()
+                                time.sleep(0.2)
+                            if joystick.get_button(mapping.button_x) or joystick.get_button(mapping.dpad_down):
+                                scrolling_down = True
+                            else:
+                                scrolling_down = False
+                            if joystick.get_button(mapping.button_y) or joystick.get_button(mapping.dpad_up):
+                                scrolling_up = True
+                            else:
+                                scrolling_up = False
+
+                    # 同时下压两个扳机时开始计时，满2秒后切换标志窗口显示/隐藏
+                    if lt_val > 0.5 and rt_val > 0.5:
+                        if both_triggers_start_time is None:
+                            both_triggers_start_time = time.time()
+                            both_triggers_action_done = False
+                        elif not both_triggers_action_done and (time.time() - both_triggers_start_time) >= 1.0:
+                            if marker_hidden:
+                                # 重新显示并对齐当前位置
+                                try:
+                                    mx, my = pyautogui.position()
+                                    window.label.move(mx, my)
+                                except Exception:
+                                    pass
+                                window.show()
+                                marker_hidden = False
+                            else:
+                                window.hide()
+                                marker_hidden = True
+                            both_triggers_action_done = True
+                    else:
+                        # 松手后重置，允许再次触发
+                        both_triggers_start_time = None
+                        both_triggers_action_done = False
+
+                    # 读取右摇杆轴值（2: X 轴，3: Y 轴）
+                    rx_axis = joystick.get_axis(2)  # 右摇杆 X 轴
+                    ry_axis = joystick.get_axis(3)  # 右摇杆 Y 轴
+                    def backandstart_pressed():
+                        nonlocal magnifier_open
+                        if joystick.get_button(mapping.back):
+                            pyautogui.hotkey('win', 'a')
+                            screen_width, screen_height = pyautogui.size()
+                            pyautogui.moveTo(screen_width * 7 / 8, screen_height * 6 / 8)
+                            time.sleep(0.5)
+                        if joystick.get_button(mapping.start):
+                            if not self.is_magnifier_open():
+                                self.open_magnifier()
+                                magnifier_open = True
+                            else:
+                                self.close_magnifier()
+                                magnifier_open = False
+                            time.sleep(0.5)
+                    if lt_val > 0.5:
+                        sensitivity = SENS_HIGH
+                        backandstart_pressed()
+                    elif rt_val > 0.5:
+                        sensitivity = SENS_LOW
+                        sensitivity1 = SENS_HIGH
+                        backandstart_pressed()
+                    else:
+                        sensitivity = SENS_MEDIUM
+                        sensitivity1 = SENS_LOW
+                    
+                    if joystick.get_button(mapping.start):
+                        if magnifier_open:
+                            if not self.is_magnifier_open():
+                                magnifier_open = False
+                            else:
+                                self.close_magnifier()
+                                magnifier_open = False
+                                time.sleep(0.2)
+                                break
+                        print("切换到虚拟键盘覆盖层")
+                        self.show_keyboard_overlay(mapping)
+                        while self.is_keyboard_overlay_visible():
+                            QApplication.processEvents()
+                            time.sleep(0.05)
+                        time.sleep(0.2)
+                        break
+                    if joystick.get_button(mapping.back):  # SELECT 键 → Win+Tab（非键盘模拟范围）
+                        pyautogui.hotkey('win', 'tab')
+                        pyautogui.moveTo(int(screen_width/2), int(screen_height/2))
+                        time.sleep(0.5)  # 延迟0.2秒，避免重复触发
+
+                    # 使用右摇杆控制鼠标移动（低灵敏度）
+                    dx = dy = 0
+                    if abs(rx_axis) > DEADZONE:
+                        self.move_mouse_once()
+                        dx = rx_axis * sensitivity1
+                    if abs(ry_axis) > DEADZONE:
+                        self.move_mouse_once()
+                        dy = ry_axis * sensitivity1
+                    # PyAutoGUI中 y 轴正值向下移动，与摇杆上推为负值刚好对应
+                    pyautogui.moveRel(dx, dy)
+
+                    # 根据摇杆值控制鼠标移动，加入死区处理
+                    dx = dy = 0
+                    if abs(x_axis) > DEADZONE:
+                        self.move_mouse_once()
+                        dx = x_axis * sensitivity
+                    if abs(y_axis) > DEADZONE:
+                        self.move_mouse_once()
+                        dy = y_axis * sensitivity
+                    # PyAutoGUI中 y 轴正值向下移动，与摇杆上推为负值刚好对应
+                    pyautogui.moveRel(dx, dy)
+
+                    # 在主循环中处理滚动
+                    if scrolling_up:
+                        pyautogui.scroll(50)  # 持续向上滚动
+                    if scrolling_down:
+                        pyautogui.scroll(-50)  # 持续向下滚动
+                    #print(f'所有按键: {joystick.get_button(mapping.button_a)}, {joystick.get_button(mapping.button_b)}, {joystick.get_button(mapping.button_x)}, {joystick.get_button(mapping.button_y)}, {joystick.get_button(mapping.start)}, {joystick.get_button(mapping.back)}')
+                    #print(f"X轴: {x_axis:.2f}, Y轴: {y_axis:.2f}, 右扳机: {rt_val:.2f}, 左扳机: {lt_val:.2f}, 滚动: {scrolling_up}, {scrolling_down}")
+                    clock.tick(int(60*joycount))  # 稳定循环频率 (60 FPS)
+        except KeyboardInterrupt:
+            print("程序已退出。")
+        finally:
+            # 退出时重置标志
+            window.close()
+            #ctypes.windll.user32.SystemParametersInfoW(0x0057, 0, None, 0)  # SPI_SETCURSORS = 0x0057 还原鼠标光标
+            self.is_mouse_simulation_running = False
+            print("鼠标已退出")
+
+    ########################
+    def move_mouse_once(self):
+        """模拟鼠标移动，避免光标不显示"""
+        class MOUSEINPUT(ctypes.Structure):
+            _fields_ = [("dx", ctypes.c_long),
+                        ("dy", ctypes.c_long),
+                        ("mouseData", ctypes.c_ulong),
+                        ("dwFlags", ctypes.c_ulong),
+                        ("time", ctypes.c_ulong),
+                        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+
+        class INPUT_UNION(ctypes.Union):
+            _fields_ = [("mi", MOUSEINPUT)]
+
+        class INPUT(ctypes.Structure):
+            _fields_ = [("type", ctypes.c_ulong),
+                        ("u", INPUT_UNION)]
+
+        def send(dx, dy):
+            extra = ctypes.c_ulong(0)
+            mi = MOUSEINPUT(dx, dy, 0, 0x0001, 0, ctypes.pointer(extra))  # 0x0001 = MOUSEEVENTF_MOVE
+            inp = INPUT(0, INPUT_UNION(mi))  # 0 = INPUT_MOUSE
+            ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+
+        send(1, 0)   # 向右移动1像素
+        send(-1, 0)  # 向左移动1像素
+    def is_magnifier_open(self):
+        """检查放大镜是否已打开"""
+        for process in psutil.process_iter(['name']):
+            try:
+                if process.info['name'] and process.info['name'].lower() == 'magnify.exe':
+                    return True
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+        return False
+
+    def open_magnifier(self):
+        """打开系统放大镜"""
+        try:
+            subprocess.Popen(['magnify.exe'], shell=True)
+        except FileNotFoundError:
+            print("无法找到放大镜程序")
+
+    def close_magnifier(self):
+        """关闭系统放大镜"""
+        for process in psutil.process_iter(['name']):
+            try:
+                if process.info['name'] and process.info['name'].lower() == 'magnify.exe':
+                    process.terminate()
+                    process.wait()
+                    print("放大镜已关闭")
+                    return
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+
     def toggle_mute(self):
         """静音或恢复声音"""
         try:
@@ -3326,7 +3758,7 @@ class GameSelector(QWidget):
         """处理键盘事件"""
         if not self.gsfocus(): # 检测当前窗口是否为游戏选择界面
             return
-        if self.in_floating_window and self.floating_window:
+        if hasattr(self, 'floating_window') and self.floating_window.isVisible():
             # 添加防抖检查
             if not self.floating_window.can_process_input():
                 return
@@ -3344,7 +3776,6 @@ class GameSelector(QWidget):
                 self.execute_more_item()
             elif event.key() == Qt.Key_Escape:
                 self.floating_window.hide()
-                self.in_floating_window = False
             return
             
         current_time = pygame.time.get_ticks()  # 获取当前时间（毫秒）
@@ -3874,7 +4305,6 @@ class GameSelector(QWidget):
                     #self.current_index = 0
                     #self.current_section = 0
                     #self.more_section = 0
-                    self.in_floating_window = False
                     #if current_time < ((self.ignore_input_until)+2000):
                     #    return
                     #self.ignore_input_until = pygame.time.get_ticks() + 500 
@@ -3933,7 +4363,7 @@ class GameSelector(QWidget):
             self.screenshot_window.handle_gamepad_input(action)
             return
         
-        if self.in_floating_window and self.floating_window:
+        if getattr(self, 'floating_window', None) and self.floating_window.isVisible():
             # 如果 floating_window 有 confirm_dialog，优先转发
             if hasattr(self.floating_window, 'confirm_dialog') and self.floating_window.confirm_dialog and self.floating_window.confirm_dialog.isVisible():
                 self.floating_window.handle_gamepad_input(action)
@@ -3955,9 +4385,7 @@ class GameSelector(QWidget):
             elif action == 'A':
                 self.execute_more_item()
             elif action in ('B', 'X'):  # B键或X键都可以关闭悬浮窗
-                if self.can_toggle_window():
-                    self.floating_window.hide()
-                    self.in_floating_window = False
+                self.floating_window.hide()
             elif action == 'Y':
                 self.floating_window.toggle_favorite()
             self.last_input_time = current_time
@@ -3993,9 +4421,15 @@ class GameSelector(QWidget):
                 elif action == 'X':  # X键开悬浮窗
                     self.show_more_window()  # 打开悬浮窗
                 elif action == 'B':
-                    if not self.in_floating_window and self.can_toggle_window():
-                        #self.exitdef()  # 退出程序
-                        self.hide_window()
+                    #self.exitdef()  # 退出程序
+                    self.hide_window()
+                elif action == 'GUIDE':  # 回桌面
+                    if current_time < ((self.ignore_input_until)+500):
+                        return
+                    self.ignore_input_until = pygame.time.get_ticks() + 500 
+                    #self.exitdef()  # 退出程序
+                    self.hide_window()
+                    pyautogui.hotkey('win', 'd')
                         
                 self.update_highlight()
             else:
@@ -4013,9 +4447,8 @@ class GameSelector(QWidget):
                 elif action == 'A':
                     self.launch_game(self.current_index)  # 启动游戏
                 elif action == 'B':
-                    if not self.in_floating_window and self.can_toggle_window():
-                        #self.exitdef()  # 退出程序
-                        self.hide_window()
+                    #self.exitdef()  # 退出程序
+                    self.hide_window()
                 elif action == 'Y':
                     self.toggle_favorite()  # 收藏/取消收藏游戏
                     self.ignore_input_until = pygame.time.get_ticks() + 300 
@@ -4027,18 +4460,16 @@ class GameSelector(QWidget):
                     if current_time < ((self.ignore_input_until)+500):
                         return
                     self.ignore_input_until = pygame.time.get_ticks() + 500 
-                    if not self.in_floating_window and self.can_toggle_window():
-                        self.mouse_simulation()
-                        self.show_settings_window()
-                        QTimer.singleShot(10, lambda: pyautogui.moveTo(int(self.settings_button.mapToGlobal(self.settings_button.rect().center()).x()+100), int(self.settings_button.mapToGlobal(self.settings_button.rect().center()).y())+270))
+                    self.show_settings_window()
+                    self.mouse_simulation()
+                    QTimer.singleShot(10, lambda: pyautogui.moveTo(int(self.settings_button.mapToGlobal(self.settings_button.rect().center()).x()+100), int(self.settings_button.mapToGlobal(self.settings_button.rect().center()).y())+270))
                 elif action == 'GUIDE':  # 回桌面
                     if current_time < ((self.ignore_input_until)+500):
                         return
                     self.ignore_input_until = pygame.time.get_ticks() + 500 
-                    if not self.in_floating_window and self.can_toggle_window():
-                        #self.exitdef()  # 退出程序
-                        self.hide_window()
-                        pyautogui.hotkey('win', 'd')
+                    #self.exitdef()  # 退出程序
+                    self.hide_window()
+                    pyautogui.hotkey('win', 'd')
 
         # 更新最后一次按键时间
         self.last_input_time = current_time
@@ -4181,9 +4612,6 @@ class GameSelector(QWidget):
 
     def show_more_window(self):
         """显示更多选项窗口"""
-        if not self.can_toggle_window():
-            return
-            
         if not self.floating_window:
             self.floating_window = FloatingWindow(self)
             
@@ -4192,8 +4620,7 @@ class GameSelector(QWidget):
         self.floating_window.move(button_pos.x(), button_pos.y() + 10)
         
         self.floating_window.show()
-        self.in_floating_window = True
-                # 重新加载按钮
+        # 重新加载按钮
         for button in self.floating_window.buttons:
             button.setParent(None)
         self.floating_window.buttons.clear()
@@ -4234,17 +4661,8 @@ class GameSelector(QWidget):
         self.floating_window.current_index = 0
         self.floating_window.update_highlight()
         self.floating_window.hide()
-        self.in_floating_window = False
         if enable_mouse_sim:
             self.mouse_simulation()
-
-    def can_toggle_window(self):
-        """检查是否可以切换悬浮窗状态"""
-        current_time = pygame.time.get_ticks()
-        if current_time - self.last_window_toggle_time < self.window_toggle_delay:
-            return False
-        self.last_window_toggle_time = current_time
-        return True
 
     def show_settings_window(self):
         """显示设置窗口"""
@@ -4294,6 +4712,230 @@ class GameSelector(QWidget):
             self.left_label.setText(f"🎮️ {controller_name}")
         else:
             print("left_label 未正确初始化")
+    class KeyboardWidget(QWidget):
+        def __init__(self):
+            super().__init__()
+            self.setFixedSize(700, 320)
+            self.setStyleSheet("background-color: lightgray;")
+            self.keys = {"Esc": [66,36,104,40,"green"],"Win": [172,36,104,40,"green"],"Del": [378,268,104,40,"green"],"Enter": [484,268,104,40,"green"],"1!": [68,80,50,40,"yellow"],"2@": [120,80,50,40,"yellow"],"3#": [172,80,50,40,"yellow"],"4$": [224,80,50,40,"yellow"],"5%": [276,80,50,40,"green"],"6^": [328,80,50,40,"green"],"7&": [380,80,50,40,"yellow"],"8*": [432,80,50,40,"yellow"],"9(": [484,80,50,40,"yellow"],"0)": [536,80,50,40,"yellow"],"`~": [16,80,50,40,"green"],"Q": [68,128,50,40,"yellow"],"W": [120,128,50,40,"white"],"E": [172,128,50,40,"white"],"R": [224,128,50,40,"yellow"],"T": [276,128,50,40,"green"],"Y": [328,128,50,40,"green"],"U": [380,128,50,40,"yellow"],"I": [432,128,50,40,"white"],"O": [484,128,50,40,"white"],"P": [536,128,50,40,"yellow"],"-_": [378,36,104,40,"green"],"tab": [16,128,50,40,"green"],"A": [68,176,50,40,"yellow"],"S": [120,176,50,40,"white"],"D": [172,176,50,40,"white"],"F": [224,176,50,40,"yellow"],"G": [276,176,50,40,"green"],"H": [328,176,50,40,"green"],"J": [380,176,50,40,"yellow"],"K": [432,176,50,40,"white"],"L": [484,176,50,40,"white"],";:": [536,176,50,40,"yellow"],"\\|": [588,224,50,40,"green"],"Capslock": [16,176,50,40,"green"],"Z": [68,224,50,40,"yellow"],"X": [120,224,50,40,"yellow"],"C": [172,224,50,40,"yellow"],"V": [224,224,50,40,"yellow"],"B": [276,224,50,40,"green"],"N": [328,224,50,40,"green"],"M": [380,224,50,40,"yellow"],",<": [432,224,50,40,"yellow"],".>": [484,224,50,40,"yellow"],"/?": [536,224,50,40,"yellow"],"shift": [16,224,50,40,"green"],"ctrl": [66,268,104,40,"green"],"alt": [172,268,104,40,"green"],"=+": [484,36,104,40,"green"],"[{": [588,80,50,40,"green"],"]}": [588,128,50,40,"green"],"'\"": [588,176,50,40,"green"]}
+            self.active_key = None
+            self.key_selected_callback = None
+            self.sticky_enabled = False
+            self.sticky_keys = set()
+            self.sticky_key_names = {'shift', 'ctrl', 'alt', 'Win'}
+            self.f_keys_enabled = False
+            self.f_keys_active = 0
+            self.f_keys = {}
+            self.setup_f_keys()
+            self.left_joystick_state = {'x': 0.0, 'y': 0.0}
+            self.right_joystick_state = {'x': 0.0, 'y': 0.0}
+        def set_joystick_state(self, left_state, right_state):
+            self.left_joystick_state = left_state
+            self.right_joystick_state = right_state
+            self.update()
+        def setup_f_keys(self):
+            for i in range(12):
+                x = (i * 52) + 16
+                self.f_keys[f'F{i+1}'] = [x, 0, 50, 32, "blue"]
+        def paintEvent(self, event):
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing)
+            # -- 底层添加带圆角的灰色遮罩 --
+            rounded_rect = self.rect().adjusted(10, 30, -55, -5)  # 留出些内边距
+            radius = 60
+            mask_color = QColor(120, 120, 120, 90)  # 灰色且半透明
+            painter.setBrush(QBrush(mask_color))
+            painter.setPen(Qt.NoPen)
+            painter.drawRoundedRect(rounded_rect, radius, radius)
+
+            if self.f_keys_enabled:
+                painter.setBrush(QBrush(QColor(100, 150, 255, 180)))
+                painter.setPen(QPen(Qt.black, 1))
+                painter.drawRect(16, 0, 620, 32)
+                for i, (key_name, (x, y, w, h, color)) in enumerate(self.f_keys.items()):
+                    brush_color = QColor(255, 0, 0) if i == self.f_keys_active else QColor(100, 150, 255)
+                    painter.setBrush(QBrush(brush_color))
+                    painter.setPen(QPen(Qt.black))
+                    painter.drawRect(x, y, w, h)
+                    painter.setPen(QPen(Qt.white))
+                    font = QFont("Arial", 12, QFont.Bold)
+                    painter.setFont(font)
+                    painter.drawText(x, y, w, h, Qt.AlignCenter, key_name)
+            if self.sticky_enabled:
+                painter.setBrush(QBrush(QColor(255, 255, 0, 180)))
+                painter.setPen(QPen(Qt.black, 2))
+                painter.drawRect(10, 280, 200, 30)
+                painter.setPen(QPen(Qt.black))
+                font = QFont("Arial", 10, QFont.Bold)
+                painter.setFont(font)
+                painter.drawText(15, 300, "粘滞键: 开启")
+                if self.sticky_keys:
+                    sticky_text = "激活: " + ", ".join(self.sticky_keys)
+                    painter.setPen(QPen(Qt.red))
+                    painter.drawText(15, 315, sticky_text)
+            for key_name, (x, y, w, h, color) in self.keys.items():
+                # 精简：合并颜色生成逻辑，减少代码行数，全部字体改为白色
+                base_color = QColor(200, 200, 200) if color == 'white' else (
+                    QColor(180, 180, 180) if color == 'yellow' else (
+                        QColor(140, 140, 140) if color == 'green' else QColor(100, 100, 100)))
+                if key_name == self.active_key:
+                    overlay = QColor(255, 30, 30, 120)
+                    brush_color = QColor(
+                        min(base_color.red() + overlay.red()//3, 255),
+                        min(base_color.green() + overlay.green()//3, 255),
+                        min(base_color.blue() + overlay.blue()//3, 255),
+                        210
+                    )
+                    pen_color = QColor(255, 90, 90)
+                elif key_name in self.sticky_keys and self.sticky_enabled:
+                    overlay = QColor(255, 220, 64, 100)
+                    brush_color = QColor(
+                        min(base_color.red() + overlay.red()//5, 255),
+                        min(base_color.green() + overlay.green()//5, 255),
+                        min(base_color.blue() + overlay.blue()//5, 255),
+                        180
+                    )
+                    pen_color = QColor(255, 220, 80)
+                else:
+                    # 半透明黑作为普通按键叠加
+                    alpha = 125
+                    brush_color = QColor(
+                        max(base_color.red() - alpha//4, 0),
+                        max(base_color.green() - alpha//4, 0),
+                        max(base_color.blue() - alpha//4, 0),
+                        210
+                    )
+                    pen_color = QColor(60, 60, 60)
+                painter.setBrush(QBrush(brush_color))
+                painter.setPen(QPen(pen_color, 2))
+                painter.drawRect(x, y, w, h)
+                painter.setFont(QFont("Arial", 12))
+                painter.setPen(QPen(QColor(255, 255, 255)))  # 白色字体
+                display_name = "Caps" if key_name == "Capslock" else key_name
+                painter.drawText(x, y, w, h, Qt.AlignCenter, display_name)
+            def circle_to_square_progress(x: float, y: float):
+                r = math.hypot(x, y)
+                if r == 0.0:
+                    return 0.0, 0.0
+                m = max(abs(x), abs(y))
+                if m == 0.0:
+                    return 0.0, 0.0
+                def nonlinear_radius_mapping(r: float) -> float:
+                    if r <= 0.75:
+                        return (r / 0.75) * 0.5
+                    else:
+                        return 0.5 + ((r - 0.75) / 0.25) * 0.5
+                r_nl = nonlinear_radius_mapping(r)
+                k = r_nl / m
+                u = max(-1.0, min(1.0, x * k))
+                v = max(-1.0, min(1.0, y * k))
+                return u, v
+            max_x = 100
+            max_y = 90
+            center_left = QPoint(170, 168)
+            lx = self.left_joystick_state.get('x', 0.0)
+            ly = self.left_joystick_state.get('y', 0.0)
+            ux, uy = circle_to_square_progress(lx, ly)
+            end_left = QPoint(int(center_left.x() + ux * max_x), int(center_left.y() + uy * max_y))
+            painter.setPen(QPen(QColor(120, 120, 120), 4))
+            painter.drawLine(center_left, end_left)
+            painter.setBrush(QBrush(QColor(120, 120, 120)))
+            painter.setPen(Qt.NoPen)
+            painter.drawEllipse(end_left, 6, 6)
+            center_right = QPoint(482, 172)
+            rx = self.right_joystick_state.get('x', 0.0)
+            ry = self.right_joystick_state.get('y', 0.0)
+            ux, uy = circle_to_square_progress(rx, ry)
+            end_right = QPoint(int(center_right.x() + ux * max_x), int(center_right.y() + uy * max_y))
+            painter.setPen(QPen(QColor(120, 120, 120), 4))
+            painter.drawLine(center_right, end_right)
+            painter.setBrush(QBrush(QColor(120, 120, 120)))
+            painter.setPen(Qt.NoPen)
+            painter.drawEllipse(end_right, 6, 6)
+        def update_active_key(self, key):
+            if self.active_key == key:
+                return
+            self.active_key = key
+            self.update()
+            if self.key_selected_callback:
+                self.key_selected_callback(key)
+        def toggle_sticky_mode(self):
+            self.sticky_enabled = not self.sticky_enabled
+            if not self.sticky_enabled:
+                self.sticky_keys.clear()
+            self.update()
+        def toggle_f_keys_mode(self):
+            self.f_keys_enabled = not self.f_keys_enabled
+            if not self.f_keys_enabled:
+                self.f_keys_active = 0
+            self.update()
+        def move_f_keys_selection(self, direction):
+            if self.f_keys_enabled:
+                self.f_keys_active = (self.f_keys_active + direction) % 12
+                self.update()
+        def get_current_f_key(self):
+            if self.f_keys_enabled:
+                f_key_names = list(self.f_keys.keys())
+                return f_key_names[self.f_keys_active]
+            return None
+        def mousePressEvent(self, event):
+            if event.button() == Qt.LeftButton:
+                pos = event.pos()
+                from PyQt5.QtCore import QRect
+                for key_name, (x, y, w, h, color) in self.keys.items():
+                    rect = QRect(x, y, w, h)
+                    if rect.contains(pos):
+                        self.update_active_key(key_name)
+                        break
+
+    # 迁移：覆盖层用手柄线程作为内部类
+    class JoystickThread(QThread):
+        joystick_updated = pyqtSignal(int, float, float, bool, bool)
+        def __init__(self, mapping=None):
+            super().__init__()
+            self.mapping = mapping
+            self.running = True
+            self.joysticks = []
+        def run(self):
+            for i in range(pygame.joystick.get_count()):
+                joy = pygame.joystick.Joystick(i)
+                joy.init()
+                self.joysticks.append(joy)
+                print(f"手柄 {i} 已连接: {joy.get_name()}")
+            while self.running:
+                pygame.event.pump()
+                for i, joystick in enumerate(self.joysticks):
+                    left_x = joystick.get_axis(0)
+                    left_y = joystick.get_axis(1)
+                    right_x = joystick.get_axis(2)
+                    right_y = joystick.get_axis(3)
+                    lb_pressed = joystick.get_button(self.mapping.left_bumper) if joystick.get_numbuttons() > self.mapping.left_bumper else False
+                    rb_pressed = joystick.get_button(self.mapping.right_bumper) if joystick.get_numbuttons() > self.mapping.right_bumper else False
+                    self.joystick_updated.emit(0, left_x, left_y, lb_pressed, rb_pressed)
+                    self.joystick_updated.emit(1, right_x, right_y, lb_pressed, rb_pressed)
+                self.msleep(16)
+        def stop(self):
+            self.running = False
+            print("键盘操作已停止")
+
+    # 迁移：鼠标提示窗口作为内部类
+    class MouseWindow(QDialog):
+        def __init__(self):
+            super().__init__()
+            self.initUI()
+        def initUI(self):
+            self.label = QLabel("↖(🎮️映射中)", self)
+            self.label.setStyleSheet("font-family: 'Microsoft YaHei'; font-size: 15px; color: white; border: 1px solid black; border-radius: 0px; background-color: rgba(0, 0, 0, 125);")
+            self.label.adjustSize()
+            screen_geometry = QApplication.primaryScreen().geometry()
+            label_width = self.label.width()
+            label_height = self.label.height()
+            self.label.move(screen_geometry.width() - label_width - 30, screen_geometry.height() - label_height - 30)
+            self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.WindowTransparentForInput)
+            self.setAttribute(Qt.WA_TranslucentBackground)
+            self.setWindowOpacity(0.7)
+            self.setGeometry(screen_geometry)
+            self.show()
 
 class ProgressWindow(QWidget):
     def __init__(self, parent=None):
@@ -5230,7 +5872,6 @@ class FloatingWindow(QWidget):
             self.current_index = 0
             self.update_highlight()
             self.hide()
-            self.parent().in_floating_window = False
             if not result == QDialog.Accepted:  # 如果按钮没被点击
                 return
             # 修正：用 more_apps 查找真实路径
