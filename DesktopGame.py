@@ -3926,6 +3926,8 @@ class GameSelector(QWidget):
         game_cmd = game["cmd"]
         game_name = game["name"]
         image_path = game.get("image-path", "")
+        if not os.path.isabs(image_path):
+            image_path = f"{APP_INSTALL_PATH}\\config\\covers\\{image_path}"
         self.ignore_input_until = pygame.time.get_ticks() + 600
 
         if self.more_section == 0 and self.current_index == self.buttonsindexset: # 如果点击的是"更多"按钮
