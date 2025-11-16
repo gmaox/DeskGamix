@@ -95,16 +95,39 @@ def load_apps():
     global valid_apps, games
     # 读取 JSON 数据
     json_path = f"{APP_INSTALL_PATH}\\config\\apps.json"
-    with open(json_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-        ###下面俩行代码用于QuickStreamAppAdd的伪排序清除，若感到困惑可删除###
-        for idx, entry in enumerate(data["apps"]):
-            entry["name"] = re.sub(r'^\d{2} ', '', entry["name"])  # 去掉开头的两位数字和空格
-    # 筛选具有标签路径的条目
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        # 如果普通 utf-8 读取失败，尝试用带 BOM 的 utf-8-sig 读取并回写为纯 utf-8
+        try:
+            with open(json_path, "r", encoding="utf-8-sig") as f:
+                data = json.load(f)
+            try:
+                with open(json_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=4, ensure_ascii=False)
+            except Exception as e2:
+                print(f"保存为 utf-8 失败: {e2}")
+        except Exception as e2:
+            print(f"读取 apps.json 失败: {e} / {e2}")
+            # 使用 Win32 API弹窗提示
+            try:
+                msg = f"读取 apps.json 失败：\n{e}\n{e2}\n。"
+                ctypes.windll.user32.MessageBoxW(0, msg, "读取错误", 0x10)  # 0x10 = MB_ICONERROR
+            except Exception:
+                pass
+            data = {"apps": []}
+
+    ###下面俩行代码用于QuickStreamAppAdd的伪排序清除，若感到困惑可删除###
+    for idx, entry in enumerate(data.get("apps", [])):
+        entry["name"] = re.sub(r'^\d{2} ', '', entry.get("name", ""))
+    # 仅保留 name 不是 Desktop/Steam Big Picture 且 image-path 存在且非空的条目
     games = [
-        app for app in data["apps"]
-        if "output_image" in app.get("image-path", "") or "SGDB" in app.get("image-path", "") or "igdb" in app.get("image-path", "") or "steam/appcache/librarycache/" in app.get("image-path", "")
+        app for app in data.get("apps", [])
+        if app.get("name") not in ("Desktop", "Steam Big Picture")
+        and str(app.get("image-path", "")).strip() != ""
     ]
+    print(f"+++++检测到 {len(games)} 个游戏")
 
     # 存储解析后的有效软件条目
     valid_apps = []
@@ -2293,7 +2316,7 @@ class GameSelector(QWidget):
             controller_name = controller_data['controller'].get_name()
             self.update_controller_status(controller_name)
         # 右侧文字
-        right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.95")
+        right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.95.1")
         right_label.setStyleSheet(f"""
             QLabel {{
                 font-family: "Microsoft YaHei"; 
@@ -3418,7 +3441,12 @@ class GameSelector(QWidget):
 
         # 创建游戏按钮
         button = QPushButton()
-        pixmap = QPixmap(game["image-path"]).scaled(int(200 * self.scale_factor2), int(267 * self.scale_factor2), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        image_path = game["image-path"]
+        # 自动判断图片路径是相对还是绝对
+        if not os.path.isabs(image_path):
+            image_path = f"{APP_INSTALL_PATH}\\config\\covers\\{image_path}"
+        
+        pixmap = QPixmap(image_path).scaled(int(200 * self.scale_factor2), int(267 * self.scale_factor2), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         icon = QIcon(pixmap)
         button.setIcon(icon)
         button.setIconSize(pixmap.size())
@@ -3446,14 +3474,14 @@ class GameSelector(QWidget):
 
         # 创建星标（如果已收藏）
         if game["name"] in settings["favorites"]:
-            star_label = QLabel("⭐", button)  # 将星标作为按钮的子控件
+            star_label = QLabel("✰", button)  # 将星标作为按钮的子控件
             star_label.setStyleSheet(f"""
                 QLabel {{
-                    color: yellow;
-                    font-size: {int(20 * self.scale_factor2)}px;
+                    color: white;
+                    font-size: {int(10 * self.scale_factor2)}px;
                     padding: {int(5 * self.scale_factor2)}px;
-                    background-color: rgba(46, 46, 46, 0.7);
-                    border-radius: {int(5 * self.scale_factor2)}px;
+                    background-color: rgba(46, 46, 46, 0.2);
+                    border-radius: {int(10 * self.scale_factor2)}px;
                 }}
             """)
             star_label.move(int(5 * self.scale_factor2), int(5 * self.scale_factor2)) 
