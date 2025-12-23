@@ -11,9 +11,8 @@ https://wwse.lanzoup.com/b00uz4bjmd
 
 DeskGamix（desk→犹如电脑桌面般轻松操作，gamix→game/mix→代表游戏领域工具/把很多东西融合在一起了（鼠标操控/电源选项/音量调整/暂停-回到-结束游戏））
 
-界面框架使用pyqt5，手柄输入使用pygame，pyautogui用于突破窗口焦点限制/鼠标操控功能。<small>代码带中文注释，有兴趣可以自己加功能。（GameSelector类为界面主体，涵盖手柄操作逻辑/界面构成/游戏启动逻辑，是进行二次开发的好切入点）</small>
+界面框架使用pyqt5，手柄输入使用pygame，pyautogui用于突破窗口焦点限制/鼠标操控功能。<small>代码带中文注释，有兴趣可以自己加功能。（GameSelector类为界面主体，涵盖手柄操作逻辑/界面构成/游戏启动逻辑，是进行二次开发的好切入点）</small>使用python3.8.5开发
 
-没有界面动画挺可惜的，若您有能力实现这一功能，操作体验将大幅提升。
 </details>
   
 
