@@ -10,7 +10,7 @@ import pygame, math
 import win32gui,win32process,psutil,win32api
 from PyQt5.QtWidgets import QApplication, QListWidgetItem, QMainWindow, QMessageBox, QScroller, QSystemTrayIcon, QMenu , QVBoxLayout, QDialog, QGridLayout, QWidget, QPushButton, QLabel, QDesktopWidget, QHBoxLayout, QFileDialog, QSlider, QLineEdit, QProgressBar, QScrollArea, QFrame
 from PyQt5.QtGui import QPainter, QPen, QBrush, QFont, QPixmap, QIcon, QColor
-from PyQt5.QtCore import QDateTime, QSize, Qt, QThread, pyqtSignal, QTimer, QPoint, QProcess 
+from PyQt5.QtCore import QDateTime, QSize, Qt, QThread, pyqtSignal, QTimer, QPoint, QProcess, QPropertyAnimation
 import subprocess, time, os,win32con, ctypes, re, win32com.client, ctypes, time, pyautogui
 from ctypes import wintypes
 #& C:/Users/86150/AppData/Local/Programs/Python/Python38/python.exe -m PyInstaller --add-data "fav.ico;." --add-data '1.png;.' --add-data 'pssuspend64.exe;.' -w DesktopGame.py -i '.\fav.ico' --uac-admin --noconfirm
@@ -182,8 +182,8 @@ def load_morefloder_shortcuts():
         except Exception as e:
             print(f"无法解析快捷方式 {shortcut_file}：{e}")
 load_morefloder_shortcuts()
-print(more_apps)
-print(valid_apps)
+#print(more_apps)
+#print(valid_apps)
 
 def get_desktop_listview():
     # 先找WorkerW窗口
@@ -516,14 +516,12 @@ class MonitorRunningAppsThread(QThread):
         """停止线程"""
         self.running = False
         self.wait()  # 等待线程结束
-class ScreenshotLoaderThread(QThread):
-    """后台线程用于加载和缩放图片"""
-    screenshot_loaded = pyqtSignal(list)  # 信号，用于通知主线程加载完成
+class ScreenshotScannerThread(QThread):
+    """后台线程用于扫描截图目录"""
+    screenshots_scanned = pyqtSignal(list)  # 信号，用于通知主线程扫描完成
 
-    def __init__(self, screenshots, icon_size):
+    def __init__(self):
         super().__init__()
-        self.screenshots = screenshots
-        self.icon_size = icon_size
         self.running = True
 
     def stop(self):
@@ -532,18 +530,69 @@ class ScreenshotLoaderThread(QThread):
         self.wait()  # 等待线程结束
 
     def run(self):
+        """扫描截图目录，加载文件路径和元数据"""
+        all_screenshots = []
+        base_dir = "screenshot"
+        if self.running and os.path.isdir(base_dir):
+            for game in os.listdir(base_dir):
+                if not self.running:  # 检查是否需要停止
+                    break
+                game_dir = os.path.join(base_dir, game)
+                if os.path.isdir(game_dir):
+                    for fname in os.listdir(game_dir):
+                        if not self.running:  # 检查是否需要停止
+                            break
+                        if fname.lower().endswith(".png"):
+                            path = os.path.join(game_dir, fname)
+                            ts = os.path.getmtime(path)
+                            all_screenshots.append((path, game, ts))
+        
+        if self.running:  # 只有在没有停止的情况下才发送信号
+            all_screenshots.sort(key=lambda x: x[2], reverse=True)
+            self.screenshots_scanned.emit(all_screenshots)
+
+class ScreenshotLoaderThread(QThread):
+    """后台线程用于加载和缩放图片"""
+    screenshot_loaded = pyqtSignal(list)  # 信号，用于通知主线程全部加载完成
+    screenshot_single_loaded = pyqtSignal(int, tuple)  # 信号，用于通知主线程单张图片加载完成 (索引, (thumb, path, game, ts))
+
+    def __init__(self, screenshots, icon_size, image_indices=None):
+        super().__init__()
+        self.screenshots = screenshots
+        self.icon_size = icon_size
+        self.running = True
+        # 如果没有指定索引，默认加载所有图片
+        self.image_indices = image_indices if image_indices is not None else list(range(len(screenshots)))
+
+    def stop(self):
+        """停止线程"""
+        self.running = False
+        self.wait()  # 等待线程结束
+
+    def run(self):
+        """批量加载图片并定期释放UI线程"""
         loaded_screenshots = []
-        for path, game, ts in self.screenshots:
+        for idx in self.image_indices:
             if not self.running:  # 检查是否需要停止
                 break
             try:
-                pixmap = QtGui.QPixmap(path)
-                thumb = pixmap.scaled(
-                    int(self.icon_size), int(self.icon_size), Qt.KeepAspectRatio, Qt.SmoothTransformation
-                )
-                loaded_screenshots.append((thumb, path, game, ts))
+                if 0 <= idx < len(self.screenshots):
+                    path, game, ts = self.screenshots[idx]
+                    pixmap = QtGui.QPixmap(path)
+                    thumb = pixmap.scaled(
+                        int(self.icon_size), int(self.icon_size), Qt.KeepAspectRatio, Qt.SmoothTransformation
+                    )
+                    loaded_screenshots.append((thumb, path, game, ts))
+                    
+                    # 发送单张图片加载完成信号，让UI线程立即更新
+                    self.screenshot_single_loaded.emit(idx, (thumb, path, game, ts))
+                    
+                    # 短暂休眠，给UI线程处理事件的机会
+                    self.msleep(1)
+                    
             except Exception as e:
                 print(f"加载图片失败: {path}, 错误: {e}")
+        
         if self.running:  # 只有在没有停止的情况下才发送信号
             self.screenshot_loaded.emit(loaded_screenshots)
 
@@ -1009,6 +1058,8 @@ class ScreenshotWindow(QDialog):
         self.listWidget.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.listWidget.itemClicked.connect(self.on_item_clicked)
         self.listWidget.setFocus()
+        # 添加鼠标左键拖动滚动手势
+        QScroller.grabGesture(self.listWidget.viewport(), QScroller.LeftMouseButtonGesture)
 
         # 右侧布局（包含listWidget）
         right_panel = QWidget(self)
@@ -1083,11 +1134,11 @@ class ScreenshotWindow(QDialog):
 
     def reload_screenshots(self):
         """重新加载截图目录并启动后台线程"""
-        self.load_screenshots()
-        self.listWidget.clear()  # 加载前先清除原图片
+        # 清除原图片并显示加载提示
+        self.listWidget.clear()
         item = QListWidgetItem()
         item.setFlags(Qt.NoItemFlags)
-        label = QLabel("正在加载截图...")
+        label = QLabel("正在扫描截图目录...")
         label.setAlignment(Qt.AlignCenter)
         label.setWordWrap(True)
         label.setStyleSheet("color: #aaa; font-size: 28px;")
@@ -1116,19 +1167,80 @@ class ScreenshotWindow(QDialog):
             self.has_load_more_button = False
 
         self.listWidget.setIconSize(QSize(int(self.icon_size), int(self.icon_size)))
+        
+        # 启动后台线程扫描截图目录
+        self.scanner_thread = ScreenshotScannerThread()
+        self.scanner_thread.screenshots_scanned.connect(self.on_screenshots_scanned)
+        self.scanner_thread.start()
 
-        # 启动后台线程加载图片
+        # 启动后台线程加载所有图片
         self.loader_thread = ScreenshotLoaderThread(self.current_screenshots, self.icon_size)
         self.loader_thread.screenshot_loaded.connect(self.on_screenshots_loaded)
         self.loader_thread.finished.connect(self.update_highlight)
         self.loader_thread.start()
-
-    def load_all_images_and_refresh(self):
-        """加载全部图片并刷新列表"""
-        # 记录当前索引
-        self.restore_index_after_load = self.current_index
-        self.load_all_images = True
-        self.reload_screenshots()
+    
+    def on_screenshots_scanned(self, all_screenshots):
+        """处理扫描完成的截图列表"""
+        self.all_screenshots = all_screenshots
+        
+        # 根据筛选条件过滤截图
+        if self.filter_game_name and self.filter_game_name != "全部游戏":
+            filtered = [item for item in self.all_screenshots if item[1] == self.filter_game_name]
+            self.current_screenshots = filtered
+        else:
+            self.current_screenshots = list(self.all_screenshots)
+        
+        # 取消"加载全部图片"按钮逻辑
+        self.has_load_more_button = False
+        
+        # 立即创建所有图片占位符
+        self.listWidget.clear()
+        
+        # 没有截图时显示提示文字
+        if not self.current_screenshots:
+            item = QListWidgetItem()
+            item.setFlags(Qt.NoItemFlags)
+            label = QLabel("还没有截图\n在游戏中按下L3+R3记录美好时刻～")
+            label.setAlignment(Qt.AlignCenter)
+            label.setWordWrap(True)
+            label.setStyleSheet("color: #aaa; font-size: 28px;")
+            label.setMinimumHeight(220)
+            label.setMinimumWidth(self.listWidget.viewport().width() - 40)
+            self.listWidget.addItem(item)
+            self.listWidget.setItemWidget(item, label)
+            item.setSizeHint(label.sizeHint())
+            return
+        
+        # 创建所有图片占位符
+        self.image_items = []
+        for _ in range(len(self.current_screenshots)):
+            item = QListWidgetItem()
+            # 设置图片项大小为图标大小
+            item.setSizeHint(QSize(int(self.icon_size), int(self.icon_size * 9 / 16)))
+            self.listWidget.addItem(item)
+            self.image_items.append(item)
+        
+        # 计算初始加载数量
+        initial_count = 30 if getattr(self, 'disable_left_panel_switch', False) else 6
+        # 确保初始数量不超过截图总数
+        initial_count = min(initial_count, len(self.current_screenshots))
+        
+        # 记录已加载的图片数量
+        self.loaded_image_count = initial_count
+        
+        # 启动后台线程加载初始图片
+        initial_indices = list(range(initial_count))
+        self.loader_thread = ScreenshotLoaderThread(self.current_screenshots, self.icon_size, initial_indices)
+        self.loader_thread.screenshot_loaded.connect(self.on_screenshots_loaded)
+        self.loader_thread.screenshot_single_loaded.connect(self.on_screenshot_single_loaded)
+        self.loader_thread.finished.connect(self.update_highlight)
+        self.loader_thread.start()
+        
+        # 添加滚动事件监听器，实现懒加载
+        self.listWidget.verticalScrollBar().valueChanged.connect(self.on_scroll)
+        self.listWidget.horizontalScrollBar().valueChanged.connect(self.on_scroll)
+        # 为listWidget的viewport添加事件过滤器，捕获鼠标滚轮事件
+        self.listWidget.viewport().installEventFilter(self)
 
     def update_highlight(self):
         """更新高亮状态"""
@@ -1136,11 +1248,6 @@ class ScreenshotWindow(QDialog):
         info_text = ""
         if self.buttons:
             self.current_index = max(0, min(self.current_index, len(self.buttons) - 1))
-            # 检查是否高亮到“加载全部图片”按钮
-            if getattr(self, "has_load_more_button", False) and self.current_index == getattr(self, "load_more_item_index", -1):
-                self.load_all_images_and_refresh()
-                self.info_label.setText("")
-                return  # 刷新后不再继续
             if not self.in_left_panel:
                 self.listWidget.setCurrentItem(self.buttons[self.current_index])
                 self.listWidget.scrollToItem(self.buttons[self.current_index])
@@ -1150,10 +1257,7 @@ class ScreenshotWindow(QDialog):
                         # 显示信息
                         img_path = item.data(Qt.UserRole)
                         # 查找截图元数据并获取索引
-                        if getattr(self, "has_load_more_button", False):
-                            allidx = ".."
-                        else:
-                            allidx = len(self.current_screenshots)
+                        allidx = len(self.current_screenshots)
                         for idx, (path, game, ts) in enumerate(self.current_screenshots):
                             if path == img_path:
                                 timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
@@ -1167,7 +1271,54 @@ class ScreenshotWindow(QDialog):
                     item.setBackground(QColor("transparent"))
                 info_text = ""
         self.info_label.setText(info_text)
-
+        
+    def eventFilter(self, source, event):
+        """事件过滤器，捕获listWidget的鼠标滚轮事件"""
+        if source == self.listWidget.viewport() and event.type() == event.Wheel:
+            # 触发懒加载
+            self.on_scroll()
+        return super().eventFilter(source, event)
+        
+    def on_scroll(self):
+        """处理滚动事件，实现懒加载"""
+        # 如果所有图片已经加载完成，或者正在加载中，就直接返回
+        if hasattr(self, 'all_images_loaded') and self.all_images_loaded:
+            return
+        
+        if hasattr(self, 'is_loading_images') and self.is_loading_images:
+            return
+        
+        # 检查必要属性是否存在
+        if not hasattr(self, 'loaded_image_count') or not hasattr(self, 'current_screenshots'):
+            return
+        
+        # 标记正在加载图片
+        self.is_loading_images = True
+        
+        # 计算需要加载的剩余图片索引
+        remaining_indices = list(range(self.loaded_image_count, len(self.current_screenshots)))
+        
+        # 启动后台线程加载剩余图片
+        self.loader_thread = ScreenshotLoaderThread(self.current_screenshots, self.icon_size, remaining_indices)
+        self.loader_thread.screenshot_loaded.connect(self.on_remaining_screenshots_loaded)
+        self.loader_thread.screenshot_single_loaded.connect(self.on_screenshot_single_loaded)
+        self.loader_thread.finished.connect(self.update_highlight)
+        self.loader_thread.start()
+        
+    def on_remaining_screenshots_loaded(self, loaded_screenshots):
+        """处理剩余图片加载完成事件"""
+        # 标记所有图片已加载完成
+        self.all_images_loaded = True
+        # 清除正在加载标记
+        self.is_loading_images = False
+        
+    def wheelEvent(self, event):
+        """处理鼠标滚轮事件，实现懒加载"""
+        # 先调用父类方法处理滚轮事件
+        super().wheelEvent(event)
+        # 触发懒加载
+        self.on_scroll()
+        
     def load_screenshots(self):
         """扫描截图目录，加载文件路径和元数据"""
         self.all_screenshots = []
@@ -1187,48 +1338,28 @@ class ScreenshotWindow(QDialog):
         self.current_screenshots = list(self.all_screenshots)
 
     def on_screenshots_loaded(self, loaded_screenshots):
-        """更新 UI，显示加载完成的图片"""
-        self.listWidget.clear()
-        # 没有截图时显示提示文字
-        if not loaded_screenshots and not getattr(self, "has_load_more_button", False):
-            item = QListWidgetItem()
-            item.setFlags(Qt.NoItemFlags)
-            label = QLabel("还没有截图\n在游戏中按下L3+R3记录美好时刻～")
-            label.setAlignment(Qt.AlignCenter)
-            label.setWordWrap(True)
-            label.setStyleSheet("color: #aaa; font-size: 28px;")
-            label.setMinimumHeight(220)
-            label.setMinimumWidth(self.listWidget.viewport().width() - 40)
-            self.listWidget.addItem(item)
-            self.listWidget.setItemWidget(item, label)
-            item.setSizeHint(label.sizeHint())
-            return
-        for thumb, path, game, ts in loaded_screenshots:
-            icon = QtGui.QIcon(thumb)
-            item = QListWidgetItem(icon, "")
-            item.setData(Qt.UserRole, path)
-            self.listWidget.addItem(item)
-        # 如果需要“加载全部图片”按钮
-        if getattr(self, "has_load_more_button", False):
-            btn_item = QListWidgetItem()
-            btn_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            btn_widget = QPushButton("加载更多截图...")
-            btn_widget.setStyleSheet("font-size: 16px; color: #aaa; background: #666; border-radius: 12px;")
-            #btn_widget.setFixedSize(self.icon_size, self.icon_size)
-            btn_widget.clicked.connect(self.load_all_images_and_refresh)
-            btn_widget.setMinimumHeight(20)
-            btn_widget.setMinimumWidth(self.listWidget.viewport().width() - 40)
-
-            self.listWidget.addItem(btn_item)
-            self.listWidget.setItemWidget(btn_item, btn_widget)
-            btn_item.setSizeHint(btn_widget.sizeHint())
-            self.load_more_item_index = self.listWidget.count() - 1  # 记录按钮索引
-        else:
-            self.load_more_item_index = None
+        """处理所有图片加载完成的事件"""
+        # 图片已通过 on_screenshot_single_loaded 逐个加载完成并更新UI
+        # 这里只需处理加载完成后的收尾工作
+        
+        # 移除"加载全部图片"按钮相关逻辑
+        self.load_more_item_index = None
+        
         # 加载完成后恢复索引并高亮
         if hasattr(self, "restore_index_after_load"):
             self.current_index = min(self.restore_index_after_load, self.listWidget.count() - 1)
             del self.restore_index_after_load
+    
+    def on_screenshot_single_loaded(self, index, screenshot_data):
+        """处理单张图片加载完成信号，立即更新UI"""
+        if index < len(self.image_items):
+            thumb, path, game, ts = screenshot_data
+            item = self.image_items[index]
+            icon = QtGui.QIcon(thumb)
+            item.setIcon(icon)
+            item.setText("")
+            item.setData(Qt.UserRole, path)
+    
     def get_row_count(self):
         """获取每行的缩略图数量"""
         if self.filter_game_name and self.filter_game_name != "全部游戏":
@@ -1245,18 +1376,6 @@ class ScreenshotWindow(QDialog):
             total_buttons = len(self.buttons)
             new_index = self.current_index + offset
             row_count = self.get_row_count()
-            # 检查是否要跳到“加载全部图片”按钮
-            if getattr(self, "has_load_more_button", False) and hasattr(self, "load_more_item_index"):
-                if offset == row_count and self.current_index == self.load_more_item_index - 1:
-                    # 当前在最后一张图片，向下跳到“加载全部图片”按钮
-                    self.current_index = self.load_more_item_index
-                    self.update_highlight()
-                    return
-                elif new_index == self.load_more_item_index:
-                    # 其它情况直接跳到按钮
-                    self.current_index = self.load_more_item_index
-                    self.update_highlight()
-                    return
             # 上下键逻辑，循环跳转
             if offset == -row_count:  # 上移一行
                 if new_index < 0:
@@ -1302,6 +1421,14 @@ class ScreenshotWindow(QDialog):
                 self.is_fullscreen_preview.load_preview(self.preview_index)  # 修复调用
                 return
             elif action == 'RIGHT':
+                self.preview_index = (self.preview_index + 1) % allidx
+                self.is_fullscreen_preview.load_preview(self.preview_index)  # 修复调用
+                return
+            elif action == 'LB':  # 添加LB键切换到上一张
+                self.preview_index = (self.preview_index - 1) % allidx
+                self.is_fullscreen_preview.load_preview(self.preview_index)  # 修复调用
+                return
+            elif action == 'RB':  # 添加RB键切换到下一张
                 self.preview_index = (self.preview_index + 1) % allidx
                 self.is_fullscreen_preview.load_preview(self.preview_index)  # 修复调用
                 return
@@ -1477,8 +1604,23 @@ class ScreenshotWindow(QDialog):
     
         self.is_fullscreen_preview = QtWidgets.QDialog(self, flags=Qt.Dialog)
         self.is_fullscreen_preview.setWindowFlag(Qt.Window)
+        # 初始窗口透明度为0，随后播放淡入动画
+        try:
+            self.is_fullscreen_preview.setWindowOpacity(0.0)
+        except Exception:
+            pass
         self.is_fullscreen_preview.showFullScreen()
         FSPREVIEWHWND = int(self.is_fullscreen_preview.winId())
+        # 窗口淡入动画（保存引用以防被垃圾回收）
+        try:
+            fade_in_win = QPropertyAnimation(self.is_fullscreen_preview, b"windowOpacity")
+            fade_in_win.setDuration(100)
+            fade_in_win.setStartValue(0.0)
+            fade_in_win.setEndValue(1.0)
+            self._fsp_window_fade_in = fade_in_win
+            fade_in_win.start()
+        except Exception:
+            pass
         
         # 创建主布局
         main_layout = QtWidgets.QVBoxLayout(self.is_fullscreen_preview)
@@ -1495,25 +1637,58 @@ class ScreenshotWindow(QDialog):
         info_bar = QtWidgets.QLabel(self.is_fullscreen_preview)
         info_bar.setStyleSheet("""
             QLabel {
-                background-color: rgba(0, 0, 0, 200);
+                background-color: rgba(0, 0, 0, 0.8); /* 半透明黑色背景 */
                 color: white;
-                font-size: 16px;
-                padding: 10px;
-                border-bottom: 1px solid #333;
+                font-size: 18px;
+                padding: 12px 20px;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.1);
             }
         """)
         info_bar.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        info_bar.setFixedHeight(40)  # 设置固定高度
+        info_bar.setFixedHeight(50)  # 调整高度
         info_bar.setTextFormat(Qt.RichText)
         info_bar.setTextInteractionFlags(Qt.TextBrowserInteraction)
         info_bar.setOpenExternalLinks(False)  # 不自动打开外部链接
         info_bar.linkActivated.connect(self.handle_info_bar_link)
         def close_fullscreen_preview(event):
-            """关闭全屏预览窗口"""
-            if hasattr(self, 'is_fullscreen_preview') and self.is_fullscreen_preview:
-                self.is_fullscreen_preview.close()  # 修复调用
-                self.is_fullscreen_preview = None  # 清除引用
+            """关闭全屏预览窗口（使用淡出动画）"""
+            if not (hasattr(self, 'is_fullscreen_preview') and self.is_fullscreen_preview):
+                return
+            dlg = self.is_fullscreen_preview
+            try:
+                # 创建淡出动画并在完成后真正关闭对话框
+                fade_out_win = QPropertyAnimation(dlg, b"windowOpacity")
+                fade_out_win.setDuration(100)
+                fade_out_win.setStartValue(dlg.windowOpacity() if hasattr(dlg, 'windowOpacity') else 1.0)
+                fade_out_win.setEndValue(0.0)
+                def _on_fade_finished():
+                    try:
+                        QtWidgets.QDialog.close(dlg)
+                    except Exception:
+                        try:
+                            dlg.close()
+                        except Exception:
+                            pass
+                    # 清除引用
+                    if hasattr(self, 'is_fullscreen_preview'):
+                        self.is_fullscreen_preview = None
+                fade_out_win.finished.connect(_on_fade_finished)
+                self._fsp_window_fade_out = fade_out_win
+                fade_out_win.start()
+            except Exception:
+                try:
+                    self.is_fullscreen_preview.close()
+                except Exception:
+                    pass
+                self.is_fullscreen_preview = None
         #info_bar.mousePressEvent = close_fullscreen_preview
+        # 绑定实例的 close 方法，使外部直接调用 close() 时也能使用淡出动画
+        def _close_no_event():
+            close_fullscreen_preview(None)
+        try:
+            self.is_fullscreen_preview.close = _close_no_event
+        except Exception:
+            pass
         main_layout.addWidget(info_bar)
         
         # 创建图片标签
@@ -1521,7 +1696,74 @@ class ScreenshotWindow(QDialog):
         label.setAlignment(Qt.AlignCenter)
         label.setStyleSheet("background-color: black;")
         label.mousePressEvent = close_fullscreen_preview
-        main_layout.addWidget(label)
+        # 为 label 添加不透明度效果，QLabel 本身没有 "opacity" 属性
+        effect = QtWidgets.QGraphicsOpacityEffect(label)
+        label.setGraphicsEffect(effect)
+        effect.setOpacity(1.0)
+        # 添加鼠标滚轮支持
+        def wheelEvent(event):
+            delta = event.angleDelta().y()
+            if delta > 0:  # 向上滚动，切换到上一张
+                self.preview_index = (self.preview_index - 1) % len(self.current_screenshots)
+            else:  # 向下滚动，切换到下一张
+                self.preview_index = (self.preview_index + 1) % len(self.current_screenshots)
+            self.is_fullscreen_preview.load_preview(self.preview_index)
+        label.wheelEvent = wheelEvent
+        # 添加图片标签和切换按钮
+        # 创建水平布局来容纳左右按钮和图片
+        h_layout = QtWidgets.QHBoxLayout()
+        h_layout.setContentsMargins(0, 0, 0, 0)
+        h_layout.setSpacing(0)
+        
+        # 左侧切换按钮
+        left_btn = QtWidgets.QPushButton("←")
+        left_btn.setStyleSheet("""
+            QPushButton {
+            background-color: rgba(0, 0, 0, 0.3);
+            color: white;
+            font-size: 36px;
+            border: none;
+            width: 50px;
+            height: 1000px;
+            opacity: 0.5;
+            }
+            QPushButton:hover {
+            opacity: 0.9;
+            }
+        """)
+        left_btn.clicked.connect(lambda: (
+            setattr(self, 'preview_index', (self.preview_index - 1) % len(self.current_screenshots)),
+            self.is_fullscreen_preview.load_preview(self.preview_index)
+        ))
+        h_layout.addWidget(left_btn, alignment=Qt.AlignVCenter)
+        
+        # 将图片标签添加到布局中心
+        h_layout.addWidget(label, 1)
+        
+        # 右侧切换按钮
+        right_btn = QtWidgets.QPushButton("→")
+        right_btn.setStyleSheet("""
+            QPushButton {
+            background-color: rgba(0, 0, 0, 0.3);
+            color: white;
+            font-size: 36px;
+            border: none;
+            width: 50px;
+            height: 1000px;
+            opacity: 0.5;
+            }
+            QPushButton:hover {
+            opacity: 0.9;
+            }
+        """)
+        right_btn.clicked.connect(lambda: (
+            setattr(self, 'preview_index', (self.preview_index + 1) % len(self.current_screenshots)),
+            self.is_fullscreen_preview.load_preview(self.preview_index)
+        ))
+        h_layout.addWidget(right_btn, alignment=Qt.AlignVCenter)
+        
+        # 将水平布局添加到主布局
+        main_layout.addLayout(h_layout, 1)
     
         def load_preview(idx):
             # --- 新增：如果只加载了6张且有更多，且向右到第6张，自动加载全部 ---
@@ -1543,10 +1785,34 @@ class ScreenshotWindow(QDialog):
             pix = QtGui.QPixmap(path)
             screen = QtWidgets.QApplication.primaryScreen().size()
             # 计算90%的尺寸
-            scaled_width = int(screen.width() * 0.9)
-            scaled_height = int(screen.height() * 0.9)
+            scaled_width = int(screen.width() * 0.95)
+            scaled_height = int(screen.height() * 0.95)
             scaled = pix.scaled(scaled_width, scaled_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            label.setPixmap(scaled)
+            # 添加淡入淡出动画（针对 QGraphicsOpacityEffect）
+            def animate_image():
+                # 淡出当前图片 — 动画目标为 effect
+                fade_out = QPropertyAnimation(effect, b"opacity")
+                fade_out.setDuration(50)
+                fade_out.setStartValue(1.0)
+                fade_out.setEndValue(0.0)
+
+                def on_fade_out_finished():
+                    # 设置新图片并淡入
+                    label.setPixmap(scaled)
+                    fade_in = QPropertyAnimation(effect, b"opacity")
+                    fade_in.setDuration(50)
+                    fade_in.setStartValue(0.0)
+                    fade_in.setEndValue(1.0)
+                    # 保存引用以防被垃圾回收
+                    self._preview_fade_in = fade_in
+                    fade_in.start()
+
+                # 保存引用以防被垃圾回收
+                self._preview_fade_out = fade_out
+                fade_out.finished.connect(on_fade_out_finished)
+                fade_out.start()
+            
+            animate_image()
             if getattr(self, "has_load_more_button", False):
                 allidx = ".."
             else:
@@ -1566,20 +1832,6 @@ class ScreenshotWindow(QDialog):
         # 将 load_preview 方法绑定到 is_fullscreen_preview 对象
         self.is_fullscreen_preview.load_preview = load_preview
         self.is_fullscreen_preview.load_preview(self.preview_index)
-    
-        def preview_key(event):
-            key = event.key()
-            if key == Qt.Key_Left:
-                self.preview_index = (self.preview_index - 1) % len(self.current_screenshots)
-                self.is_fullscreen_preview.load_preview(self.preview_index)
-            elif key == Qt.Key_Right:
-                self.preview_index = (self.preview_index + 1) % len(self.current_screenshots)
-                self.is_fullscreen_preview.load_preview(self.preview_index)
-            elif key in (Qt.Key_Escape, Qt.Key_A, Qt.Key_B):
-                self.is_fullscreen_preview.close()
-    
-        self.is_fullscreen_preview.keyPressEvent = preview_key
-        self.is_fullscreen_preview.raise_()
     
         def preview_key(event):
             key = event.key()
@@ -1711,11 +1963,20 @@ class ScreenshotWindow(QDialog):
         self.close()
 
     def closeEvent(self, event):
-        """窗口关闭事件，确保停止所有后台线程"""
+        """窗口关闭事件，确保停止所有后台线程并重置状态"""
         # 检查并停止 ScreenshotLoaderThread
         if hasattr(self, 'loader_thread') and self.loader_thread:
             if self.loader_thread.isRunning():
                 self.loader_thread.stop()
+        
+        # 重置懒加载状态变量
+        if hasattr(self, 'all_images_loaded'):
+            del self.all_images_loaded
+        if hasattr(self, 'is_loading_images'):
+            del self.is_loading_images
+        if hasattr(self, 'loaded_image_count'):
+            del self.loaded_image_count
+        
         # 调用父类的 closeEvent
         super().closeEvent(event)
 class ConfirmDialog(QDialog):
@@ -2316,7 +2577,7 @@ class GameSelector(QWidget):
             controller_name = controller_data['controller'].get_name()
             self.update_controller_status(controller_name)
         # 右侧文字
-        right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.95.1")
+        right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.95.2")
         right_label.setStyleSheet(f"""
             QLabel {{
                 font-family: "Microsoft YaHei"; 
@@ -2471,6 +2732,145 @@ class GameSelector(QWidget):
                 button_pos.x() + (button_width - self.additional_game_name_label.width()) // 2,
                 button_pos.y() - self.game_name_label.height() - 20
             )
+    def animate_scroll(self, orientation, target_value, duration=150):
+        """平滑滚动到目标值。orientation: 'horizontal' 或 'vertical'。保留动画引用以防被回收。"""
+        try:
+            if orientation == 'horizontal':
+                scrollbar = self.scroll_area.horizontalScrollBar()
+            else:
+                scrollbar = self.scroll_area.verticalScrollBar()
+            start = scrollbar.value()
+            if start == int(target_value):
+                return
+            anim = QPropertyAnimation(scrollbar, b"value")
+            anim.setDuration(duration)
+            anim.setStartValue(start)
+            anim.setEndValue(int(target_value))
+            try:
+                from PyQt5.QtCore import QEasingCurve
+                anim.setEasingCurve(QEasingCurve.InOutCubic)
+            except Exception:
+                pass
+            if not hasattr(self, '_scroll_animations'):
+                self._scroll_animations = []
+            self._scroll_animations.append(anim)
+            def _on_finished():
+                try:
+                    self._scroll_animations.remove(anim)
+                except Exception:
+                    pass
+            anim.finished.connect(_on_finished)
+            anim.start()
+        except Exception:
+            try:
+                if orientation == 'horizontal':
+                    self.scroll_area.horizontalScrollBar().setValue(int(target_value))
+                else:
+                    self.scroll_area.verticalScrollBar().setValue(int(target_value))
+            except Exception:
+                pass
+    def animate_scroll_area_transition(self, new_height, show_controls=True, duration=180):
+        """对 `self.scroll_area` 做淡出 -> 调整高度/显示控制按钮 -> 淡入 的过渡动画。
+        new_height: 目标高度（像素）；show_controls: 切换后是否显示控制按钮。
+        保留动画引用以防被垃圾回收。
+        """
+        try:
+            # 确保有 opacity effect
+            effect = self.scroll_area.graphicsEffect()
+            if not isinstance(effect, QtWidgets.QGraphicsOpacityEffect):
+                effect = QtWidgets.QGraphicsOpacityEffect(self.scroll_area)
+                self.scroll_area.setGraphicsEffect(effect)
+            # 淡出
+            fade_out = QPropertyAnimation(effect, b"opacity")
+            fade_out.setDuration(int(duration * 0.6))
+            fade_out.setStartValue(1.0)
+            fade_out.setEndValue(0.0)
+            try:
+                from PyQt5.QtCore import QEasingCurve
+                fade_out.setEasingCurve(QEasingCurve.InOutCubic)
+            except Exception:
+                pass
+            # 淡入
+            fade_in = QPropertyAnimation(effect, b"opacity")
+            fade_in.setDuration(int(duration * 0.6))
+            fade_in.setStartValue(0.0)
+            fade_in.setEndValue(1.0)
+            try:
+                from PyQt5.QtCore import QEasingCurve
+                fade_in.setEasingCurve(QEasingCurve.InOutCubic)
+            except Exception:
+                pass
+
+            # 保持引用
+            if not hasattr(self, '_scroll_area_fade_anims'):
+                self._scroll_area_fade_anims = []
+            self._scroll_area_fade_anims.extend([fade_out, fade_in])
+            try:
+                fade_out.setParent(self)
+                fade_in.setParent(self)
+            except Exception:
+                pass
+
+            # 仅在本函数创建 effect 时，后续在动画完成后移除该 effect，避免影响外部已设置的 effect
+            created_effect = False
+            try:
+                if self.scroll_area.graphicsEffect() is effect:
+                    # 如果我们刚刚创建并设置了 effect，则标记为可清理
+                    created_effect = True
+            except Exception:
+                created_effect = False
+
+            def _after_fade_out():
+                try:
+                    # 调整高度并切换控制按钮
+                    self.scroll_area.setFixedHeight(int(new_height))
+                    self.toggle_control_buttons(show_controls)
+                    # 触发界面重载以应用变化
+                    try:
+                        self.reload_interface()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                # 开始淡入
+                fade_in.start()
+
+            def _after_fade_in():
+                try:
+                    # 如果是本函数创建的临时 effect，则移除它，避免影响后续动画或样式
+                    if created_effect:
+                        try:
+                            # 移除 effect 并清理引用
+                            self.scroll_area.setGraphicsEffect(None)
+                        except Exception:
+                            pass
+                finally:
+                    # 清理动画引用
+                    try:
+                        if fade_in in self._scroll_area_fade_anims:
+                            self._scroll_area_fade_anims.remove(fade_in)
+                    except Exception:
+                        pass
+
+            def _cleanup_fade_out():
+                try:
+                    if fade_out in self._scroll_area_fade_anims:
+                        self._scroll_area_fade_anims.remove(fade_out)
+                except Exception:
+                    pass
+
+            fade_out.finished.connect(_after_fade_out)
+            fade_in.finished.connect(_after_fade_in)
+            fade_out.finished.connect(_cleanup_fade_out)
+            fade_out.start()
+        except Exception:
+            # 如果失败则回退到直接切换
+            try:
+                self.scroll_area.setFixedHeight(int(new_height))
+                self.toggle_control_buttons(show_controls)
+                self.reload_interface()
+            except Exception:
+                pass
     def startopenmaobackup(self, sysargv, game_name, exe_path):
         # 检查是否已有maobackup.exe进程在运行
         for proc in psutil.process_iter(['name', 'exe']):
@@ -2618,18 +3018,27 @@ class GameSelector(QWidget):
         self.scale_factor2 = self.scale_factor  # 用于按钮和图像的缩放因数
         self.current_index = 0
         self.more_section = 1
-        self.scroll_area.setFixedHeight(int(self.height()*0.85))  # 设置为90%高度
-        self.toggle_control_buttons(False)  # 隐藏控制按钮
-        self.reload_interface()
+        # 使用淡出过渡动画改变 scroll_area 大小并隐藏控制按钮
+        try:
+            target_h = int(self.height() * 0.85)
+            self.animate_scroll_area_transition(target_h, show_controls=False, duration=200)
+        except Exception:
+            self.scroll_area.setFixedHeight(int(self.height() * 0.85))
+            self.toggle_control_buttons(False)
+            self.reload_interface()
     def switch_to_main_interface(self):
         """切换到主界面"""
         self.scale_factor2 = self.scale_factor * 2  # 用于按钮和图像的缩放因数
         self.current_section = 0
         self.current_index = 0
         self.more_section = 0
-        self.scroll_area.setFixedHeight(int(320 * self.scale_factor * 2.4))  # 设置为固定高度
-        self.toggle_control_buttons(True)  # 显示控制按钮
-        self.reload_interface()
+        target_h = int(320 * self.scale_factor * 2.4)
+        try:
+            self.animate_scroll_area_transition(target_h, show_controls=True, duration=200)
+        except Exception:
+            self.scroll_area.setFixedHeight(target_h)
+            self.toggle_control_buttons(True)
+            self.reload_interface()
 
     def toggle_control_buttons(self, show):
         """显示或隐藏控制按钮"""
@@ -3578,6 +3987,54 @@ class GameSelector(QWidget):
                             border: {int(3 * self.scale_factor2)}px solid #25ade7;
                         }}
                     """)
+                    # 为高亮按钮添加发光阴影并做一次脉冲动画（保存引用防止被回收）
+                    try:
+                        effect = button.graphicsEffect()
+                        if not isinstance(effect, QtWidgets.QGraphicsDropShadowEffect):
+                            effect = None
+                    except Exception:
+                        effect = None
+                    if effect is None:
+                        try:
+                            effect = QtWidgets.QGraphicsDropShadowEffect(button)
+                            effect.setColor(QColor("#93ffff"))
+                            effect.setBlurRadius(10)
+                            effect.setOffset(0, 0)
+                            button.setGraphicsEffect(effect)
+                        except Exception:
+                            effect = None
+                    if effect is not None:
+                        try:
+                            anim = QPropertyAnimation(effect, b"blurRadius")
+                            anim.setDuration(300)
+                            anim.setStartValue(10)
+                            anim.setKeyValueAt(0.5, 30)
+                            anim.setEndValue(10)
+                            try:
+                                from PyQt5.QtCore import QEasingCurve
+                                anim.setEasingCurve(QEasingCurve.InOutCubic)
+                            except Exception:
+                                pass
+                            if not hasattr(self, '_highlight_anims'):
+                                self._highlight_anims = {}
+                            # 停止并替换已有动画
+                            old = self._highlight_anims.get(button)
+                            try:
+                                if old and isinstance(old, QPropertyAnimation):
+                                    old.stop()
+                            except Exception:
+                                pass
+                            self._highlight_anims[button] = anim
+                            def _on_highlight_finished():
+                                try:
+                                    # 保持最后状态，不立即删除效果
+                                    pass
+                                except Exception:
+                                    pass
+                            anim.finished.connect(_on_highlight_finished)
+                            anim.start()
+                        except Exception:
+                            pass
                 else:
                     button.setStyleSheet(f"""
                         QPushButton {{
@@ -3589,6 +4046,23 @@ class GameSelector(QWidget):
                             border: {int(2 * self.scale_factor2)}px solid #888888;
                         }}
                     """)
+                    # 移除之前可能存在的高亮动画
+                    try:
+                        if hasattr(self, '_highlight_anims') and button in self._highlight_anims:
+                            old = self._highlight_anims.pop(button)
+                            try:
+                                old.stop()
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                    # 可选：移除效果以还原默认外观
+                    try:
+                        eff = button.graphicsEffect()
+                        if isinstance(eff, QtWidgets.QGraphicsDropShadowEffect):
+                            button.setGraphicsEffect(None)
+                    except Exception:
+                        pass
             for index, btn in enumerate(self.control_buttons):
                 btn.setStyleSheet(f"""
                     QPushButton {{
@@ -3649,10 +4123,11 @@ class GameSelector(QWidget):
             scroll_bar = self.scroll_area.verticalScrollBar()
             # 如果按钮顶部超出可视区域
             if button_pos.y() < scroll_bar.value():
-                scroll_bar.setValue(button_pos.y())
+                # 平滑滚动到目标位置
+                self.animate_scroll('vertical', button_pos.y(), duration=150)
             # 如果按钮底部超出可视区域
             elif button_pos.y() + current_button.height() > scroll_bar.value() + scroll_area_height:
-                scroll_bar.setValue(button_pos.y() + current_button.height() - scroll_area_height)
+                self.animate_scroll('vertical', button_pos.y() + current_button.height() - scroll_area_height, duration=150)
         #固定2
         #if self.buttons:
         #    current_button = self.buttons[self.current_index]
@@ -3678,8 +4153,8 @@ class GameSelector(QWidget):
             offset = 100  # 偏移量，单位像素，可根据需要调整
 
             if self.current_index == 0:
-                # 第一个按钮，滚动到最左边
-                self.scroll_area.horizontalScrollBar().setValue(0)
+                # 第一个按钮，平滑滚动到最左边
+                self.animate_scroll('horizontal', 0, duration=150)
             elif self.current_index >= 1:
                 button_pos = QPoint(current_button.mapToGlobal(QPoint(0, 0)))  # 获取当前按钮的精确位置
                 scroll_value = self.scroll_area.horizontalScrollBar().value()  # 获取当前滚动值
@@ -3687,12 +4162,12 @@ class GameSelector(QWidget):
                 if button_pos.x() < scroll_area_pos.x() + offset and self.current_index > 0:
                     second_button_pos = self.buttons[0].mapToGlobal(QPoint(0, 0)).x()
                     scroll_value = button_pos.x() - second_button_pos - offset
-                    self.scroll_area.horizontalScrollBar().setValue(scroll_value)
+                    self.animate_scroll('horizontal', scroll_value, duration=150)
                 # 当靠近右边缘且移动距离大于3时调整滚动
                 elif button_pos.x() + button_width > scroll_area_pos.x() + scroll_area_width:
                     second_button_pos = self.buttons[min(3, len(self.buttons) - 1)].mapToGlobal(QPoint(0, 0)).x()
                     scroll_value = button_pos.x() - second_button_pos
-                    self.scroll_area.horizontalScrollBar().setValue(scroll_value)
+                    self.animate_scroll('horizontal', scroll_value, duration=150)
         #
         #self.game_name_label.move(button_pos.x(), button_pos.y() - self.game_name_label.height())
         #self.game_name_label.show()
@@ -3701,8 +4176,42 @@ class GameSelector(QWidget):
             self.game_name_label.setStyleSheet(f"""QLabel {{color: #1e1e1e;}}""")
             button_pos = current_button.mapToGlobal(QPoint(0, 0))  # 重新加载按钮的最新位置
             if hasattr(self, 'additional_game_name_label') and isinstance(self.additional_game_name_label, QLabel):
+                # 如果已有 label，则做淡出动画后删除
                 try:
-                    self.additional_game_name_label.deleteLater()  # 删除之前生成的 additional_game_name_label
+                    old_label = self.additional_game_name_label
+                    try:
+                        eff_old = old_label.graphicsEffect()
+                        if not isinstance(eff_old, QtWidgets.QGraphicsOpacityEffect):
+                            eff_old = None
+                    except Exception:
+                        eff_old = None
+                    if eff_old is None:
+                        try:
+                            eff_old = QtWidgets.QGraphicsOpacityEffect(old_label)
+                            old_label.setGraphicsEffect(eff_old)
+                        except Exception:
+                            eff_old = None
+                    if eff_old is not None:
+                        fade_out = QPropertyAnimation(eff_old, b"opacity")
+                        fade_out.setDuration(180)
+                        fade_out.setStartValue(1.0)
+                        fade_out.setEndValue(0.0)
+                        def _del_old():
+                            try:
+                                old_label.deleteLater()
+                            except Exception:
+                                pass
+                        fade_out.finished.connect(_del_old)
+                        # 保存引用
+                        if not hasattr(self, '_label_fade_anims'):
+                            self._label_fade_anims = []
+                        self._label_fade_anims.append(fade_out)
+                        fade_out.start()
+                    else:
+                        try:
+                            old_label.deleteLater()
+                        except Exception:
+                            pass
                 except RuntimeError:
                     pass  # 如果对象已被删除，忽略错误
             else:
@@ -3716,11 +4225,26 @@ class GameSelector(QWidget):
                     font-size: {int(20 * self.scale_factor*1.5)}px;
                 }}
             """)
+            # 添加不透明度效果并淡入
+            try:
+                eff = QtWidgets.QGraphicsOpacityEffect(self.additional_game_name_label)
+                self.additional_game_name_label.setGraphicsEffect(eff)
+                eff.setOpacity(0.0)
+                fade_in_lbl = QPropertyAnimation(eff, b"opacity")
+                fade_in_lbl.setDuration(180)
+                fade_in_lbl.setStartValue(0.0)
+                fade_in_lbl.setEndValue(1.0)
+                if not hasattr(self, '_label_fade_anims'):
+                    self._label_fade_anims = []
+                self._label_fade_anims.append(fade_in_lbl)
+                fade_in_lbl.start()
+            except Exception:
+                pass
         # background-color: #575757;    
         # border-radius: 10px;          
         # border: 2px solid #282828;
             self.additional_game_name_label.adjustSize()  # 调整标签大小以适应文本
-            print(self.game_name_label.text(), button_pos.x(), button_pos.x() + (button_width - self.additional_game_name_label.width()) // 2, button_pos.y() - self.game_name_label.height() - 20)
+            #print(self.game_name_label.text(), button_pos.x(), button_pos.x() + (button_width - self.additional_game_name_label.width()) // 2, button_pos.y() - self.game_name_label.height() - 20)
             self.additional_game_name_label.move(button_pos.x() + (button_width - self.additional_game_name_label.width()) // 2, button_pos.y() - self.game_name_label.height() - 20)  # 居中在按钮中央
             self.additional_game_name_label.show()
         elif self.current_section == 1:
@@ -3929,6 +4453,60 @@ class GameSelector(QWidget):
         if not os.path.isabs(image_path):
             image_path = f"{APP_INSTALL_PATH}\\config\\covers\\{image_path}"
         self.ignore_input_until = pygame.time.get_ticks() + 600
+
+        # 点击反馈：对被点击的按钮触发更大幅度的脉冲动画（保持引用以防被回收）
+        try:
+            if 0 <= index < len(self.buttons):
+                clicked_btn = self.buttons[index]
+                try:
+                    eff = clicked_btn.graphicsEffect()
+                    if not isinstance(eff, QtWidgets.QGraphicsDropShadowEffect):
+                        eff = None
+                except Exception:
+                    eff = None
+                if eff is None:
+                    try:
+                        eff = QtWidgets.QGraphicsDropShadowEffect(clicked_btn)
+                        eff.setColor(QColor("#93ffff"))
+                        eff.setBlurRadius(10)
+                        eff.setOffset(0, 0)
+                        clicked_btn.setGraphicsEffect(eff)
+                    except Exception:
+                        eff = None
+                if eff is not None:
+                    try:
+                        pulse = QPropertyAnimation(eff, b"blurRadius")
+                        pulse.setDuration(200)
+                        pulse.setStartValue(10)
+                        pulse.setKeyValueAt(0.2, 120)
+                        pulse.setEndValue(10)
+                        try:
+                            from PyQt5.QtCore import QEasingCurve
+                            pulse.setEasingCurve(QEasingCurve.OutCubic)
+                        except Exception:
+                            pass
+                        if not hasattr(self, '_click_pulse_anims'):
+                            self._click_pulse_anims = []
+                        self._click_pulse_anims.append(pulse)
+                        pulse.start()
+                        # 阻塞当前函数直到动画结束，但保持 UI 响应（使用本地事件循环）
+                        try:
+                            try:
+                                from PyQt5.QtCore import QEventLoop
+                            except Exception:
+                                from PyQt6.QtCore import QEventLoop
+                            loop = QEventLoop()
+                            pulse.finished.connect(loop.quit)
+                            try:
+                                loop.exec_()
+                            except AttributeError:
+                                loop.exec()
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
         if self.more_section == 0 and self.current_index == self.buttonsindexset: # 如果点击的是"更多"按钮
             self.switch_to_all_software()
@@ -4597,12 +5175,12 @@ class GameSelector(QWidget):
     
     def reload_interface(self):
         """重新加载界面"""
-        # 清除现有按钮
-        #if self.butto:
-        #    return
-        #self.butto=True
-        for button in self.buttons:
-            button.setParent(None)
+        # 优化：清除现有按钮的方式，使用更高效的布局处理
+        while self.grid_layout.count() > 0:
+            item = self.grid_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.setParent(None)
         self.buttons.clear()
         if self.more_section == 1:
             #修改按钮文字为"返回"
@@ -4627,18 +5205,23 @@ class GameSelector(QWidget):
                 self.grid_layout.addWidget(more_button, 0, len(sorted_games[:self.buttonsindexset]))  # 添加到最后一列
                 self.buttons.append(more_button)
             else:
-                for index, game in enumerate(sorted_games):
-                    button = self.create_game_button(game, index)
-                    self.grid_layout.addWidget(button, index // self.row_count, index % self.row_count)
-                    self.buttons.append(button)
+                # 优化：使用批量加载方式
+                self.load_all_games_optimized(sorted_games)
 
-        # 将代码放入一个函数中
-        def delayed_execution():
-            self.update_highlight()
-        
-        # 使用 QTimer 延迟 50 毫秒后执行
-        QTimer.singleShot(25, delayed_execution)
+        # 使用 QTimer 延迟执行高亮更新
+        QTimer.singleShot(25, self.update_highlight)
         #self.butto=False
+    
+    def load_all_games_optimized(self, sorted_games):
+        """优化加载所有游戏的方法"""
+        for index, game in enumerate(sorted_games):
+            button = self.create_game_button(game, index)
+            self.grid_layout.addWidget(button, index // self.row_count, index % self.row_count)
+            self.buttons.append(button)
+            
+            # 每创建10个按钮，让UI线程有机会处理其他事件
+            if (index + 1) % 10 == 0:
+                QApplication.processEvents()  # 处理待处理的事件，优化 `c:\Users\86150\Desktop\dist2\DesktopGame.py`
 
     def show_more_window(self):
         """显示更多选项窗口"""
@@ -5262,10 +5845,10 @@ class GameControllerThread(QThread):
                         self.gamepad_signal.emit('BACK')
                     if buttons[mapping.start]:  # Start
                         self.gamepad_signal.emit('START')
-                    #if buttons[mapping.left_bumper]:  # LB
-                    #    self.gamepad_signal.emit('LB')
-                    #if buttons[mapping.right_bumper]:  # RB
-                    #    self.gamepad_signal.emit('RB')
+                    if buttons[mapping.left_bumper]:  # LB
+                        self.gamepad_signal.emit('LB')
+                    if buttons[mapping.right_bumper]:  # RB
+                        self.gamepad_signal.emit('RB')
                     #if buttons[mapping.left_trigger]:  # LT
                     #    self.gamepad_signal.emit('LT')
                     #if buttons[mapping.right_trigger]:  # RT
@@ -7186,7 +7769,6 @@ if __name__ == "__main__":
         z_order.append(hwnd)
         return True
     win32gui.EnumWindows(enum_windows_callback, None)
-    print(z_order)
     
     # 打印当前工作目录
     print("当前工作目录:", os.getcwd())
