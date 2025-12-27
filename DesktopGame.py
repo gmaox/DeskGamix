@@ -3538,13 +3538,99 @@ class GameSelector(QWidget):
         def create_tray_menu():
             tray_menu = QMenu(self)
             sorted_games = self.sort_games()
+
+            # 辅助：从文件或可执行中提取图标，优先用 icoextract 提取 exe/dll 图标，否则尝试作为图片加载
+            def _icon_from_file(fp, size=24):
+                try:
+                    from icoextract import IconExtractor
+                    extractor = IconExtractor(fp)
+                    bio = extractor.get_icon(num=0)
+                    data = bio.getvalue()
+                    pix = QPixmap()
+                    if pix.loadFromData(data):
+                        pix = pix.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                        return QIcon(pix)
+                except Exception:
+                    pass
+                try:
+                    pix = QPixmap(fp)
+                    if not pix.isNull():
+                        pix = pix.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                        return QIcon(pix)
+                except Exception:
+                    pass
+                return QIcon()
+
+            # 辅助：解析可能含参数或是快捷方式的启动路径，返回可用的 exe 路径或目录
+            def _resolve_exec_path(raw_path):
+                if not raw_path:
+                    return raw_path
+                p = raw_path.strip()
+                candidate = None
+                if p.startswith('"'):
+                    m = re.match(r'^\"([^\"]+)\"', p)
+                    if m:
+                        candidate = m.group(1)
+                if not candidate:
+                    exts = ['.exe', '.lnk', '.bat', '.cmd', '.com', '.ps1']
+                    lower = p.lower()
+                    for ext in exts:
+                        idx = lower.find(ext)
+                        if idx != -1:
+                            candidate = p[:idx + len(ext)]
+                            break
+                if not candidate:
+                    candidate = p.split(' ')[0]
+                candidate = candidate.strip('"')
+                if os.path.exists(candidate):
+                    return candidate
+                if candidate.lower().endswith('.lnk'):
+                    try:
+                        from win32com.client import Dispatch
+                        shell = Dispatch('WScript.Shell')
+                        shortcut = shell.CreateShortCut(candidate)
+                        target = shortcut.Targetpath
+                        if target and os.path.exists(target):
+                            return target
+                    except Exception:
+                        pass
+                if os.path.isdir(candidate):
+                    try:
+                        for fname in os.listdir(candidate):
+                            if fname.lower().endswith('.exe'):
+                                cand = os.path.join(candidate, fname)
+                                if os.path.exists(cand):
+                                    return cand
+                    except Exception:
+                        pass
+                return candidate
+
             if sorted_games:
                 tray_menu.addSeparator()
-                #for idx, game in enumerate(sorted_games[:self.buttonsindexset]):    #正序显示的代码
                 for idx, game in enumerate(reversed(sorted_games[:self.buttonsindexset])):
-                    #game_action = tray_menu.addAction(game["name"])
-                    game_action = tray_menu.addAction(game["name"][:24] + "..." if len(game["name"]) > 24 else game["name"])
-                    #def launch_and_close_tray(i=idx):    #正序显示的代码
+                    icon = QIcon()
+                    exec_path_raw = game.get("path", "")
+                    if not exec_path_raw:
+                        try:
+                            for v in valid_apps:
+                                if v.get("name") == game.get("name") and v.get("path"):
+                                    exec_path_raw = v.get("path")
+                                    break
+                        except Exception:
+                            pass
+
+                    exec_path = _resolve_exec_path(exec_path_raw)
+                    exists_flag = os.path.exists(exec_path) if exec_path else False
+                    if exec_path and exists_flag:
+                        icon = _icon_from_file(exec_path, 24)
+                    if icon.isNull():
+                        image_path = game.get("image-path", "")
+                        if image_path and not os.path.isabs(image_path):
+                            image_path = f"{APP_INSTALL_PATH}\\config\\covers\\{image_path}"
+                        icon = _icon_from_file(image_path, 24)
+
+                    text = game["name"][:24] + "..." if len(game["name"]) > 24 else game["name"]
+                    game_action = tray_menu.addAction(icon, text)
                     game_action.triggered.connect(lambda checked=False, i=len(sorted_games[:self.buttonsindexset])-1-idx: (self.tray_icon.contextMenu().hide(), self.launch_game(i)))
             tray_menu.addSeparator()
             # 新增“工具”子菜单
@@ -3561,8 +3647,19 @@ class GameSelector(QWidget):
                 }
             """)
             for app in more_apps:
-                tool_action = tools_menu.addAction(app["name"])
-                def launch_tool(checked=False, path=app["path"]):
+                icon = QIcon()
+                path = app.get("path", "")
+                if path and os.path.exists(path):
+                    icon = _icon_from_file(path, 24)
+                if icon.isNull():
+                    image_path = app.get("image-path", "")
+                    if image_path and not os.path.isabs(image_path):
+                        image_path = f"{APP_INSTALL_PATH}\\config\\covers\\{image_path}"
+                    icon = _icon_from_file(image_path, 24)
+
+                text = app.get("name", "")
+                tool_action = tools_menu.addAction(icon, text)
+                def launch_tool(checked=False, path=app.get("path", "")):
                     self.hide_window()
                     if isinstance(path, str) and path.strip():
                         subprocess.Popen(path, shell=True)
@@ -6819,7 +6916,53 @@ class FloatingWindow(QWidget):
                 continue
         sorted_files = self.sort_files()
         for file in sorted_files:
+            # 尝试为文件项加载图标：优先解析 .lnk 目标或 exe 并用 icoextract 提取，失败回退为图片加载
+            def _get_icon_for_file(relpath, size=24):
+                try:
+                    abs_path = os.path.abspath(os.path.join('./morefloder/', relpath))
+                    # 如果是快捷方式，解析目标
+                    if abs_path.lower().endswith('.lnk'):
+                        try:
+                            shell = win32com.client.Dispatch('WScript.Shell')
+                            shortcut = shell.CreateShortCut(abs_path)
+                            target = shortcut.Targetpath
+                            if target and os.path.exists(target):
+                                abs_path = target
+                        except Exception:
+                            pass
+                    # 如果目标存在且可能为可执行文件，尝试用 icoextract 提取
+                    if os.path.exists(abs_path):
+                        try:
+                            from icoextract import IconExtractor
+                            extractor = IconExtractor(abs_path)
+                            bio = extractor.get_icon(num=0)
+                            data = bio.getvalue()
+                            pix = QPixmap()
+                            if pix.loadFromData(data):
+                                pix = pix.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                                return QIcon(pix)
+                        except Exception:
+                            pass
+                        # 回退：尝试作为图片加载（例如 .ico/.png/.jpg）
+                        try:
+                            pix = QPixmap(abs_path)
+                            if not pix.isNull():
+                                pix = pix.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                                return QIcon(pix)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                return QIcon()
+
+            icon = _get_icon_for_file(file.get("path", ""), size=int(24 * self.parent().scale_factor))
             btn = QPushButton(file["name"])
+            if not icon.isNull():
+                btn.setIcon(icon)
+                try:
+                    btn.setIconSize(QSize(int(24 * self.parent().scale_factor), int(24 * self.parent().scale_factor)))
+                except Exception:
+                    pass
             btn.setStyleSheet(f"""
                 QPushButton {{
                     background-color: transparent;
