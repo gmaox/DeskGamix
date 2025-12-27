@@ -9,8 +9,8 @@ from PyQt5 import QtGui
 import pygame, math
 import win32gui,win32process,psutil,win32api
 from PyQt5.QtWidgets import QApplication, QListWidgetItem, QMainWindow, QMessageBox, QScroller, QSystemTrayIcon, QMenu , QVBoxLayout, QDialog, QGridLayout, QWidget, QPushButton, QLabel, QDesktopWidget, QHBoxLayout, QFileDialog, QSlider, QLineEdit, QProgressBar, QScrollArea, QFrame
-from PyQt5.QtGui import QPainter, QPen, QBrush, QFont, QPixmap, QIcon, QColor
-from PyQt5.QtCore import QDateTime, QSize, Qt, QThread, pyqtSignal, QTimer, QPoint, QProcess, QPropertyAnimation
+from PyQt5.QtGui import QPainter, QPen, QBrush, QFont, QPixmap, QIcon, QColor, QLinearGradient
+from PyQt5.QtCore import QDateTime, QSize, Qt, QThread, pyqtSignal, QTimer, QPoint, QProcess, QPropertyAnimation, QRect
 import subprocess, time, os,win32con, ctypes, re, win32com.client, ctypes, time, pyautogui
 from ctypes import wintypes
 #& C:/Users/86150/AppData/Local/Programs/Python/Python38/python.exe -m PyInstaller --add-data "fav.ico;." --add-data '1.png;.' --add-data 'pssuspend64.exe;.' -w DesktopGame.py -i '.\fav.ico' --uac-admin --noconfirm
@@ -1979,18 +1979,11 @@ class ScreenshotWindow(QDialog):
         
         # 调用父类的 closeEvent
         super().closeEvent(event)
-class ConfirmDialog(QDialog):
-    def __init__(self, variable1, scale_factor=1.0):
-        super().__init__()
-        self.variable1 = variable1
-        self.scale_factor = scale_factor
-        self.setWindowTitle("游戏确认")
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool)
-        self.setFixedSize(int(800 * self.scale_factor), int(400 * self.scale_factor))  # 更新后的固定尺寸
-        self.setStyleSheet("""
+DIALOGQSS = """
             QDialog {
                 background-color: #2E2E2E;
                 border: 5px solid #4CAF50;
+                border-radius: 8px;
             }
             QLabel {
                 font-size: 36px;
@@ -2021,7 +2014,24 @@ class ConfirmDialog(QDialog):
                 justify-content: center;
                 spacing: 0;
             }
-        """)
+        """
+class ConfirmDialog(QDialog):
+    def __init__(self, variable1, scale_factor=1.0):
+        super().__init__()
+        self.variable1 = variable1
+        self.scale_factor = scale_factor
+        self.setWindowTitle("游戏确认")
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool)
+        self.setFixedSize(int(800 * self.scale_factor), int(400 * self.scale_factor))  # 更新后的固定尺寸
+        self.setStyleSheet(DIALOGQSS)
+        # 初始透明度为 0，使用动画淡入
+        try:
+            self.setWindowOpacity(0.0)
+        except Exception:
+            pass
+        self._fade_anim = None
+        self._is_fading = False
+        
 
         self.init_ui()
         self.current_index = 1  # 当前选中的按钮索引
@@ -2060,16 +2070,85 @@ class ConfirmDialog(QDialog):
 
     def confirm_action(self): 
         print("用户点击了确认按钮")
-        self.accept()
+        # 使用淡出动画后再 accept
+        try:
+            self.fade_out_and_accept()
+        except Exception:
+            self.accept()
 
     def cancel_action(self):
         print("用户点击了取消按钮")
-        self.reject()
+        # 使用淡出动画后再 reject
+        try:
+            self.fade_out_and_reject()
+        except Exception:
+            self.reject()
     
     def showEvent(self, event):
         """窗口显示时的事件处理"""
         super().showEvent(event)
+        try:
+            self.fade_in()
+        except Exception:
+            pass
         self.ignore_input_until = pygame.time.get_ticks() + 350  # 打开窗口后1秒内忽略输入
+
+    def fade_in(self, duration=180):
+        try:
+            if self._is_fading:
+                return
+            self._is_fading = True
+            anim = QPropertyAnimation(self, b"windowOpacity")
+            anim.setDuration(duration)
+            anim.setStartValue(0.0)
+            anim.setEndValue(1.0)
+            anim.finished.connect(lambda: setattr(self, '_is_fading', False))
+            self._fade_anim = anim
+            anim.start()
+        except Exception:
+            pass
+
+    def fade_out_and_accept(self, duration=180):
+        try:
+            if self._is_fading:
+                return
+            self._is_fading = True
+            anim = QPropertyAnimation(self, b"windowOpacity")
+            anim.setDuration(duration)
+            anim.setStartValue(self.windowOpacity())
+            anim.setEndValue(0.0)
+            def on_finished():
+                try:
+                    self._is_fading = False
+                    super(ConfirmDialog, self).accept()
+                except Exception:
+                    pass
+            anim.finished.connect(on_finished)
+            self._fade_anim = anim
+            anim.start()
+        except Exception:
+            super(ConfirmDialog, self).accept()
+
+    def fade_out_and_reject(self, duration=180):
+        try:
+            if self._is_fading:
+                return
+            self._is_fading = True
+            anim = QPropertyAnimation(self, b"windowOpacity")
+            anim.setDuration(duration)
+            anim.setStartValue(self.windowOpacity())
+            anim.setEndValue(0.0)
+            def on_finished():
+                try:
+                    self._is_fading = False
+                    super(ConfirmDialog, self).reject()
+                except Exception:
+                    pass
+            anim.finished.connect(on_finished)
+            self._fade_anim = anim
+            anim.start()
+        except Exception:
+            super(ConfirmDialog, self).reject()
 
     def keyPressEvent(self, event):
         """处理键盘事件"""
@@ -2141,6 +2220,838 @@ class ConfirmDialog(QDialog):
                         width: 100%;
                     }
                 """)
+class LoadingDialog(QDialog):
+    """通用加载窗口，显示一条提示信息并保持在最上层。"""
+    def __init__(self, message="加载中...", scale_factor=1.0, parent=None):
+        super().__init__(parent)
+        self.message = message
+        self.scale_factor = scale_factor
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool)
+        #self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setFixedSize(int(800 * self.scale_factor), int(400 * self.scale_factor))  # 更新后的固定尺寸
+        # 初始透明度为 0，使用动画淡入
+        try:
+            self.setWindowOpacity(0.0)
+        except Exception:
+            pass
+        self._fade_anim = None
+        self._is_fading = False
+        self.init_ui()
+
+    def init_ui(self):
+        # 使样式与 ConfirmDialog 对齐
+        self.setStyleSheet(DIALOGQSS)
+        layout = QVBoxLayout()
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+        self.label = QLabel(self.message)
+        self.label.setAlignment(Qt.AlignCenter)
+        self.label.setStyleSheet("font-size: 24px; color: #FFFFFF;")
+        layout.addWidget(self.label)
+        # 添加无限加载进度条作为加载动画（不依赖外部资源）
+        try:
+            from PyQt5.QtWidgets import QProgressBar
+            self.progress = QProgressBar()
+            self.progress.setTextVisible(False)
+            self.progress.setFixedHeight(int(10 * self.scale_factor))
+            self.progress.setRange(0, 0)  # 不确定进度的忙碌指示器
+            # 样式与对话框风格对齐
+            self.progress.setStyleSheet("QProgressBar { background-color: rgba(255,255,255,0.06); border-radius: 5px; } QProgressBar::chunk { background-color: #4CAF50; }")
+            layout.addWidget(self.progress)
+        except Exception:
+            self.progress = None
+        self.setLayout(layout)
+
+    def showEvent(self, event):
+        try:
+            # 在显示时启用等待光标并淡入
+            try:
+                QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            except Exception:
+                pass
+            self.fade_in()
+        except Exception:
+            pass
+        super().showEvent(event)
+
+    def fade_in(self, duration=180):
+        try:
+            if self._is_fading:
+                return
+            self._is_fading = True
+            anim = QPropertyAnimation(self, b"windowOpacity")
+            anim.setDuration(duration)
+            anim.setStartValue(0.0)
+            anim.setEndValue(1.0)
+            anim.finished.connect(lambda: setattr(self, '_is_fading', False))
+            self._fade_anim = anim
+            anim.start()
+        except Exception:
+            pass
+
+    def fade_out_and_close(self, duration=180):
+        try:
+            # 如果已有动画，则先停止它，确保可以强制开始淡出
+            try:
+                if self._fade_anim is not None:
+                    self._fade_anim.stop()
+            except Exception:
+                pass
+            self._is_fading = True
+            anim = QPropertyAnimation(self, b"windowOpacity")
+            anim.setDuration(duration)
+            try:
+                start_val = float(self.windowOpacity())
+            except Exception:
+                start_val = 1.0
+            anim.setStartValue(start_val)
+            anim.setEndValue(0.0)
+            def on_finished():
+                try:
+                    self._is_fading = False
+                    try:
+                        QApplication.restoreOverrideCursor()
+                    except Exception:
+                        pass
+                    super(LoadingDialog, self).close()
+                except Exception:
+                    pass
+            anim.finished.connect(on_finished)
+            self._fade_anim = anim
+            anim.start()
+        except Exception:
+            try:
+                QApplication.restoreOverrideCursor()
+            except Exception:
+                pass
+            super(LoadingDialog, self).close()
+
+    def close(self):
+        # 强制使用淡出动画再真正关闭（停止任何正在进行的淡入）
+        try:
+            self.fade_out_and_close()
+        except Exception:
+            try:
+                QApplication.restoreOverrideCursor()
+            except Exception:
+                pass
+            super(LoadingDialog, self).close()
+
+    def closeEvent(self, event):
+        try:
+            QApplication.restoreOverrideCursor()
+        except Exception:
+            pass
+        super().closeEvent(event)
+
+    def setMessage(self, msg):
+        self.message = msg
+        self.label.setText(msg)
+
+
+class LaunchOverlay(QWidget):
+    """启动游戏的悬浮窗"""
+    class _ProcessCheckThread(QThread):
+        """在后台检查指定可执行文件是否运行并返回内存使用情况，避免阻塞主线程。"""
+        status_signal = pyqtSignal(bool, float)
+
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self.game_path = None
+            self._running = True
+
+        def run(self):
+            while getattr(self, '_running', True):
+                game_running = False
+                memory_mb = 0.0
+                try:
+                    gp = self.game_path
+                    if gp:
+                        for process in psutil.process_iter(['pid', 'exe', 'memory_info']):
+                            try:
+                                exe = process.info.get('exe') or ''
+                                if exe and exe.lower() == gp.lower():
+                                    game_running = True
+                                    memory_info = process.info.get('memory_info')
+                                    if memory_info:
+                                        memory_mb = memory_info.rss / (1024 * 1024)
+                                    break
+                            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                                continue
+                except Exception:
+                    pass
+
+                try:
+                    self.status_signal.emit(game_running, memory_mb)
+                except Exception:
+                    pass
+
+                # sleep in short increments so stop() can be responsive
+                for _ in range(5):
+                    if not getattr(self, '_running', False):
+                        break
+                    QThread.msleep(100)
+
+        def stop(self):
+            self._running = False
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.parent = parent
+        self.setObjectName("launchOverlay")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setAutoFillBackground(True)        
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.bg = QWidget(self)
+        self.bg.setGeometry(0, 0, self.parent.width(), self.parent.height())
+        self.bg.setAttribute(Qt.WA_StyledBackground, True)
+        self.bg.setStyleSheet("background-color: rgba(46,46,46,230);")
+        self.bg.show()
+        self.bg.raise_()
+        
+        # 设置悬浮窗大小为父窗口大小
+        self.setFixedSize(self.parent.size())
+        
+        # 使用绝对定位，不使用布局
+        #self.setLayout(None) （会卡住）
+        
+        # 创建图片标签（用于封面动画）
+        self.overlay_image = QLabel(self)
+        self.overlay_image.setAlignment(Qt.AlignCenter)
+        self.overlay_image.setScaledContents(False)
+        self.overlay_image.hide()
+        
+        # 创建背景图片标签（用于放大后的背景）
+        self.overlay_bg_image = QLabel(self)
+        self.overlay_bg_image.setAlignment(Qt.AlignCenter)
+        self.overlay_bg_image.setScaledContents(True)
+        self.overlay_bg_image.hide()
+        
+        # 创建文本标签（启动文字）- 添加文字阴影效果
+        self.overlay_text = QLabel(self)
+        self.overlay_text.setAlignment(Qt.AlignCenter)
+        # 改进文字样式：更大字体、文字阴影、更好的字体
+        self.overlay_text.setStyleSheet("""
+            font-size: 42px; 
+            color: #EEEEEE; 
+            background: transparent;
+        """)
+        # 添加文字阴影效果
+        text_shadow = QtWidgets.QGraphicsDropShadowEffect(self.overlay_text)
+        text_shadow.setBlurRadius(15)
+        text_shadow.setXOffset(2)
+        text_shadow.setYOffset(2)
+        text_shadow.setColor(QColor(0, 0, 0, 180))
+        self.overlay_text.setGraphicsEffect(text_shadow)
+        self.overlay_text.hide()
+        
+        # 创建加载条 - 改进视觉效果
+        self.overlay_progress = QProgressBar(self)
+        self.overlay_progress.setTextVisible(False)
+        progress_height = int(8 * self.parent.scale_factor)
+        self.overlay_progress.setFixedHeight(progress_height)
+        self.overlay_progress.setRange(0, 0)  # 不确定进度的忙碌指示器
+        # 改进加载条样式：渐变、发光效果
+        self.overlay_progress.setStyleSheet("""
+            QProgressBar { 
+                background-color: rgba(30, 30, 30, 0.8); 
+                border: 2px solid rgba(100, 100, 100, 0.3);
+                border-radius: 4px; 
+            } 
+            QProgressBar::chunk { 
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #4CAF50,
+                    stop:0.5 #66BB6A,
+                    stop:1 #4CAF50);
+                border-radius: 2px;
+            }
+        """)
+        # 添加发光效果
+        progress_glow = QtWidgets.QGraphicsDropShadowEffect(self.overlay_progress)
+        progress_glow.setBlurRadius(10)
+        progress_glow.setXOffset(0)
+        progress_glow.setYOffset(0)
+        progress_glow.setColor(QColor(76, 175, 80, 100))
+        self.overlay_progress.setGraphicsEffect(progress_glow)
+        self.overlay_progress.hide()
+        
+        # 创建状态标签（右下角显示进程状态）- 添加背景和阴影
+        self.overlay_status = QLabel(self)
+        self.overlay_status.setAlignment(Qt.AlignRight | Qt.AlignBottom)
+        # 改进状态标签样式：半透明背景、圆角、阴影
+        self.overlay_status.setStyleSheet("""
+            font-size: 18px; 
+            font-weight: 500;
+            color: #E0E0E0; 
+            background-color: rgba(20, 20, 20, 0.7);
+            border-radius: 8px;
+            padding: 12px 16px;
+        """)
+        # 添加状态标签阴影
+        status_shadow = QtWidgets.QGraphicsDropShadowEffect(self.overlay_status)
+        status_shadow.setBlurRadius(8)
+        status_shadow.setXOffset(0)
+        status_shadow.setYOffset(2)
+        status_shadow.setColor(QColor(0, 0, 0, 150))
+        self.overlay_status.setGraphicsEffect(status_shadow)
+        self.overlay_status.hide()
+        
+        # 动画相关变量
+        self.launch_animations = []
+        self.status_timer = None
+        self.focus_check_timer = None
+        self._process_check_thread = None
+        self.current_game_name = None
+        self.current_game_path = None
+        
+        # 初始时隐藏
+        self.hide()
+    
+    def mousePressEvent(self, event):
+        """点击悬浮窗时隐藏"""
+        self.hide()
+        self._stop_launch_animations()
+    
+    def show_launch_window(self, game_name, image_path):
+        """显示启动游戏的悬浮窗"""
+        # 停止之前的动画和定时器
+        self._stop_launch_animations()
+        
+        # 保存游戏信息
+        self.current_game_name = game_name
+        # 查找游戏路径
+        self.current_game_path = None
+        for app in valid_apps:
+            if app["name"] == game_name:
+                self.current_game_path = app["path"]
+                break
+        
+        # 重置所有组件状态
+        self.setWindowOpacity(0.0)
+        self.overlay_image.hide()
+        self.overlay_bg_image.hide()
+        self.overlay_text.hide()
+        self.overlay_progress.hide()
+        self.overlay_status.hide()
+        
+        # 获取父窗口大小
+        parent_size = self.parent.size()
+        parent_width = parent_size.width()
+        parent_height = parent_size.height()
+        
+        # 更新悬浮窗大小
+        self.setFixedSize(parent_width, parent_height)
+        
+        # 获取当前按钮位置（光标位置，参考4328行）
+        start_pos = None
+        if hasattr(self.parent, 'buttons') and self.parent.buttons and hasattr(self.parent, 'current_index'):
+            try:
+                current_button = self.parent.buttons[self.parent.current_index]
+                # 获取按钮在父窗口中的位置
+                button_pos = current_button.mapTo(self.parent, QPoint(0, 0))
+                button_size = current_button.size()
+                start_pos = QPoint(
+                    button_pos.x() + button_size.width() // 2,
+                    button_pos.y() + button_size.height() // 2
+                )
+            except Exception:
+                pass
+        
+        # 如果没有找到按钮位置，使用屏幕中心
+        if start_pos is None:
+            start_pos = QPoint(parent_width // 2, parent_height // 2)
+        
+        # 目标位置（屏幕中心）
+        target_x = parent_width // 2
+        target_y = parent_height // 2
+        
+        # 根据图片比例计算封面尺寸
+        if image_path and os.path.exists(image_path):
+            pixmap = QPixmap(image_path)
+            if not pixmap.isNull():
+                # 读取原始宽高，按比例缩放，目标宽度 400*scale_factor
+                cover_width = int(400 * self.parent.scale_factor)
+                cover_height = int(pixmap.height() * cover_width / pixmap.width())
+            else:
+                cover_width = int(400 * self.parent.scale_factor)
+                cover_height = int(533 * self.parent.scale_factor)
+        else:
+            cover_width = int(400 * self.parent.scale_factor)
+            cover_height = int(533 * self.parent.scale_factor)
+        
+        # 加载并设置封面图片
+        if image_path and os.path.exists(image_path):
+            pixmap = QPixmap(image_path)
+            scaled_pixmap = pixmap.scaled(
+                cover_width,
+                cover_height,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
+            self.overlay_image.setPixmap(scaled_pixmap)
+            # 设置初始位置和大小
+            self.overlay_image.setGeometry(
+                start_pos.x() - cover_width // 2,
+                start_pos.y() - cover_height // 2,
+                cover_width,
+                cover_height
+            )
+            self.overlay_image.show()
+        else:
+            self.overlay_image.hide()
+        
+        # 设置文本
+        self.overlay_text.setText(f"正在启动 {game_name}")
+        text_width = int(1600 * self.parent.scale_factor)
+        text_height = int(50 * self.parent.scale_factor)
+        # 初始位置在屏幕下方中央
+        self.overlay_text.setGeometry(
+            (parent_width - text_width) // 2,
+            parent_height - text_height - int(100 * self.parent.scale_factor),
+            text_width,
+            text_height
+        )
+        self.overlay_text.hide()
+        
+        # 设置加载条位置（底部）
+        progress_width = int(800 * self.parent.scale_factor)
+        progress_height = int(10 * self.parent.scale_factor)
+        self.overlay_progress.setGeometry(
+            (parent_width - progress_width) // 2,
+            parent_height - progress_height - int(50 * self.parent.scale_factor),
+            progress_width,
+            progress_height
+        )
+        
+        # 设置状态标签位置（右下角）
+        status_width = int(400 * self.parent.scale_factor)
+        status_height = int(60 * self.parent.scale_factor)
+        self.overlay_status.setGeometry(
+            parent_width - status_width - int(20 * self.parent.scale_factor),
+            parent_height - status_height - int(20 * self.parent.scale_factor),
+            status_width,
+            status_height
+        )
+        
+        # 将悬浮窗置于最上层并显示
+        self.raise_()
+        self.show()
+        
+        # 第一阶段：淡入悬浮窗
+        self.overlay_text.setAlignment(Qt.AlignCenter)
+        fade_in = QPropertyAnimation(self, b"windowOpacity")
+        fade_in.setDuration(300)
+        fade_in.setStartValue(0.0)
+        fade_in.setEndValue(1.0)
+        self.launch_animations.append(fade_in)
+        
+        def on_fade_in_finished():
+            # 第二阶段：封面从光标位置移动到中央，同时添加缩放和变暗效果
+            if self.overlay_image.isVisible():
+                # 位置动画
+                move_anim = QPropertyAnimation(self.overlay_image, b"pos")
+                move_anim.setDuration(700)
+                move_anim.setStartValue(QPoint(
+                    start_pos.x() - cover_width // 2,
+                    start_pos.y() - cover_height // 2
+                ))
+                move_anim.setEndValue(QPoint(
+                    target_x - cover_width // 2,
+                    target_y - cover_height // 2
+                ))
+                try:
+                    from PyQt5.QtCore import QEasingCurve
+                    move_anim.setEasingCurve(QEasingCurve.OutCubic)
+                except Exception:
+                    pass
+                self.launch_animations.append(move_anim)
+                
+                # 缩放动画：从稍小到正常大小，增加层次感
+                scale_anim = QPropertyAnimation(self.overlay_image, b"geometry")
+                scale_anim.setDuration(700)
+                start_rect = QRect(
+                    start_pos.x() - cover_width // 2,
+                    start_pos.y() - cover_height // 2,
+                    int(cover_width * 0.8),  # 起始时稍小
+                    int(cover_height * 0.8)
+                )
+                end_rect = QRect(
+                    target_x - cover_width // 2,
+                    target_y - cover_height // 2,
+                    cover_width,
+                    cover_height
+                )
+                scale_anim.setStartValue(start_rect)
+                scale_anim.setEndValue(end_rect)
+                try:
+                    from PyQt5.QtCore import QEasingCurve
+                    scale_anim.setEasingCurve(QEasingCurve.OutCubic)
+                except Exception:
+                    pass
+                self.launch_animations.append(scale_anim)
+                
+                # 变暗效果：从完全不透明到半透明
+                if not hasattr(self.overlay_image, 'opacity_effect'):
+                    opacity_effect = QtWidgets.QGraphicsOpacityEffect(self.overlay_image)
+                    self.overlay_image.setGraphicsEffect(opacity_effect)
+                    self.overlay_image.opacity_effect = opacity_effect
+                else:
+                    opacity_effect = self.overlay_image.opacity_effect
+                    opacity_effect.setOpacity(1.0)  # 重置为完全不透明
+                
+                dim_anim = QPropertyAnimation(opacity_effect, b"opacity")
+                dim_anim.setDuration(700)
+                dim_anim.setStartValue(1.0)
+                dim_anim.setEndValue(0.6)  # 变暗到60%透明度，保持更好的可见性
+                try:
+                    from PyQt5.QtCore import QEasingCurve
+                    dim_anim.setEasingCurve(QEasingCurve.OutCubic)
+                except Exception:
+                    pass
+                self.launch_animations.append(dim_anim)
+                
+                # 同时启动所有动画
+                move_anim.start()
+                scale_anim.start()
+                dim_anim.start()
+                
+                def on_move_finished():
+                    # 第三阶段：文字淡入，同时从下方滑入
+                    self.overlay_text.show()
+                    
+                    # 文字淡入效果
+                    text_effect = QtWidgets.QGraphicsOpacityEffect(self.overlay_text)
+                    self.overlay_text.setGraphicsEffect(text_effect)
+                    text_fade_in = QPropertyAnimation(text_effect, b"opacity")
+                    text_fade_in.setDuration(500)
+                    text_fade_in.setStartValue(0.0)
+                    text_fade_in.setEndValue(1.0)
+                    try:
+                        from PyQt5.QtCore import QEasingCurve
+                        text_fade_in.setEasingCurve(QEasingCurve.OutCubic)
+                    except Exception:
+                        pass
+                    self.launch_animations.append(text_fade_in)
+                    
+                    # 文字位置动画：从下方滑入
+                    text_start_y = parent_height
+                    text_end_y = parent_height - text_height - int(100 * self.parent.scale_factor)
+                    text_pos_anim = QPropertyAnimation(self.overlay_text, b"pos")
+                    text_pos_anim.setDuration(500)
+                    text_pos_anim.setStartValue(QPoint(
+                        (parent_width - text_width) // 2,
+                        text_start_y
+                    ))
+                    text_pos_anim.setEndValue(QPoint(
+                        (parent_width - text_width) // 2,
+                        text_end_y
+                    ))
+                    try:
+                        from PyQt5.QtCore import QEasingCurve
+                        text_pos_anim.setEasingCurve(QEasingCurve.OutCubic)
+                    except Exception:
+                        pass
+                    self.launch_animations.append(text_pos_anim)
+                    
+                    def on_text_fade_in_finished():
+                        # 停留1秒后进入第四阶段
+                        QTimer.singleShot(800, start_phase4)
+                    
+                    text_fade_in.finished.connect(on_text_fade_in_finished)
+                    text_fade_in.start()
+                    text_pos_anim.start()
+                
+                # 使用scale_anim的完成信号，因为它是最后一个动画
+                scale_anim.finished.connect(on_move_finished)
+            else:
+                # 如果没有图片，直接显示文字
+                self.overlay_text.show()
+                text_effect = QtWidgets.QGraphicsOpacityEffect(self.overlay_text)
+                self.overlay_text.setGraphicsEffect(text_effect)
+                text_fade_in = QPropertyAnimation(text_effect, b"opacity")
+                text_fade_in.setDuration(400)
+                text_fade_in.setStartValue(0.0)
+                text_fade_in.setEndValue(1.0)
+                self.launch_animations.append(text_fade_in)
+                
+                def on_text_fade_in_finished():
+                    QTimer.singleShot(1000, start_phase4)
+                
+                text_fade_in.finished.connect(on_text_fade_in_finished)
+                text_fade_in.start()
+        
+        fade_in.finished.connect(on_fade_in_finished)
+        fade_in.start()
+        
+        def start_phase4():
+            """第四阶段：图片变暗放大做背景，文字移动到左上角，显示加载条和状态"""
+            # 隐藏原封面图片（淡出效果）
+            if self.overlay_image.isVisible():
+                if hasattr(self.overlay_image, 'opacity_effect'):
+                    fade_out = QPropertyAnimation(self.overlay_image.opacity_effect, b"opacity")
+                    fade_out.setDuration(400)
+                    fade_out.setStartValue(self.overlay_image.opacity_effect.opacity())
+                    fade_out.setEndValue(0.0)
+                    fade_out.finished.connect(lambda: self.overlay_image.hide())
+                    fade_out.start()
+                    self.launch_animations.append(fade_out)
+                else:
+                    self.overlay_image.hide()
+            
+            # 创建背景图片（变暗放大）- 添加渐变遮罩和模糊效果
+            if image_path and os.path.exists(image_path):
+                bg_pixmap = QPixmap(image_path)
+                # 放大到覆盖整个屏幕宽度，稍微放大一点以支持模糊
+                scale_factor = 1.1
+                bg_scaled = bg_pixmap.scaled(
+                    int(parent_width * scale_factor),
+                    int(parent_width * bg_pixmap.height() / bg_pixmap.width() * scale_factor),
+                    Qt.KeepAspectRatioByExpanding,
+                    Qt.SmoothTransformation
+                )
+                
+                # 创建渐变遮罩效果（从顶部到底部逐渐变暗）
+                dark_pixmap = QPixmap(bg_scaled.size())
+                dark_pixmap.fill(Qt.transparent)
+                painter = QPainter(dark_pixmap)
+                painter.setRenderHint(QPainter.Antialiasing)
+                
+                # 先绘制原图
+                painter.drawPixmap(0, 0, bg_scaled)
+                
+                # 添加渐变遮罩（从透明到半透明黑色）
+                gradient = QColor(0, 0, 0, 0)
+                gradient_end = QColor(0, 0, 0, 230)
+                linear_gradient = QLinearGradient(0, 0, 0, dark_pixmap.height())
+                linear_gradient.setColorAt(0, gradient)
+                linear_gradient.setColorAt(0.3, QColor(0, 0, 0, 100))
+                linear_gradient.setColorAt(1, gradient_end)
+                painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+                painter.fillRect(dark_pixmap.rect(), linear_gradient)
+                painter.end()
+                
+                self.overlay_bg_image.setPixmap(dark_pixmap)
+                # 居中显示，稍微偏移以创建模糊效果
+                bg_x = int((parent_width - dark_pixmap.width()) / 2)
+                bg_y = int((parent_height - dark_pixmap.height()) / 2)
+                self.overlay_bg_image.setGeometry(bg_x, bg_y, dark_pixmap.width(), dark_pixmap.height())
+                
+                # 添加模糊效果
+                blur_effect = QtWidgets.QGraphicsBlurEffect(self.overlay_bg_image)
+                blur_effect.setBlurRadius(20)
+                self.overlay_bg_image.setGraphicsEffect(blur_effect)
+                
+                # 淡入显示背景
+                bg_opacity = QtWidgets.QGraphicsOpacityEffect(self.overlay_bg_image)
+                self.overlay_bg_image.setGraphicsEffect(bg_opacity)
+                bg_opacity.setOpacity(0.0)
+                self.overlay_bg_image.show()
+                
+                bg_fade_in = QPropertyAnimation(bg_opacity, b"opacity")
+                bg_fade_in.setDuration(600)
+                bg_fade_in.setStartValue(0.0)
+                bg_fade_in.setEndValue(1.0)
+                try:
+                    from PyQt5.QtCore import QEasingCurve
+                    bg_fade_in.setEasingCurve(QEasingCurve.InOutCubic)
+                except Exception:
+                    pass
+                bg_fade_in.start()
+                self.launch_animations.append(bg_fade_in)
+            
+            # 文字移动到左上角
+            text_effect = self.overlay_text.graphicsEffect()
+            if text_effect:
+                self.overlay_text.setGraphicsEffect(None)
+            
+            # 文字移动到左上角，同时缩小字体
+            text_move = QPropertyAnimation(self.overlay_text, b"pos")
+            text_move.setDuration(200)
+            text_move.setStartValue(self.overlay_text.pos())
+            text_move.setEndValue(QPoint(
+                int(20 * self.parent.scale_factor),
+                int(20 * self.parent.scale_factor)
+            ))
+            try:
+                from PyQt5.QtCore import QEasingCurve
+                text_move.setEasingCurve(QEasingCurve.InOutCubic)
+            except Exception:
+                pass
+            self.launch_animations.append(text_move)
+            # 去掉“正在启动”前缀，仅保留游戏名称
+            current_text = self.overlay_text.text()
+            if current_text.startswith("正在启动 "):
+                current_text = current_text[5:]  # 去掉前5个字符
+                self.overlay_text.setText(current_text)
+                # 动画结束后设置为左对齐
+                self.overlay_text.setAlignment(Qt.AlignLeft)
+
+            font_size = int(14 * self.parent.scale_factor)
+            self.overlay_text.setFont(QFont(self.overlay_text.font().family(), font_size))
+            
+            def on_text_move_finished():
+                # 显示加载条和状态（带淡入动画）
+                # 将加载条放在状态标签底部（相对定位并做边界检测）
+                status_geom = self.overlay_status.geometry()
+                prog_w = max(int(300 * self.parent.scale_factor), status_geom.width())
+                prog_h = max(int(8 * self.parent.scale_factor), self.overlay_progress.height() if self.overlay_progress else int(8 * self.parent.scale_factor))
+                prog_x = status_geom.x() + max(0, (status_geom.width() - prog_w) // 2)
+                prog_y = status_geom.y() + status_geom.height() + int(8 * self.parent.scale_factor)
+
+                # 如果超出屏幕底部则向上调整到边界内
+                if prog_y + prog_h > parent_height - int(10 * self.parent.scale_factor):
+                    prog_y = parent_height - prog_h - int(10 * self.parent.scale_factor)
+
+                # 应用几何并淡入显示加载条
+                self.overlay_progress.setGeometry(prog_x, prog_y, prog_w, prog_h)
+                progress_opacity = QtWidgets.QGraphicsOpacityEffect(self.overlay_progress)
+                self.overlay_progress.setGraphicsEffect(progress_opacity)
+                progress_opacity.setOpacity(0.0)
+                self.overlay_progress.show()
+
+                progress_fade = QPropertyAnimation(progress_opacity, b"opacity")
+                progress_fade.setDuration(400)
+                progress_fade.setStartValue(0.0)
+                progress_fade.setEndValue(1.0)
+                progress_fade.start()
+                self.launch_animations.append(progress_fade)
+
+                # 状态标签淡入（保持原位）
+                status_opacity = QtWidgets.QGraphicsOpacityEffect(self.overlay_status)
+                self.overlay_status.setGraphicsEffect(status_opacity)
+                status_opacity.setOpacity(0.0)
+                self.overlay_status.show()
+
+                status_fade = QPropertyAnimation(status_opacity, b"opacity")
+                status_fade.setDuration(400)
+                status_fade.setStartValue(0.0)
+                status_fade.setEndValue(1.0)
+                status_fade.start()
+                self.launch_animations.append(status_fade)
+                
+                # 开始更新状态
+                self._start_status_update()
+                # 开始焦点监听
+                self._start_focus_monitoring()
+            
+            text_move.finished.connect(on_text_move_finished)
+            text_move.start()
+        
+        # 保持窗口在最上层
+        self.selection_count = 0
+        def keep_on_top():
+            if self.isVisible():
+                self.raise_()
+                self.selection_count += 1
+                if self.selection_count < 200:  # 持续约30秒
+                    QTimer.singleShot(150, keep_on_top)
+        
+        QTimer.singleShot(150, keep_on_top)
+    
+    def _stop_launch_animations(self):
+        """停止所有启动动画"""
+        for anim in self.launch_animations:
+            try:
+                anim.stop()
+            except Exception:
+                pass
+        self.launch_animations.clear()
+        
+        if self.status_timer:
+            self.status_timer.stop()
+            self.status_timer = None
+        
+        if self.focus_check_timer:
+            self.focus_check_timer.stop()
+            self.focus_check_timer = None
+        # 停止后台进程检查线程（如果存在）
+        if getattr(self, '_process_check_thread', None):
+            try:
+                self._process_check_thread.stop()
+                self._process_check_thread.wait(500)
+            except Exception:
+                pass
+            self._process_check_thread = None
+    
+    def _start_status_update(self):
+        """开始更新游戏进程状态"""
+        if not self.current_game_path:
+            return
+
+        # 如果已有后台检查线程，先停止它
+        if getattr(self, '_process_check_thread', None):
+            try:
+                self._process_check_thread.stop()
+                self._process_check_thread.wait(500)
+            except Exception:
+                pass
+            self._process_check_thread = None
+
+        # 启动后台线程进行进程检查，避免在主线程中使用 psutil 导致卡顿
+        self._process_check_thread = self._ProcessCheckThread(self)
+        self._process_check_thread.game_path = self.current_game_path
+
+        def on_status(game_running, memory_mb):
+            if not self.isVisible():
+                return
+            try:
+                status_text = f"运行中 | 内存: {memory_mb:.0f} MB" if game_running else "正在启动"
+                self.overlay_status.setText(status_text)
+            except Exception:
+                self.overlay_status.setText("状态未知")
+
+        self._process_check_thread.status_signal.connect(on_status)
+        self._process_check_thread.start()
+    
+    def _start_focus_monitoring(self):
+        """开始监听焦点变化"""
+        self.last_focus_hwnd = GSHWND  # 初始化为GSHWND，因为悬浮窗显示时焦点应该在GSHWND
+        
+        def check_focus():
+            if not self.isVisible():
+                if self.focus_check_timer:
+                    self.focus_check_timer.stop()
+                return
+            
+            try:
+                hwnd = win32gui.GetForegroundWindow()
+                if hwnd:
+                    # 检查是否是全屏游戏窗口（不是GSHWND）
+                    if hwnd != GSHWND:
+                        # 焦点切换到其他窗口（全屏游戏窗口）
+                        # 如果之前焦点在GSHWND，现在切换到了全屏窗口，关闭悬浮窗
+                        if self.last_focus_hwnd == GSHWND:
+                            # 焦点从GSHWND切换到全屏窗口，关闭悬浮窗
+                            self.hide()
+                            self._stop_launch_animations()
+                            return
+                        
+                        # 焦点在其他窗口，隐藏加载条和状态文字
+                        self.overlay_progress.hide()
+                        self.overlay_status.hide()
+                        self.last_focus_hwnd = hwnd
+                    else:
+                        # 焦点在GSHWND
+                        # 如果之前焦点不在GSHWND，现在切换回来了，关闭悬浮窗
+                        if self.last_focus_hwnd is not None and self.last_focus_hwnd != GSHWND:
+                            # 焦点从其他窗口切换回GSHWND，关闭悬浮窗
+                            self.hide()
+                            self._stop_launch_animations()
+                            return
+                        
+                        # 显示加载条和状态
+                        if self.current_game_path:
+                            self.overlay_progress.show()
+                            self.overlay_status.show()
+                        self.last_focus_hwnd = hwnd
+            except Exception:
+                pass
+        
+        # 每0.2秒检查一次焦点
+        self.focus_check_timer = QTimer(self)
+        self.focus_check_timer.timeout.connect(check_focus)
+        self.focus_check_timer.start(200)
+
 
 class QuickStreamAppAddThread(QThread):
     finished_signal = pyqtSignal()
@@ -2148,6 +3059,7 @@ class QuickStreamAppAddThread(QThread):
     def __init__(self, args=None, parent=None):
         super().__init__(parent)
         self.args = args if args else []
+
 
     def run(self):
         # 支持传入启动参数
@@ -2453,6 +3365,10 @@ class GameSelector(QWidget):
         self.monitor_thread.play_app_name_signal.connect(self.update_play_app_name)  # 连接信号到槽
         self.monitor_thread.play_reload_signal.connect(self.handle_reload_signal)  # 连接信号到槽
         self.monitor_thread.start() 
+        
+        # 创建启动游戏的悬浮窗
+        self.launch_overlay = LaunchOverlay(self)
+        
         # 启动手柄输入监听线程
         self.controller_thread = GameControllerThread(self)
         self.controller_thread.gamepad_signal.connect(self.handle_gamepad_input)
@@ -4223,6 +5139,7 @@ class GameSelector(QWidget):
                     font-family: "Microsoft YaHei"; 
                     color: white;
                     font-size: {int(20 * self.scale_factor*1.5)}px;
+                    background: transparent;
                 }}
             """)
             # 添加不透明度效果并淡入
@@ -4263,6 +5180,7 @@ class GameSelector(QWidget):
                             font-family: "Microsoft YaHei";
                             color: white;
                             font-size: {int(20 * self.scale_factor*1.5)}px; 
+                            background: transparent;
                         }}
                     """)
                 except RuntimeError:
@@ -4306,82 +5224,7 @@ class GameSelector(QWidget):
             #elif button_pos.x() + button_width > scroll_area_width:
             #    # 如果按钮超出右边界，调整滚动值
             #    self.scroll_area.horizontalScrollBar().setValue(scroll_value + (button_pos.x() + button_width - scroll_area_width))
-    def keyPressEvent(self, event):
-        """处理键盘事件"""
-        if not self.gsfocus(): # 检测当前窗口是否为游戏选择界面
-            return
-        if hasattr(self, 'floating_window') and self.floating_window.isVisible():
-            # 添加防抖检查
-            if not self.floating_window.can_process_input():
-                return
-            
-            if event.key() == Qt.Key_Up:
-                self.floating_window.current_index = max(0, self.floating_window.current_index - 1)
-                self.floating_window.update_highlight()
-            elif event.key() == Qt.Key_Down:
-                self.floating_window.current_index = min(
-                    len(self.floating_window.buttons) - 1,
-                    self.floating_window.current_index + 1
-                )
-                self.floating_window.update_highlight()
-            elif event.key() == Qt.Key_Return:
-                self.execute_more_item()
-            elif event.key() == Qt.Key_Escape:
-                self.floating_window.hide()
-            return
-            
-        current_time = pygame.time.get_ticks()  # 获取当前时间（毫秒）
-        # 如果在忽略输入的时间段内，则不处理
-        if current_time < self.ignore_input_until:
-            return
-        # 如果按键间隔太短，则不处理
-        if current_time - self.last_input_time < self.input_delay:
-            return
-
-        # 新增焦点切换逻辑
-        if event.key() == Qt.Key_Down and self.current_section == 0 and self.more_section == 0:
-            self.current_section = 1  # 切换到控制按钮区域
-            if self.current_index < 3:
-                self.current_index = int(self.current_index * 2)
-            else:
-                self.current_index = 6
-            self.update_highlight()
-            print("当前区域：控制按钮区域")
-        elif event.key() == Qt.Key_Up and self.current_section == 1 and self.more_section == 0:
-            self.current_section = 0  # 返回游戏选择区域
-            self.current_index = int(self.current_index/2)
-            self.update_highlight()
-            print("当前区域：游戏选择区域")
-        elif event.key() == Qt.Key_Escape and self.more_section == 1:
-            self.switch_to_main_interface()
-        else:
-            # 修改后的导航逻辑
-            if self.current_section == 0:  # 游戏选择区域
-                if event.key() == Qt.Key_Up:
-                    self.move_selection(-self.row_count)  # 向上移动
-                elif event.key() == Qt.Key_Down:
-                    self.move_selection(self.row_count)  # 向下移动
-                elif event.key() == Qt.Key_Left:
-                    self.move_selection(-1)  # 向左移动
-                elif event.key() == Qt.Key_Right:
-                    self.move_selection(1)  # 向右移动
-                elif event.key() in (Qt.Key_Return, Qt.Key_Enter):
-                    self.launch_game(self.current_index)  # 启动游戏
-                elif event.key() == Qt.Key_Escape:
-                    #self.exitdef()  # 退出程序
-                    self.hide_window()
-            else:  # 控制按钮区域
-                if event.key() == Qt.Key_Left:
-                    self.current_index = max(0, self.current_index - 1)
-                elif event.key() == Qt.Key_Right:
-                    self.current_index = min(len(self.control_buttons)-1, self.current_index + 1)
-                elif event.key() in (Qt.Key_Return, Qt.Key_Enter):
-                    self.control_buttons[self.current_index].click()
-                
-                self.update_highlight()
-
-        # 更新最后一次按键时间
-        self.last_input_time = current_time
+    # 暂时去除键盘导航功能
     def move_selection(self, offset):
         """移动选择的游戏"""
         total_buttons = len(self.buttons)
@@ -4491,10 +5334,7 @@ class GameSelector(QWidget):
                         pulse.start()
                         # 阻塞当前函数直到动画结束，但保持 UI 响应（使用本地事件循环）
                         try:
-                            try:
-                                from PyQt5.QtCore import QEventLoop
-                            except Exception:
-                                from PyQt6.QtCore import QEventLoop
+                            from PyQt5.QtCore import QEventLoop
                             loop = QEventLoop()
                             pulse.finished.connect(loop.quit)
                             try:
@@ -4550,7 +5390,7 @@ class GameSelector(QWidget):
                 return
             else:
                 pass
-        self.controller_thread.show_launch_window(game_name, image_path)
+        self.launch_overlay.show_launch_window(game_name, image_path)
         self.switch_to_main_interface()
         self.current_index = 0  # 从第一个按钮开始
         # 更新最近游玩列表
@@ -4698,13 +5538,23 @@ class GameSelector(QWidget):
     def handle_gamepad_input(self, action):
         """处理手柄输入"""
         global STARTUP  # 声明 STARTUP 为全局变量
+        if action:
+            # 处理方向键FIRST事件
+            if action.startswith('FIRST-'):
+                firstinput = True
+                action = action.split('-', 1)[1]  # 提取方向值
+            else:
+                firstinput = False
+        # 标记是否为方向输入（允许绕过全局防抖/屏蔽）
+        is_direction = action in ('UP', 'DOWN', 'LEFT', 'RIGHT') if action else False
         # 跟踪焦点状态
         current_time = pygame.time.get_ticks()
-        # 如果在屏蔽输入的时间段内，则不处理
-        if current_time < self.ignore_input_until:
+        # 如果在屏蔽输入的时间段内，则不处理（方向键除外）
+        if current_time < self.ignore_input_until and not is_direction:
             return
-        
-        if current_time - self.last_input_time < self.input_delay:
+
+        # 如果按键间隔太短，则不处理（方向键除外）
+        if current_time - self.last_input_time < self.input_delay and not is_direction:
             return
         if self.is_mouse_simulation_running == True:
             return # 防止鼠标模拟运行时处理手柄输入
@@ -4955,6 +5805,11 @@ class GameSelector(QWidget):
             self.ignore_input_until = current_time + 500
             return
         
+            # 若启动悬浮窗存在，关闭启动悬浮窗
+        if hasattr(self, 'launch_overlay'):
+            if self.launch_overlay and self.launch_overlay.isVisible():
+                self.launch_overlay.hide()
+                self.launch_overlay._stop_launch_animations()
         if hasattr(self, 'confirm_dialog') and self.confirm_dialog.isVisible():  # 如果确认弹窗显示中
             print("确认弹窗显示中")
             self.ignore_input_until = current_time + 500
@@ -4977,8 +5832,8 @@ class GameSelector(QWidget):
                 self.floating_window.handle_gamepad_input(action)
                 self.ignore_input_until = pygame.time.get_ticks() + 300 
                 return
-            # 添加防抖检查
-            if not self.floating_window.can_process_input():
+            # 添加防抖检查（方向键可绕过浮窗防抖以获得更灵敏的导航）
+            if not is_direction and not self.floating_window.can_process_input():
                 return
             
             if action == 'UP':
@@ -5046,12 +5901,17 @@ class GameSelector(QWidget):
                 elif action == 'DOWN' and self.more_section == 1:
                     self.move_selection(self.row_count)  # 向下移动
                 elif action == 'LEFT':
-                    if self.current_index == 0:  # 如果当前是第一项，保持不变
+                    if self.current_index == 0:  # 如果当前是第一项
+                        if firstinput:
+                            self.move_selection(-1)  # 向左移动
                         return
                     self.move_selection(-1)  # 向左移动
                 elif action == 'RIGHT':
                     if self.current_index < len(self.buttons) - 1:  # 检查是否已经是最后一个按钮
                         self.move_selection(1)  # 向右移动
+                    else:
+                        if firstinput:
+                            self.move_selection(1)  # 向右移动
                 elif action == 'A':
                     self.launch_game(self.current_index)  # 启动游戏
                 elif action == 'B':
@@ -5153,8 +6013,29 @@ class GameSelector(QWidget):
                     # 检查进程的执行文件路径是否与指定路径匹配
                     if proc.info['exe'] and os.path.abspath(proc.info['exe']) == os.path.abspath(game_path):
                         print(f"找到进程: {proc.info['name']} (PID: {proc.info['pid']})")
-                        proc.terminate()  # 结束进程
-                        proc.wait()  # 等待进程完全终止
+                        # 显示加载窗口
+                        loading = LoadingDialog("正在关闭程序......", scale_factor=getattr(self, 'scale_factor', 1.0), parent=self)
+                        loading.show()
+                        QApplication.processEvents()
+                        try:
+                            proc.terminate()  # 请求结束进程
+                        except Exception:
+                            pass
+                        # 等待进程退出，同时让 UI 响应
+                        start_time = time.time()
+                        try:
+                            while proc.is_running():
+                                QApplication.processEvents()
+                                time.sleep(0.05)
+                                if time.time() - start_time > 5:
+                                    try:
+                                        proc.kill()
+                                    except Exception:
+                                        pass
+                                    break
+                        except Exception:
+                            pass
+                        loading.close()
                         return
                 except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                     # 处理权限问题和进程已消失的异常
@@ -5606,93 +6487,68 @@ class GameControllerThread(QThread):
         self.last_hat_time = 0
         self.hat_delay = 0.05
         self.last_hat_value = (0, 0)
-        
-        # 预创建 launch_overlay
-        self.create_launch_overlay()
 
-    def create_launch_overlay(self):
-        """预创建启动游戏的悬浮窗"""
-        self.parent.launch_overlay = QWidget(self.parent)
-        self.parent.launch_overlay.setObjectName("launchOverlay")
-        self.parent.launch_overlay.setStyleSheet("""
-            QWidget#launchOverlay {
-                background-color: rgba(46, 46, 46, 0.9);
-            }
-            QLabel {
-                font-size: 36px;
-                color: #FFFFFF;
-                margin-bottom: 40px;
-                text-align: center;
-                background: transparent;  /* 设置文字背景透明 */
-            }
-        """)
-
-        # 设置悬浮窗大小为父窗口大小
-        self.parent.launch_overlay.setFixedSize(self.parent.size())
-
-        # 创建垂直布局
-        self.overlay_layout = QVBoxLayout(self.parent.launch_overlay)
-        self.overlay_layout.setAlignment(Qt.AlignCenter)
-
-        # 创建图片标签和文本标签
-        self.overlay_image = QLabel()
-        self.overlay_image.setAlignment(Qt.AlignCenter)
-        self.overlay_layout.addWidget(self.overlay_image)
-
-        self.overlay_text = QLabel()
-        self.overlay_text.setAlignment(Qt.AlignCenter)
-        self.overlay_layout.addWidget(self.overlay_text)
-
-        # 添加点击事件，点击悬浮窗时隐藏
-        def hide_overlay(event):
-            self.parent.launch_overlay.hide()
-        self.parent.launch_overlay.mousePressEvent = hide_overlay
-
-        # 初始时隐藏
-        self.parent.launch_overlay.hide()
-
-    def show_launch_window(self, game_name, image_path):
-        """显示启动游戏的悬浮窗"""
-
-        # 将悬浮窗置于最上层并显示
-        self.parent.launch_overlay.raise_()
-        self.parent.launch_overlay.show()
-
-        # 更新图片
-        if image_path:
-            pixmap = QPixmap(image_path).scaled(
-                int(400 * self.parent.scale_factor),
-                int(533 * self.parent.scale_factor),
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation
-            )
-            self.overlay_image.setPixmap(pixmap)
-            self.overlay_image.show()
-        else:
-            self.overlay_image.hide()
-
-        # 更新文本
-        self.overlay_text.setText(f"正在启动 {game_name}")
-
-        # 将悬浮窗置于最上层并显示函数
-        self.selection_count = 0  # 初始化计数器
-    
-        def select_code():
-            if self.selection_count < 39:
-                self.parent.launch_overlay.raise_()
-                self.selection_count += 1
-            else:
-                timer.stop()  # 停止计时器
-    
-        timer = QTimer(self)
-        timer.timeout.connect(select_code)
-        timer.start(150)  
-        QTimer.singleShot(6000, self.parent.launch_overlay.hide)
-        
     def stop(self):
         """停止线程"""
         self._running = False
         
+    # ---- DAS / ARR repeat helpers ----
+    def _init_repeat_state_for_controller(self, instance_id):
+        # state for directional DAS/ARR handling per controller
+        self.controllers[instance_id].setdefault('repeat', {
+            'dirs': {
+                'UP':    {'pressed': False, 'next_time': 0, 'first_sent': False, 'edge_sent': False},
+                'DOWN':  {'pressed': False, 'next_time': 0, 'first_sent': False, 'edge_sent': False},
+                'LEFT':  {'pressed': False, 'next_time': 0, 'first_sent': False, 'edge_sent': False},
+                'RIGHT': {'pressed': False, 'next_time': 0, 'first_sent': False, 'edge_sent': False},
+            }
+        })
+
+    def _handle_direction_state(self, instance_id, up, down, left, right):
+        """Centralized handling of directional inputs with DAS/ARR.
+        Emits 'FIRST-<DIR>' on initial press, then waits DAS seconds,
+        then emits repeated '<DIR>' every ARR seconds. If ARR==0 emits '<DIR>_EDGE' once.
+        """
+        now = time.time()
+        das = getattr(self, 'das', 0.3)  # seconds before auto-repeat starts
+        arr = getattr(self, 'arr', 0.07)  # repeat interval in seconds; 0 => edge jump
+
+        repeat = self.controllers[instance_id].setdefault('repeat', {})
+        dirs = repeat.setdefault('dirs', {})
+
+        booleans = {'UP': up, 'DOWN': down, 'LEFT': left, 'RIGHT': right}
+
+        for dname, is_pressed in booleans.items():
+            state = dirs.setdefault(dname, {'pressed': False, 'next_time': 0, 'first_sent': False, 'edge_sent': False})
+
+            if is_pressed:
+                if not state['pressed']:
+                    # initial press
+                    state['pressed'] = True
+                    state['first_sent'] = True
+                    state['edge_sent'] = False
+                    state['next_time'] = now + das
+                    # emit FIRST event
+                    self.gamepad_signal.emit(f'FIRST-{dname}')
+                else:
+                    # already pressed, check for repeat
+                    if now >= state['next_time']:
+                        if arr == 0:
+                            # edge behavior: emit once
+                            if not state.get('edge_sent', False):
+                                state['edge_sent'] = True
+                                self.gamepad_signal.emit(f'{dname}_EDGE')
+                        else:
+                            # emit normal repeat and schedule next
+                            self.gamepad_signal.emit(dname)
+                            state['next_time'] = now + arr
+            else:
+                # released
+                if state['pressed']:
+                    state['pressed'] = False
+                    state['first_sent'] = False
+                    state['edge_sent'] = False
+                    state['next_time'] = 0
     def run(self):
         """监听手柄输入"""
         while self._running:  # 使用运行标志控制循环
@@ -5711,6 +6567,11 @@ class GameControllerThread(QThread):
                                 'controller': controller,
                                 'mapping': mapping
                             }
+                            # 初始化 DAS/ARR 状态
+                            try:
+                                self._init_repeat_state_for_controller(controller.get_instance_id())
+                            except Exception:
+                                pass
                             print(f"Controller {controller.get_instance_id()} connected: {controller.get_name()}")
                             self.controller_connected_signal.emit(controller.get_name())
                         except pygame.error as e:
@@ -5720,39 +6581,40 @@ class GameControllerThread(QThread):
                         if event.instance_id in self.controllers:
                             print(f"Controller {event.instance_id} disconnected")
                             del self.controllers[event.instance_id]
+                        # 清理方向状态
+                        try:
+                            if event.instance_id in self.direction_states:
+                                del self.direction_states[event.instance_id]
+                        except Exception:
+                            pass
 
                 # 处理所有已连接手柄的输入
                 for controller_data in self.controllers.values():
                     controller = controller_data['controller']
                     mapping = controller_data['mapping']
                     
-                    # 处理 hat 输入（D-pad）
-                    if mapping.controller_type == "xbox360":
-                        try:
-                            for i in range(controller.get_numhats()):
-                                hat = controller.get_hat(i)
-                                if hat != (0, 0):  # 只在 hat 不在中心位置时处理
-                                    current_time = time.time()
-                                    if current_time - self.last_hat_time > self.hat_delay:
-                                        if hat[1] == 1:  # 上
-                                            #print("HAT UP signal emitted")  # hat 上
-                                            self.gamepad_signal.emit('UP')
-                                        elif hat[1] == -1:  # 下
-                                            #print("HAT DOWN signal emitted")  # hat 下
-                                            self.gamepad_signal.emit('DOWN')
-                                        if hat[0] == -1:  # 左
-                                            #print("HAT LEFT signal emitted")  # hat 左
-                                            self.gamepad_signal.emit('LEFT')
-                                        elif hat[0] == 1:  # 右
-                                            #print("HAT RIGHT signal emitted")  # hat 右
-                                            self.gamepad_signal.emit('RIGHT')
-                                        self.last_hat_time = current_time
-                                    else:
-                                        self.last_hat_value = (0, 0)  # 重置上一次的 hat 值
-                        except Exception as e:
-                            print(f"Hat error: {e}")
+                    # 汇总方向输入（hat, 摇杆, D-pad 按钮），统一交给 DAS/ARR 处理
+                    try:
+                        cid = controller.get_instance_id()
+                    except Exception:
+                        cid = None
 
-                    # 读取摇杆
+                    # 初始化方向标记
+                    up_pressed = down_pressed = left_pressed = right_pressed = False
+
+                    # hat (D-pad) 处理：任何 hat 非零都会设置对应方向
+                    try:
+                        for i in range(controller.get_numhats()):
+                            hat = controller.get_hat(i)
+                            if hat != (0, 0):
+                                up_pressed = up_pressed or (hat[1] == 1)
+                                down_pressed = down_pressed or (hat[1] == -1)
+                                left_pressed = left_pressed or (hat[0] == -1)
+                                right_pressed = right_pressed or (hat[0] == 1)
+                    except Exception:
+                        pass
+
+                    # 摇杆轴：合并左右两个摇杆的输入
                     try:
                         left_x = controller.get_axis(mapping.left_stick_x)
                         left_y = controller.get_axis(mapping.left_stick_y)
@@ -5760,74 +6622,48 @@ class GameControllerThread(QThread):
                         right_y = controller.get_axis(mapping.right_stick_y)
                     except:
                         left_x = left_y = right_x = right_y = 0
-                    
-                    buttons = [controller.get_button(i) for i in range(controller.get_numbuttons())]
-                    current_time = time.time()
 
-                    # 检查摇杆移动
-                    if time.time() - self.last_move_time > self.move_delay:
-                        # 左摇杆
-                        if left_y < -self.axis_threshold:
-                            #print("LEFT STICK UP signal emitted")  # 左摇杆上
-                            self.gamepad_signal.emit('UP')
-                            self.last_move_time = current_time
-                        elif left_y > self.axis_threshold:
-                            #print("LEFT STICK DOWN signal emitted")  # 左摇杆下
-                            self.gamepad_signal.emit('DOWN')
-                            self.last_move_time = current_time
-                        if left_x < -self.axis_threshold:
-                            self.gamepad_signal.emit('LEFT')
-                            self.last_move_time = current_time
-                        elif left_x > self.axis_threshold:
-                            self.gamepad_signal.emit('RIGHT')
-                            self.last_move_time = current_time
-                        
-                        # 右摇杆
-                        if right_y < -self.axis_threshold:
-                            print(f"RIGHT STICK UP signal emitted{right_y}")  # 右摇杆上
-                            self.gamepad_signal.emit('UP')
-                            self.last_move_time = current_time
-                        elif right_y > self.axis_threshold:
-                            print("RIGHT STICK DOWN signal emitted")  # 右摇杆下
-                            self.gamepad_signal.emit('DOWN')
-                            self.last_move_time = current_time
-                        if right_x < -self.axis_threshold:
-                            self.gamepad_signal.emit('LEFT')
-                            self.last_move_time = current_time
-                        elif right_x > self.axis_threshold:
-                            self.gamepad_signal.emit('RIGHT')
-                            self.last_move_time = current_time
+                    if left_y < -self.axis_threshold or right_y < -self.axis_threshold:
+                        up_pressed = True
+                    if left_y > self.axis_threshold or right_y > self.axis_threshold:
+                        down_pressed = True
+                    if left_x < -self.axis_threshold or right_x < -self.axis_threshold:
+                        left_pressed = True
+                    if left_x > self.axis_threshold or right_x > self.axis_threshold:
+                        right_pressed = True
 
-                    # 根据不同手柄类型处理 D-pad
-                    if mapping.controller_type == "ps4":
-                        # PS4 使用按钮
+                    # D-pad 按钮（PS4 / 其他）
+                    try:
+                        buttons = [controller.get_button(i) for i in range(controller.get_numbuttons())]
+                    except Exception:
+                        buttons = []
+
+                    try:
+                        if mapping.controller_type == 'ps4' or mapping.controller_type != 'xbox360':
+                            # 对于 ps4 和其他手柄，都支持 mapping 中的 dpad 按钮索引
+                            if buttons and mapping.dpad_up is not None and buttons[mapping.dpad_up]:
+                                up_pressed = True
+                            if buttons and mapping.dpad_down is not None and buttons[mapping.dpad_down]:
+                                down_pressed = True
+                            if buttons and mapping.dpad_left is not None and buttons[mapping.dpad_left]:
+                                left_pressed = True
+                            if buttons and mapping.dpad_right is not None and buttons[mapping.dpad_right]:
+                                right_pressed = True
+                    except Exception:
+                        pass
+
+                    # 最后：统一处理方向状态（如果有 controller id）
+                    if cid is not None:
+                        # 初始化 repeat 状态（如果尚未初始化）
+                        if cid not in self.controllers or 'repeat' not in self.controllers.get(cid, {}):
+                            try:
+                                if cid in self.controllers:
+                                    self._init_repeat_state_for_controller(cid)
+                            except Exception:
+                                pass
                         try:
-                            if buttons[mapping.dpad_up]:
-                                print("PS4 DPAD UP signal emitted")  # PS4 D-pad 上
-                                self.gamepad_signal.emit('UP')
-                            if buttons[mapping.dpad_down]:
-                                print("PS4 DPAD DOWN signal emitted")  # PS4 D-pad 下
-                                self.gamepad_signal.emit('DOWN')
-                            if buttons[mapping.dpad_left]:
-                                self.gamepad_signal.emit('LEFT')
-                            if buttons[mapping.dpad_right]:
-                                self.gamepad_signal.emit('RIGHT')
-                        except:
-                            pass
-                    elif mapping.controller_type != "xbox360":  # 其他手柄（除了 Xbox 360）
-                        # 其他手柄使用默认按钮方式
-                        try:
-                            if buttons[mapping.dpad_up]:
-                                print("OTHER DPAD UP signal emitted")  # 其他手柄 D-pad 上
-                                self.gamepad_signal.emit('UP')
-                            if buttons[mapping.dpad_down]:
-                                print("OTHER DPAD DOWN signal emitted")  # 其他手柄 D-pad 下
-                                self.gamepad_signal.emit('DOWN')
-                            if buttons[mapping.dpad_left]:
-                                self.gamepad_signal.emit('LEFT')
-                            if buttons[mapping.dpad_right]:
-                                self.gamepad_signal.emit('RIGHT')
-                        except:
+                            self._handle_direction_state(cid, up_pressed, down_pressed, left_pressed, right_pressed)
+                        except Exception:
                             pass
 
                     # 检查动作按钮
