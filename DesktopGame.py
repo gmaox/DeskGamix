@@ -603,7 +603,7 @@ class ScreenshotWindow(QDialog):
         self.filter_game_name = None  # 当前筛选的游戏名
         self.setWindowTitle("截图浏览")
         self.setWindowFlags(Qt.FramelessWindowHint)
-        self.resize(1800, 1000)
+        self.resize(1920, 1000)
         self.icon_size = 256 * getattr(self, 'scale_factor', 1.0)
         # ScreenshotWindow.__init__ 内左侧面板部分
         # 统一按钮样式
@@ -1066,11 +1066,16 @@ class ScreenshotWindow(QDialog):
         right_layout = QtWidgets.QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(10)
-        right_layout.addWidget(self.listWidget, alignment=Qt.AlignRight)  # 确保列表靠右对齐、
+        # 不在此处设置对齐，改为保存布局供后续动态调整
+        right_layout.addWidget(self.listWidget)
+        self.right_panel = right_panel
+        self.right_layout = right_layout
         self.info_label = QLabel(self)
         self.info_label.setStyleSheet("color: #aaa; font-size: 18px; padding: 8px;")
         self.info_label.setAlignment(Qt.AlignLeft)
         right_layout.addWidget(self.info_label)
+        # 初始使列表靠右以匹配带左侧面板的布局
+        self.right_layout.setAlignment(self.listWidget, Qt.AlignRight)
 
         self.main_layout.addWidget(self.left_panel)
         self.main_layout.addWidget(right_panel)
@@ -1078,6 +1083,7 @@ class ScreenshotWindow(QDialog):
         # 用 QWidget 包裹 main_layout
         main_widget = QWidget(self)
         main_widget.setLayout(self.main_layout)
+        main_widget.setFixedWidth(1800)
 
         # 外层垂直布局
         layout = QtWidgets.QVBoxLayout(self)
@@ -1098,7 +1104,14 @@ class ScreenshotWindow(QDialog):
         """)
         self.closeButton.clicked.connect(self.close)
         layout.addWidget(self.closeButton)
-        layout.addWidget(main_widget)
+
+        # 使用水平包装布局在左右两侧添加弹性间距，使主内容固定为1800且居中
+        h_wrapper = QtWidgets.QHBoxLayout()
+        h_wrapper.addStretch(1)
+        h_wrapper.addWidget(main_widget)
+        h_wrapper.addStretch(1)
+        layout.addLayout(h_wrapper)
+
         self.setLayout(layout)
         self.all_screenshots = []
         self.current_screenshots = []
@@ -1156,14 +1169,22 @@ class ScreenshotWindow(QDialog):
             else:
                 self.current_screenshots = filtered
                 self.has_load_more_button = False
-            self.left_panel.show()
-            self.listWidget.setFixedWidth(int(self.width() / 1.7) - 74)
+            # 显示左侧面板并恢复合理最大宽度
+            self.left_panel.setVisible(True)
+            self.left_panel.setMaximumWidth(int(950 * getattr(self, 'scale_factor', 1.0)))
+            self.listWidget.setFixedWidth(int(950 * getattr(self, 'scale_factor', 1.0)))
             self.icon_size = int(256 * getattr(self, 'scale_factor', 1.0) * 1.75)
+            if hasattr(self, 'right_layout'):
+                self.right_layout.setAlignment(self.listWidget, Qt.AlignRight)
         else:
             self.current_screenshots = list(self.all_screenshots)
-            self.left_panel.hide()
-            self.listWidget.setFixedWidth(self.width() - 60)
+            # 隐藏左侧面板并将其最大宽度设为0，避免残留占位
+            self.left_panel.setVisible(False)
+            self.left_panel.setMaximumWidth(0)
+            self.listWidget.setFixedWidth(int(1630 * getattr(self, 'scale_factor', 1.0)))
             self.icon_size = 256 * getattr(self, 'scale_factor', 1.0)
+            if hasattr(self, 'right_layout'):
+                self.right_layout.setAlignment(self.listWidget, Qt.AlignHCenter)
             self.has_load_more_button = False
 
         self.listWidget.setIconSize(QSize(int(self.icon_size), int(self.icon_size)))
@@ -1603,7 +1624,7 @@ class ScreenshotWindow(QDialog):
         self.preview_index = index
     
         self.is_fullscreen_preview = QtWidgets.QDialog(self, flags=Qt.Dialog)
-        self.is_fullscreen_preview.setWindowFlag(Qt.Window)
+        self.is_fullscreen_preview.setWindowFlag(Qt.FramelessWindowHint)
         # 初始窗口透明度为0，随后播放淡入动画
         try:
             self.is_fullscreen_preview.setWindowOpacity(0.0)
@@ -3493,7 +3514,7 @@ class GameSelector(QWidget):
             controller_name = controller_data['controller'].get_name()
             self.update_controller_status(controller_name)
         # 右侧文字
-        right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.95.2")
+        right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.95.3")
         right_label.setStyleSheet(f"""
             QLabel {{
                 font-family: "Microsoft YaHei"; 
@@ -3535,12 +3556,34 @@ class GameSelector(QWidget):
         self.tray_icon = QSystemTrayIcon(self)
         self.tray_icon.setIcon(QIcon("./_internal/fav.ico"))  # 设置托盘图标为 fav.ico
         self.tray_icon.setToolTip("DeskGamix")
-        def create_tray_menu():
-            tray_menu = QMenu(self)
+        def build_tray_menu():
+            # 重用已有的 QMenu 实例以避免重复创建导致的资源和状态问题
+            if hasattr(self, '_tray_menu') and isinstance(self._tray_menu, QMenu):
+                tray_menu = self._tray_menu
+                try:
+                    tray_menu.clear()
+                except Exception:
+                    # 如果清理失败则重建菜单
+                    tray_menu = QMenu(self)
+                    self._tray_menu = tray_menu
+            else:
+                tray_menu = QMenu(self)
+                self._tray_menu = tray_menu
             sorted_games = self.sort_games()
+            # 缓存已解析图标，避免重复解析
+            if not hasattr(self, "_icon_cache"):
+                self._icon_cache = {}
 
             # 辅助：从文件或可执行中提取图标，优先用 icoextract 提取 exe/dll 图标，否则尝试作为图片加载
             def _icon_from_file(fp, size=24):
+                try:
+                    key = os.path.abspath(fp) if fp else ""
+                except Exception:
+                    key = str(fp)
+                # 缓存命中直接返回
+                if key and key in self._icon_cache:
+                    return self._icon_cache[key]
+                icon = QIcon()
                 try:
                     from icoextract import IconExtractor
                     extractor = IconExtractor(fp)
@@ -3549,17 +3592,25 @@ class GameSelector(QWidget):
                     pix = QPixmap()
                     if pix.loadFromData(data):
                         pix = pix.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                        return QIcon(pix)
+                        icon = QIcon(pix)
                 except Exception:
+                    # 忽略 icoextract 失败，继续尝试作为图片加载
                     pass
+                if icon.isNull():
+                    try:
+                        pix = QPixmap(fp)
+                        if not pix.isNull():
+                            pix = pix.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                            icon = QIcon(pix)
+                    except Exception:
+                        pass
+                # 保存到缓存（即使是空图标也缓存，避免重复尝试）
                 try:
-                    pix = QPixmap(fp)
-                    if not pix.isNull():
-                        pix = pix.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                        return QIcon(pix)
+                    if key:
+                        self._icon_cache[key] = icon
                 except Exception:
                     pass
-                return QIcon()
+                return icon
 
             # 辅助：解析可能含参数或是快捷方式的启动路径，返回可用的 exe 路径或目录
             def _resolve_exec_path(raw_path):
@@ -3631,7 +3682,9 @@ class GameSelector(QWidget):
 
                     text = game["name"][:24] + "..." if len(game["name"]) > 24 else game["name"]
                     game_action = tray_menu.addAction(icon, text)
-                    game_action.triggered.connect(lambda checked=False, i=len(sorted_games[:self.buttonsindexset])-1-idx: (self.tray_icon.contextMenu().hide(), self.launch_game(i)))
+                    # 使用默认参数捕获索引，避免闭包问题
+                    game_index = len(sorted_games[:self.buttonsindexset]) - 1 - idx
+                    game_action.triggered.connect(lambda checked=False, i=game_index: (self.tray_icon.contextMenu().hide(), self.launch_game(i)))
             tray_menu.addSeparator()
             # 新增“工具”子菜单
             tools_menu = QMenu("工具", self)
@@ -3668,8 +3721,7 @@ class GameSelector(QWidget):
             tray_menu.addSeparator()
             restart_action = tray_menu.addAction("重启程序")
             restart_action.triggered.connect(self.restart_program)
-            restore_action = tray_menu.addAction("显示主页面")
-            restore_action.triggered.connect(self.show_window)
+            restore_action = tray_menu.addAction("导入新游戏（未完成）")
             exit_action = tray_menu.addAction("退出")
             exit_action.triggered.connect(self.exitdef)
             tray_menu.setStyleSheet("""
@@ -3685,15 +3737,17 @@ class GameSelector(QWidget):
             """)
             return tray_menu
 
-        # 初始菜单
-        self.tray_icon.setContextMenu(create_tray_menu())
+        # 初始菜单（构建并设置菜单）
+        self._tray_menu = build_tray_menu()
+        self.tray_icon.setContextMenu(self._tray_menu)
 
         def tray_icon_activated(reason):
             if self.is_mouse_simulation_running:
                 self.is_mouse_simulation_running = False
                 return
             if reason == QSystemTrayIcon.Context:  # 右键
-                self.tray_icon.setContextMenu(create_tray_menu())
+                self._tray_menu = build_tray_menu()
+                self.tray_icon.setContextMenu(self._tray_menu)
             elif reason == QSystemTrayIcon.Trigger:  # 左键
                 self.show_window()
                 if self.killexplorer == True:
@@ -5891,9 +5945,13 @@ class GameSelector(QWidget):
                     else:
                         print("未能将窗口带到前台，正在尝试设置为最上层")
                         SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
+                        if self.killexplorer == False:
+                            hide_taskbar()
                         time.sleep(0.2)
                     # 移动鼠标到屏幕右下角并进行右键点击
                         pyautogui.rightClick(right_bottom_x, right_bottom_y)
+                        if self.killexplorer == False:
+                            show_taskbar()
                         # 恢复原来的 Z 顺序
                         #for hwnd in reversed(z_order):
                         SetWindowPos(hwnd, -2, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
