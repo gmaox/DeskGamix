@@ -10,7 +10,7 @@ import pygame, math
 import win32gui,win32process,psutil,win32api
 from PyQt5.QtWidgets import QApplication, QListWidgetItem, QMainWindow, QMessageBox, QScroller, QSystemTrayIcon, QMenu , QVBoxLayout, QDialog, QGridLayout, QWidget, QPushButton, QLabel, QDesktopWidget, QHBoxLayout, QFileDialog, QSlider, QLineEdit, QProgressBar, QScrollArea, QFrame
 from PyQt5.QtGui import QPainter, QPen, QBrush, QFont, QPixmap, QIcon, QColor, QLinearGradient
-from PyQt5.QtCore import QDateTime, QSize, Qt, QThread, pyqtSignal, QTimer, QPoint, QProcess, QPropertyAnimation, QRect
+from PyQt5.QtCore import QDateTime, QSize, Qt, QThread, pyqtSignal, QTimer, QPoint, QProcess, QPropertyAnimation, QRect, QObject
 import subprocess, time, os,win32con, ctypes, re, win32com.client, ctypes, time, pyautogui
 from ctypes import wintypes
 #& C:/Users/86150/AppData/Local/Programs/Python/Python38/python.exe -m PyInstaller --add-data "fav.ico;." --add-data '1.png;.' --add-data 'pssuspend64.exe;.' -w DesktopGame.py -i '.\fav.ico' --uac-admin --noconfirm
@@ -603,8 +603,10 @@ class ScreenshotWindow(QDialog):
         self.filter_game_name = None  # 当前筛选的游戏名
         self.setWindowTitle("截图浏览")
         self.setWindowFlags(Qt.FramelessWindowHint)
-        self.resize(1920, 1000)
-        self.icon_size = 256 * getattr(self, 'scale_factor', 1.0)
+        # 从父类获取缩放因子，如果父类没有则从设置中读取
+        self.scale_factor = getattr(parent, 'scale_factor', settings.get("scale_factor", 1.0))
+        self.resize(int(1920 * self.scale_factor), int(1000 * self.scale_factor))
+        self.icon_size = 256 * self.scale_factor
         # ScreenshotWindow.__init__ 内左侧面板部分
         # 统一按钮样式
         btn_style = f"""
@@ -612,16 +614,16 @@ class ScreenshotWindow(QDialog):
                 background-color: #444444;
                 color: white;
                 text-align: center;
-                padding: {int(10 * getattr(self, 'scale_factor', 1.0))}px;
+                padding: {int(10 * self.scale_factor)}px;
                 border: none;
-                font-size: {int(30 * getattr(self, 'scale_factor', 1.0))}px;
+                font-size: {int(30 * self.scale_factor)}px;
             }}
             QPushButton:hover {{
                 background-color: #555555;
             }}
         """
 
-        BTN_HEIGHT = 90  # 统一按钮高度
+        BTN_HEIGHT = int(90 * self.scale_factor)  # 统一按钮高度
 
         def on_backup_save_clicked():
             open_maobackup("--quick-dgaction")
@@ -929,8 +931,8 @@ class ScreenshotWindow(QDialog):
 
         # 主水平布局
         self.main_layout = QtWidgets.QHBoxLayout()
-        self.main_layout.setContentsMargins(10, 10, 10, 10)
-        self.main_layout.setSpacing(10)
+        self.main_layout.setContentsMargins(int(10 * self.scale_factor), int(10 * self.scale_factor), int(10 * self.scale_factor), int(10 * self.scale_factor))
+        self.main_layout.setSpacing(int(10 * self.scale_factor))
 
         # 左侧信息面板
         self.left_panel = QWidget(self)
@@ -939,14 +941,14 @@ class ScreenshotWindow(QDialog):
 
         # 游戏名标签
         self.game_name_label = QLabel("游戏名称", self.left_panel)
-        self.game_name_label.setStyleSheet("color: white; font-size: 40px; font-weight: bold;")
-        self.game_name_label.setMaximumWidth(self.width() // 2- 150)
+        self.game_name_label.setStyleSheet(f"color: white; font-size: {int(40 * self.scale_factor)}px; font-weight: bold;")
+        self.game_name_label.setMaximumWidth(self.width() // 2 - int(150 * self.scale_factor))
         self.play_time_label = QLabel(self.left_panel)
-        self.play_time_label.setStyleSheet("color: white; font-size: 30px; font-weight: normal;")
+        self.play_time_label.setStyleSheet(f"color: white; font-size: {int(30 * self.scale_factor)}px; font-weight: normal;")
         left_panel_layout.addWidget(self.game_name_label)
-        left_panel_layout.setSpacing(10)
+        left_panel_layout.setSpacing(int(10 * self.scale_factor))
         left_panel_layout.addWidget(self.play_time_label)
-        left_panel_layout.setSpacing(19)
+        left_panel_layout.setSpacing(int(19 * self.scale_factor))
 
         # 开头单独按钮
         btn_toolx = QPushButton("同步游戏存档", self.left_panel)
@@ -971,7 +973,7 @@ class ScreenshotWindow(QDialog):
         left_panel_layout.addLayout(row1)
 
         self.info_label2 = QLabel("---------------------------------------------游戏特性相关---------------------------------------------", self)
-        self.info_label2.setStyleSheet("color: #aaa; font-size: 16px; padding: 0px;")
+        self.info_label2.setStyleSheet(f"color: #aaa; font-size: {int(16 * self.scale_factor)}px; padding: 0px;")
         self.info_label2.setAlignment(Qt.AlignCenter)
         left_panel_layout.addWidget(self.info_label2)
         # 第二排：映射/冻结
@@ -1015,7 +1017,7 @@ class ScreenshotWindow(QDialog):
         row3.addWidget(self.btn_tools)
         left_panel_layout.addLayout(row3)
         self.info_label1 = QLabel("---------------------------------------------游戏数据相关---------------------------------------------", self)
-        self.info_label1.setStyleSheet("color: #aaa; font-size: 16px; padding: 0px;")
+        self.info_label1.setStyleSheet(f"color: #aaa; font-size: {int(16 * self.scale_factor)}px; padding: 0px;")
         self.info_label1.setAlignment(Qt.AlignCenter)
         left_panel_layout.addWidget(self.info_label1)
 
@@ -1054,7 +1056,7 @@ class ScreenshotWindow(QDialog):
         self.listWidget.setIconSize(QSize(int(self.icon_size), int(self.icon_size)))
         self.listWidget.setResizeMode(QtWidgets.QListWidget.Adjust)
         self.listWidget.setMovement(QtWidgets.QListView.Static)
-        self.listWidget.setSpacing(10)
+        self.listWidget.setSpacing(int(10 * self.scale_factor))
         self.listWidget.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.listWidget.itemClicked.connect(self.on_item_clicked)
         self.listWidget.setFocus()
@@ -1065,13 +1067,13 @@ class ScreenshotWindow(QDialog):
         right_panel = QWidget(self)
         right_layout = QtWidgets.QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(10)
+        right_layout.setSpacing(int(10 * self.scale_factor))
         # 不在此处设置对齐，改为保存布局供后续动态调整
         right_layout.addWidget(self.listWidget)
         self.right_panel = right_panel
         self.right_layout = right_layout
         self.info_label = QLabel(self)
-        self.info_label.setStyleSheet("color: #aaa; font-size: 18px; padding: 8px;")
+        self.info_label.setStyleSheet(f"color: #aaa; font-size: {int(18 * self.scale_factor)}px; padding: {int(8 * self.scale_factor)}px;")
         self.info_label.setAlignment(Qt.AlignLeft)
         right_layout.addWidget(self.info_label)
         # 初始使列表靠右以匹配带左侧面板的布局
@@ -1083,13 +1085,13 @@ class ScreenshotWindow(QDialog):
         # 用 QWidget 包裹 main_layout
         main_widget = QWidget(self)
         main_widget.setLayout(self.main_layout)
-        main_widget.setFixedWidth(1800)
+        main_widget.setFixedWidth(int(1800 * self.scale_factor))
 
         # 外层垂直布局
         layout = QtWidgets.QVBoxLayout(self)
         # 关闭按钮放在最上面
         self.closeButton = QPushButton("关闭", self)
-        self.closeButton.setFixedHeight(50)
+        self.closeButton.setFixedHeight(int(50 * self.scale_factor))
         self.closeButton.setStyleSheet("""
             QPushButton {
                 background-color: #444444;
@@ -1171,9 +1173,9 @@ class ScreenshotWindow(QDialog):
                 self.has_load_more_button = False
             # 显示左侧面板并恢复合理最大宽度
             self.left_panel.setVisible(True)
-            self.left_panel.setMaximumWidth(int(950 * getattr(self, 'scale_factor', 1.0)))
-            self.listWidget.setFixedWidth(int(950 * getattr(self, 'scale_factor', 1.0)))
-            self.icon_size = int(256 * getattr(self, 'scale_factor', 1.0) * 1.75)
+            self.left_panel.setMaximumWidth(int(950 * self.scale_factor))
+            self.listWidget.setFixedWidth(int(950 * self.scale_factor))
+            self.icon_size = int(256 * self.scale_factor * 1.75)
             if hasattr(self, 'right_layout'):
                 self.right_layout.setAlignment(self.listWidget, Qt.AlignRight)
         else:
@@ -1181,8 +1183,8 @@ class ScreenshotWindow(QDialog):
             # 隐藏左侧面板并将其最大宽度设为0，避免残留占位
             self.left_panel.setVisible(False)
             self.left_panel.setMaximumWidth(0)
-            self.listWidget.setFixedWidth(int(1630 * getattr(self, 'scale_factor', 1.0)))
-            self.icon_size = 256 * getattr(self, 'scale_factor', 1.0)
+            self.listWidget.setFixedWidth(int(1630 * self.scale_factor))
+            self.icon_size = 256 * self.scale_factor
             if hasattr(self, 'right_layout'):
                 self.right_layout.setAlignment(self.listWidget, Qt.AlignHCenter)
             self.has_load_more_button = False
@@ -1225,8 +1227,8 @@ class ScreenshotWindow(QDialog):
             label.setAlignment(Qt.AlignCenter)
             label.setWordWrap(True)
             label.setStyleSheet("color: #aaa; font-size: 28px;")
-            label.setMinimumHeight(220)
-            label.setMinimumWidth(self.listWidget.viewport().width() - 40)
+            label.setMinimumHeight(int(220 * self.scale_factor))
+            label.setMinimumWidth(self.listWidget.viewport().width() - int(40 * self.scale_factor))
             self.listWidget.addItem(item)
             self.listWidget.setItemWidget(item, label)
             item.setSizeHint(label.sizeHint())
@@ -1590,9 +1592,9 @@ class ScreenshotWindow(QDialog):
                         background-color: #444444;
                         color: white;
                         text-align: center;
-                        padding: {int(10 * getattr(self, 'scale_factor', 1.0))}px;
-                        border: {int(2 * getattr(self, 'scale_factor', 1.0))}px solid #93ffff;
-                        font-size: {int(30 * getattr(self, 'scale_factor', 1.0))}px;
+                        padding: {int(10 * self.scale_factor)}px;
+                        border: {int(2 * self.scale_factor)}px solid #93ffff;
+                        font-size: {int(30 * self.scale_factor)}px;
                     }}
                 """)
             else:
@@ -1601,9 +1603,9 @@ class ScreenshotWindow(QDialog):
                         background-color: #444444;
                         color: white;
                         text-align: center;
-                        padding: {int(10 * getattr(self, 'scale_factor', 1.0))}px;
+                        padding: {int(10 * self.scale_factor)}px;
                         border: none;
-                        font-size: {int(30 * getattr(self, 'scale_factor', 1.0))}px;
+                        font-size: {int(30 * self.scale_factor)}px;
                     }}
                     QPushButton:hover {{
                         background-color: #555555;
@@ -1656,17 +1658,17 @@ class ScreenshotWindow(QDialog):
         
         # 添加信息栏到顶部
         info_bar = QtWidgets.QLabel(self.is_fullscreen_preview)
-        info_bar.setStyleSheet("""
-            QLabel {
+        info_bar.setStyleSheet(f"""
+            QLabel {{ 
                 background-color: rgba(0, 0, 0, 0.8); /* 半透明黑色背景 */
                 color: white;
-                font-size: 18px;
-                padding: 12px 20px;
-                border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-            }
+                font-size: {int(18 * self.scale_factor)}px;
+                padding: {int(12 * self.scale_factor)}px {int(20 * self.scale_factor)}px;
+                border-bottom: {int(1 * self.scale_factor)}px solid rgba(255, 255, 255, 0.1);
+            }} 
         """)
         info_bar.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        info_bar.setFixedHeight(50)  # 调整高度
+        info_bar.setFixedHeight(int(50 * self.scale_factor))  # 调整高度
         info_bar.setTextFormat(Qt.RichText)
         info_bar.setTextInteractionFlags(Qt.TextBrowserInteraction)
         info_bar.setOpenExternalLinks(False)  # 不自动打开外部链接
@@ -1738,19 +1740,19 @@ class ScreenshotWindow(QDialog):
         
         # 左侧切换按钮
         left_btn = QtWidgets.QPushButton("←")
-        left_btn.setStyleSheet("""
-            QPushButton {
-            background-color: rgba(0, 0, 0, 0.3);
-            color: white;
-            font-size: 36px;
-            border: none;
-            width: 50px;
-            height: 1000px;
-            opacity: 0.5;
-            }
-            QPushButton:hover {
-            opacity: 0.9;
-            }
+        left_btn.setStyleSheet(f"""
+            QPushButton {{ 
+                background-color: rgba(0, 0, 0, 0.3);
+                color: white;
+                font-size: {int(36 * self.scale_factor)}px;
+                border: none;
+                width: {int(50 * self.scale_factor)}px;
+                height: {int(1000 * self.scale_factor)}px;
+                opacity: 0.5;
+            }} 
+            QPushButton:hover {{ 
+                opacity: 0.9;
+            }} 
         """)
         left_btn.clicked.connect(lambda: (
             setattr(self, 'preview_index', (self.preview_index - 1) % len(self.current_screenshots)),
@@ -1763,19 +1765,19 @@ class ScreenshotWindow(QDialog):
         
         # 右侧切换按钮
         right_btn = QtWidgets.QPushButton("→")
-        right_btn.setStyleSheet("""
-            QPushButton {
-            background-color: rgba(0, 0, 0, 0.3);
-            color: white;
-            font-size: 36px;
-            border: none;
-            width: 50px;
-            height: 1000px;
-            opacity: 0.5;
-            }
-            QPushButton:hover {
-            opacity: 0.9;
-            }
+        right_btn.setStyleSheet(f"""
+            QPushButton {{ 
+                background-color: rgba(0, 0, 0, 0.3);
+                color: white;
+                font-size: {int(36 * self.scale_factor)}px;
+                border: none;
+                width: {int(50 * self.scale_factor)}px;
+                height: {int(1000 * self.scale_factor)}px;
+                opacity: 0.5;
+            }} 
+            QPushButton:hover {{ 
+                opacity: 0.9;
+            }} 
         """)
         right_btn.clicked.connect(lambda: (
             setattr(self, 'preview_index', (self.preview_index + 1) % len(self.current_screenshots)),
@@ -3099,6 +3101,39 @@ class QuickStreamAppAddThread(QThread):
         except Exception as e:
             print(f"QuickStreamAppAddThread error: {e}")
         self.finished_signal.emit()
+class ScaleTimer(QObject):
+    """控件缩放计时器类，用于实时监测并更新缩放因子"""
+    scale_factor_updated = pyqtSignal(float)  # 缩放因子更新信号
+    
+    def __init__(self, target_widget, base_height=1080):
+        super().__init__()
+        self.target_widget = target_widget
+        self.base_height = base_height  # 基准窗口高度
+        self.current_scale_factor = 1.0  # 当前缩放因子
+        self.scale_timer = QTimer(self)  # 创建计时器
+        self.scale_timer.timeout.connect(self.update_scale_factor)  # 连接计时器信号到更新函数
+        self.scale_timer.start(100)  # 每100毫秒更新一次
+    
+    def update_scale_factor(self):
+        """更新缩放因子"""
+        # 获取当前窗口高度
+        current_height = self.target_widget.height()
+        # 计算缩放因子：当前高度 / 基准高度
+        new_scale_factor = current_height / self.base_height
+        # 如果当前高度小于基准高度，应用非线性缩放使缩放因子更小
+        if current_height < self.base_height:
+            ratio = current_height / self.base_height
+            new_scale_factor = ratio * ratio  # 平方处理，使缩放更敏感
+        # 如果缩放因子变化超过0.01，才发送更新信号
+        if abs(new_scale_factor - self.current_scale_factor) > 0.01:
+            self.current_scale_factor = new_scale_factor
+            self.scale_factor_updated.emit(new_scale_factor)
+    
+    def stop(self):
+        """停止计时器"""
+        self.scale_timer.stop()
+
+
 class GameSelector(QWidget): 
     def __init__(self):
         global play_reload, GSHWND
@@ -3112,8 +3147,6 @@ class GameSelector(QWidget):
         self.setWindowIcon(QIcon('./_internal/fav.ico'))
         #if STARTUP:
         #    self.setWindowOpacity(0.0)  # 设置窗口透明度为全透明
-        self.scale_factor = settings.get("scale_factor", 1.0)  # 从设置中读取缩放因数
-        self.scale_factor2 = self.scale_factor * 2  # 用于按钮和图像的缩放因数
         self.more_section = 0  # 0=主页面，1=更多页面
         self.setWindowTitle("游戏选择器")
         QApplication.setFont(QFont("Microsoft YaHei"))  # 设置字体为微软雅黑
@@ -3139,6 +3172,14 @@ class GameSelector(QWidget):
             hwnd = int(self.winId())
             ctypes.windll.user32.ShowWindow(hwnd, 0) # 0=SW_HIDE
         self.resize(screen.width(), screen.height()) # 设置窗口大小为屏幕分辨率
+        
+        # 初始化缩放因子
+        self.scale_factor = 1.0  # 初始缩放因子，将由ScaleTimer更新
+        self.scale_factor2 = self.scale_factor * 2  # 用于按钮和图像的缩放因数
+        
+        # 初始化ScaleTimer
+        self.scale_timer = ScaleTimer(self)
+        self.scale_timer.scale_factor_updated.connect(self.on_scale_factor_updated)
         # 游戏索引和布局
         self.player = {}
         self.current_index = 0  # 从第一个按钮开始
@@ -3354,8 +3395,6 @@ class GameSelector(QWidget):
         QScroller.grabGesture(self.scroll_area.viewport(), QScroller.LeftMouseButtonGesture)
         self.scroll_area.horizontalScrollBar().valueChanged.connect(self.update_additional_game_name_label_position)
         # 垂直的self.scroll_area.verticalScrollBar().valueChanged.connect(self.update_additional_game_name_label_position)
-
-
 
         # 隐藏滚动条和边框
         self.scroll_area.setStyleSheet("""
@@ -6169,7 +6208,7 @@ class GameSelector(QWidget):
                     if proc.info['exe'] and os.path.abspath(proc.info['exe']) == os.path.abspath(game_path):
                         print(f"找到进程: {proc.info['name']} (PID: {proc.info['pid']})")
                         # 显示加载窗口
-                        loading = LoadingDialog("正在关闭程序......", scale_factor=getattr(self, 'scale_factor', 1.0), parent=self)
+                        loading = LoadingDialog("正在关闭程序......", scale_factor=self.scale_factor, parent=self)
                         loading.show()
                         QApplication.processEvents()
                         try:
@@ -6209,6 +6248,237 @@ class GameSelector(QWidget):
         # 重新加载界面
         self.reload_interface()
     
+    def on_scale_factor_updated(self, new_scale_factor):
+        """缩放因子更新时调用，更新界面控件尺寸与布局"""
+        # 更新缩放因子
+        self.scale_factor = new_scale_factor
+        self.scale_factor2 = self.scale_factor * 2
+        
+        # 更新顶部按钮
+        if hasattr(self, 'more_button'):
+            self.more_button.setFixedSize(int(120 * self.scale_factor), int(40 * self.scale_factor))
+            self.more_button.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: transparent; 
+                    border-radius: {int(20 * self.scale_factor)}px; 
+                    border: {int(2 * self.scale_factor)}px solid #888888;
+                    color: white;
+                    font-size: {int(16 * self.scale_factor)}px;
+                }}
+                QPushButton:hover {{
+                    border: {int(2 * self.scale_factor)}px solid #555555;
+                }}
+            """)
+        
+        if hasattr(self, 'favorite_button'):
+            self.favorite_button.setFixedSize(int(120 * self.scale_factor), int(40 * self.scale_factor))
+            self.favorite_button.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: transparent; 
+                    border-radius: {int(20 * self.scale_factor)}px; 
+                    border: {int(2 * self.scale_factor)}px solid #888888;
+                    color: white;
+                    font-size: {int(16 * self.scale_factor)}px;
+                }}
+                QPushButton:hover {{
+                    border: {int(2 * self.scale_factor)}px solid #555555;
+                }}
+            """)
+        
+        if hasattr(self, 'quit_button'):
+            self.quit_button.setFixedSize(int(120 * self.scale_factor), int(40 * self.scale_factor))
+            self.quit_button.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: transparent; 
+                    border-radius: {int(20 * self.scale_factor)}px; 
+                    border: {int(2 * self.scale_factor)}px solid #888888;
+                    color: white;
+                    font-size: {int(16 * self.scale_factor)}px;
+                }}
+                QPushButton:hover {{
+                    border: {int(2 * self.scale_factor)}px solid #555555;
+                }}
+            """)
+        
+        if hasattr(self, 'settings_button'):
+            self.settings_button.setFixedSize(int(120 * self.scale_factor), int(40 * self.scale_factor))
+            self.settings_button.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: transparent; 
+                    border-radius: {int(20 * self.scale_factor)}px; 
+                    border: {int(2 * self.scale_factor)}px solid #888888;
+                    color: white;
+                    font-size: {int(16 * self.scale_factor)}px;
+                }}
+                QPushButton:hover {{
+                    border: {int(2 * self.scale_factor)}px solid #555555;
+                }}
+            """)
+        
+        if hasattr(self, 'screenshot_button'):
+            self.screenshot_button.setFixedSize(int(120 * self.scale_factor), int(40 * self.scale_factor))
+            self.screenshot_button.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: transparent; 
+                    border-radius: {int(20 * self.scale_factor)}px; 
+                    border: {int(2 * self.scale_factor)}px solid #888888;
+                    color: white;
+                    font-size: {int(16 * self.scale_factor)}px;
+                }}
+                QPushButton:hover {{
+                    border: {int(2 * self.scale_factor)}px solid #555555;
+                }}
+            """)
+        
+        # 更新游戏名标签和时间标签
+        if hasattr(self, 'game_name_label'):
+            self.game_name_label.setStyleSheet(f"""
+                QLabel {{
+                    color: white;
+                    font-size: {int(20 * self.scale_factor)}px;
+                    font-weight: bold;
+                    padding: 0 {int(20 * self.scale_factor)}px;
+                }}
+            """)
+        
+        if hasattr(self, 'time_label'):
+            self.time_label.setStyleSheet(f"""
+                QLabel {{
+                    color: white;
+                    font-size: {int(25 * self.scale_factor)}px;
+                    padding-top: {int(10 * self.scale_factor)}px;
+                    padding-bottom: {int(10 * self.scale_factor)}px;
+                    padding-right: {int(20 * self.scale_factor)}px;
+                }}
+            """)
+        
+        # 更新网格布局间距
+        if hasattr(self, 'grid_layout'):
+            self.grid_layout.setSpacing(int(20 * self.scale_factor))
+        
+        # 更新顶部布局边距
+        if hasattr(self, 'top_layout'):
+            self.top_layout.setContentsMargins(int(20 * self.scale_factor), 0, int(20 * self.scale_factor), 0)
+        
+        # 更新游戏按钮
+        if hasattr(self, 'buttons'):
+            for button in self.buttons:
+                # 跳过"更多"按钮
+                if button.text() == "🟦🟦\n🟦🟦":
+                    button.setFixedSize(int(140 * self.scale_factor2), int(140 * self.scale_factor2))
+                elif button.text() in ["返回", "返回主页面"]:
+                    # 处理返回按钮
+                    button.setFixedSize(int(140 * self.scale_factor2), int(140 * self.scale_factor2))
+                else:
+                    # 更新游戏按钮
+                    button.setFixedSize(int(220 * self.scale_factor2), int(300 * self.scale_factor2))
+                    # 更新按钮样式
+                    button.setStyleSheet(f"""
+                        QPushButton {{
+                            background-color: transparent;
+                            border-radius: {int(10 * self.scale_factor2)}px;
+                            border: {int(2 * self.scale_factor2)}px solid #444444;
+                            color: white;
+                            text-align: center;
+                            padding: 0;
+                        }}
+                        QPushButton:hover {{
+                            border: {int(2 * self.scale_factor2)}px solid #888888;
+                        }}
+                    """)
+                    
+                    # 更新按钮内的标签
+                    for child in button.findChildren(QLabel):
+                        if child.objectName() == "star_label":
+                            # 更新收藏标签
+                            child.setStyleSheet(f"""
+                                QLabel {{
+                                    background-color: rgba(0, 0, 0, 0.7);
+                                    color: gold;
+                                    font-size: {int(10 * self.scale_factor2)}px;
+                                    padding: {int(5 * self.scale_factor2)}px;
+                                    border-radius: {int(10 * self.scale_factor2)}px;
+                                }}
+                            """)
+                            child.move(int(5 * self.scale_factor2), int(5 * self.scale_factor2))
+        
+        # 更新滚动区域高度和宽度
+        if hasattr(self, 'scroll_area'):
+            self.scroll_area.setFixedHeight(int(320 * self.scale_factor * 2.4))
+            self.scroll_area.setFixedWidth(int(self.width()))
+        
+        # 更新滚动区域中的图像
+        if hasattr(self, 'buttons') and hasattr(self, 'sort_games'):
+            sorted_games = self.sort_games()
+            for idx, button in enumerate(self.buttons):
+                # 跳过"更多"按钮和"返回"按钮
+                if button.text() == "🟦🟦\n🟦🟦" or button.text() in ["返回", "返回主页面"]:
+                    continue
+                
+                # 确保索引有效
+                if idx < len(sorted_games):
+                    game = sorted_games[idx]
+                    image_path = game["image-path"]
+                    # 自动判断图片路径是相对还是绝对
+                    if not os.path.isabs(image_path):
+                        image_path = f"{APP_INSTALL_PATH}\\config\\covers\\{image_path}"
+                    
+                    # 重新加载并缩放图像
+                    pixmap = QPixmap(image_path).scaled(int(200 * self.scale_factor2), int(267 * self.scale_factor2), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    icon = QIcon(pixmap)
+                    button.setIcon(icon)
+                    button.setIconSize(pixmap.size())
+        
+        # 更新加载提示标签
+        if hasattr(self, 'loading_label'):
+            self.loading_label.setStyleSheet(f"""
+                QLabel {{
+                    color: white;
+                    font-size: {int(30 * self.scale_factor)}px;
+                }}
+            """)
+        
+        # 更新没有游戏时的提示按钮
+        if hasattr(self, 'no_games_button'):
+            self.no_games_button.setFixedSize(int(700 * self.scale_factor), int(200 * self.scale_factor))
+            self.no_games_button.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: transparent;
+                    border-radius: {int(10 * self.scale_factor)}px;
+                    border: {int(2 * self.scale_factor)}px solid #444444;
+                    color: white;
+                    font-size: {int(30 * self.scale_factor)}px;
+                }}
+                QPushButton:hover {{
+                    border: {int(2 * self.scale_factor)}px solid #888888;
+                }}
+            """)
+        
+        # 更新分隔线
+        if hasattr(self, 'divider'):
+            self.divider.setFixedHeight(int(4 * self.scale_factor))
+        
+        # 更新左右标签
+        if hasattr(self, 'left_label'):
+            self.left_label.setStyleSheet(f"""
+                QLabel {{
+                    color: white;
+                    font-size: {int(25 * self.scale_factor)}px;
+                    padding-bottom: {int(10 * self.scale_factor)}px;
+                    padding-left: {int(50 * self.scale_factor)}px;
+                }}
+            """)
+        
+        if hasattr(self, 'right_label'):
+            self.right_label.setStyleSheet(f"""
+                QLabel {{
+                    color: white;
+                    font-size: {int(25 * self.scale_factor)}px;
+                    padding-bottom: {int(10 * self.scale_factor)}px;
+                    padding-right: {int(50 * self.scale_factor)}px;
+                }}
+            """)
+
     def reload_interface(self):
         """重新加载界面"""
         # 优化：清除现有按钮的方式，使用更高效的布局处理
@@ -7726,18 +7996,7 @@ class SettingsWindow(QWidget):
         self.row_count_slider.valueChanged.connect(self.update_row_count)
         self.layout.addWidget(self.row_count_slider)
 
-        # 添加调整缩放因数的选项
-        self.scale_factor_label = QLabel(f"界面缩放因数: {parent.scale_factor:.1f}")
-        self.scale_factor_label.setStyleSheet(f"color: white; font-size: {int(16 * parent.scale_factor)}px;")
-        self.scale_factor_label.setFixedHeight(int(30 * parent.scale_factor))  # 固定高度为30像素
-        self.layout.addWidget(self.scale_factor_label)
 
-        self.scale_factor_slider = QSlider(Qt.Horizontal)
-        self.scale_factor_slider.setMinimum(5)
-        self.scale_factor_slider.setMaximum(30)
-        self.scale_factor_slider.setValue(int(parent.scale_factor * 10))
-        self.scale_factor_slider.valueChanged.connect(self.update_scale_factor)
-        self.layout.addWidget(self.scale_factor_slider)
 
         # 添加查看游戏时间排名按钮
         self.play_time_rank_button = QPushButton("查看游玩时长汇总")
@@ -8769,16 +9028,7 @@ class SettingsWindow(QWidget):
         with open(settings_path, "w", encoding="utf-8") as f:
             json.dump(settings, f, indent=4)
 
-    def update_scale_factor(self, value):
-        """更新缩放因数并保存设置"""
-        scale_factor = value / 10.0
-        self.parent().scale_factor = scale_factor
-        self.scale_factor_label.setText(f"界面缩放因数: {scale_factor:.1f}")
-        self.parent().reload_interface()
-        # 保存缩放因数设置
-        settings["scale_factor"] = scale_factor
-        with open(settings_path, "w", encoding="utf-8") as f:
-            json.dump(settings, f, indent=4)
+
 
     def restart_program(self):
         """重启程序"""
