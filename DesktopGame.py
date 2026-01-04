@@ -3101,33 +3101,7 @@ class QuickStreamAppAddThread(QThread):
         except Exception as e:
             print(f"QuickStreamAppAddThread error: {e}")
         self.finished_signal.emit()
-class ScaleTimer(QObject):
-    """控件缩放计时器类，用于实时监测并更新缩放因子"""
-    scale_factor_updated = pyqtSignal(float)  # 缩放因子更新信号
-    
-    def __init__(self, target_widget, base_height=1080):
-        super().__init__()
-        self.target_widget = target_widget
-        self.base_height = base_height  # 基准窗口高度
-        self.current_scale_factor = 1.0  # 当前缩放因子
-        self.scale_timer = QTimer(self)  # 创建计时器
-        self.scale_timer.timeout.connect(self.update_scale_factor)  # 连接计时器信号到更新函数
-        self.scale_timer.start(100)  # 每100毫秒更新一次
-    
-    def update_scale_factor(self):
-        """更新缩放因子"""
-        # 获取当前窗口高度
-        current_height = self.target_widget.height()
-        # 计算缩放因子：当前高度 / 基准高度
-        new_scale_factor = current_height / self.base_height
-        # 如果缩放因子变化超过0.01，才发送更新信号
-        if abs(new_scale_factor - self.current_scale_factor) > 0.01:
-            self.current_scale_factor = new_scale_factor
-            self.scale_factor_updated.emit(new_scale_factor)
-    
-    def stop(self):
-        """停止计时器"""
-        self.scale_timer.stop()
+
 
 
 class GameSelector(QWidget): 
@@ -3170,27 +3144,27 @@ class GameSelector(QWidget):
         self.resize(screen.width(), screen.height()) # 设置窗口大小为屏幕分辨率
         
         # 初始化缩放因子
-        self.scale_factor = 1.0  # 初始缩放因子，将由ScaleTimer更新
+        self.scale_factor = 1.0  # 初始缩放因子，将由 resizeEvent / 初始化逻辑更新
         self.scale_factor2 = self.scale_factor * 2  # 用于按钮和图像的缩放因数
         
-        # 初始化ScaleTimer
-        self.scale_timer = ScaleTimer(self)
-        self.scale_timer.scale_factor_updated.connect(self.on_scale_factor_updated)
+        # 缩放参数（事件驱动模式）
+        self.base_height = 1080
+        self.min_scale = 0.45
+        self.max_scale = 2.5
+        self.precision = 2
+        self.threshold = 0.01
+
         # 立即根据屏幕高度计算并应用初始缩放，避免启动时因 widget 几何尚未准备好导致尺寸异常
         try:
-            base_h = getattr(self.scale_timer, 'base_height', 1080)
-            prec = getattr(self.scale_timer, 'precision', 2)
-            raw = float(screen.height()) / float(base_h)
-            initial_scale = round(raw, prec)
-            # 裁剪到允许范围
-            initial_scale = max(getattr(self.scale_timer, 'min_scale', 0.45), min(initial_scale, getattr(self.scale_timer, 'max_scale', 2.5)))
-            self.scale_factor = initial_scale
-            self.scale_factor2 = self.scale_factor * 2
-            # 同步 ScaleTimer 的当前值以避免阈值抑制第一次更新
+            raw = float(screen.height()) / float(self.base_height)
+            initial_scale = round(raw, self.precision)
+            initial_scale = max(self.min_scale, min(initial_scale, self.max_scale))
+            # 使用事件驱动更新一次初始缩放
             try:
-                self.scale_timer.current_scale_factor = float(self.scale_factor)
+                self.on_scale_factor_updated(initial_scale)
             except Exception:
-                pass
+                self.scale_factor = initial_scale
+                self.scale_factor2 = self.scale_factor * 2
         except Exception:
             pass
         # 游戏索引和布局
@@ -3851,6 +3825,57 @@ class GameSelector(QWidget):
                 button_pos.x() + (button_width - self.additional_game_name_label.width()) // 2,
                 button_pos.y() - self.game_name_label.height() - 20
             )
+
+    def resizeEvent(self, event):
+        """在窗口尺寸变化时更新依赖宽度的控件布局和位置。"""
+        try:
+            # 根据高度变化计算新的缩放因子（事件驱动覆盖原来的轮询逻辑）
+            try:
+                # 优先使用 frameGeometry 以包含窗口装饰
+                current_h = int(self.frameGeometry().height())
+            except Exception:
+                current_h = int(self.height())
+            try:
+                raw = float(current_h) / float(getattr(self, 'base_height', 1080))
+                new_scale = round(raw, getattr(self, 'precision', 2))
+                new_scale = max(getattr(self, 'min_scale', 0.45), min(new_scale, getattr(self, 'max_scale', 2.5)))
+                if abs(new_scale - getattr(self, 'scale_factor', 0)) >= getattr(self, 'threshold', 0.01):
+                    # 使用现有的更新函数统一处理样式与布局更新
+                    try:
+                        self.on_scale_factor_updated(new_scale)
+                    except Exception:
+                        self.scale_factor = new_scale
+                        self.scale_factor2 = self.scale_factor * 2
+            except Exception:
+                pass
+
+            w = int(self.width())
+            if hasattr(self, 'scroll_area'):
+                try:
+                    self.scroll_area.setFixedWidth(w)
+                except Exception:
+                    pass
+
+            # 调整控制区的最大宽度（control_layout 的容器）
+            try:
+                if hasattr(self, 'control_layout'):
+                    control_widget = self.control_layout.parentWidget()
+                    if control_widget:
+                        control_widget.setMaximumWidth(int(self.width() * 0.75))
+            except Exception:
+                pass
+
+            # 重新定位可能依赖按钮位置的标签
+            try:
+                self.update_additional_game_name_label_position()
+            except Exception:
+                pass
+        except Exception:
+            pass
+        try:
+            super().resizeEvent(event)
+        except Exception:
+            return
     def animate_scroll(self, orientation, target_value, duration=150):
         """平滑滚动到目标值。orientation: 'horizontal' 或 'vertical'。保留动画引用以防被回收。"""
         try:
