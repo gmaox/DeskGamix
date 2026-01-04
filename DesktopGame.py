@@ -605,7 +605,25 @@ class ScreenshotWindow(QDialog):
         self.setWindowFlags(Qt.FramelessWindowHint)
         # 从父类获取缩放因子，如果父类没有则从设置中读取
         self.scale_factor = getattr(parent, 'scale_factor', settings.get("scale_factor", 1.0))
-        self.resize(int(1920 * self.scale_factor), int(1000 * self.scale_factor))
+        
+        # 获取屏幕信息
+        screen = QDesktopWidget().screenGeometry()
+        screen_width = screen.width()
+        
+        # 计算高度：从屏幕顶端到GameSelector的divider之上
+        # 获取父窗口（GameSelector）的高度
+        parent_height = getattr(parent, 'height', lambda: screen.height)()
+        if callable(parent_height):
+            parent_height = parent_height()
+
+        # 设置ScreenshotWindow的高度为父窗口高度减去底部区域高度
+        window_height = parent_height - int(70 * self.scale_factor)
+        
+        # 调整大小
+        self.resize(screen_width, window_height)
+        # 将窗口定位在屏幕左上角
+        self.move(0, 0)
+        
         self.icon_size = 256 * self.scale_factor
         # ScreenshotWindow.__init__ 内左侧面板部分
         # 统一按钮样式
@@ -2010,7 +2028,7 @@ class Overlay(QWidget):
         # 可使用 Qt.WindowTransparentForInput 让事件穿过覆盖层
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint | Qt.NoDropShadowWindowHint)
         # 使用纯色背景，确保可以看到
-        self.setStyleSheet("background-color: rgba(0, 0, 0, 0.5);")  # 半透明灰色
+        self.setStyleSheet("background-color: rgba(0, 0, 0, 0.2);")  # 半透明灰色
         self.setGeometry(QApplication.primaryScreen().geometry())  # 覆盖全屏
         self.setWindowOpacity(0.0)  # 初始透明度为0
         self._fade_anim = None
@@ -2028,7 +2046,7 @@ class Overlay(QWidget):
         anim = QPropertyAnimation(self, b"windowOpacity")
         anim.setDuration(duration)
         anim.setStartValue(0.0)
-        anim.setEndValue(0.5)  # 半透明
+        anim.setEndValue(0.2)  # 半透明
         anim.finished.connect(lambda: setattr(self, '_is_fading', False))
         self._fade_anim = anim
         anim.start()
@@ -2040,7 +2058,7 @@ class Overlay(QWidget):
         self._is_fading = True
         anim = QPropertyAnimation(self, b"windowOpacity")
         anim.setDuration(duration)
-        anim.setStartValue(0.5)  # 半透明
+        anim.setStartValue(0.2)  # 半透明
         anim.setEndValue(0.0)
         def on_finished():
             self.hide()
@@ -3990,6 +4008,20 @@ class GameSelector(QWidget):
             # 重新定位可能依赖按钮位置的标签
             try:
                 self.update_additional_game_name_label_position()
+            except Exception:
+                pass
+            
+            # 调整ScreenshotWindow的大小和位置（如果它存在）
+            try:
+                if hasattr(self, 'screenshot_window') and self.screenshot_window.isVisible():
+                    # 先关闭旧窗口
+                    try:
+                        self.screenshot_window.close()
+                    except Exception:
+                        pass
+                    # 创建新窗口
+                    self.screenshot_window = ScreenshotWindow(self)
+                    self.screenshot_window.show()
             except Exception:
                 pass
         except Exception:
