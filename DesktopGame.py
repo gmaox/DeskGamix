@@ -3120,10 +3120,6 @@ class ScaleTimer(QObject):
         current_height = self.target_widget.height()
         # 计算缩放因子：当前高度 / 基准高度
         new_scale_factor = current_height / self.base_height
-        # 如果当前高度小于基准高度，应用非线性缩放使缩放因子更小
-        if current_height < self.base_height:
-            ratio = current_height / self.base_height
-            new_scale_factor = ratio * ratio  # 平方处理，使缩放更敏感
         # 如果缩放因子变化超过0.01，才发送更新信号
         if abs(new_scale_factor - self.current_scale_factor) > 0.01:
             self.current_scale_factor = new_scale_factor
@@ -3180,6 +3176,23 @@ class GameSelector(QWidget):
         # 初始化ScaleTimer
         self.scale_timer = ScaleTimer(self)
         self.scale_timer.scale_factor_updated.connect(self.on_scale_factor_updated)
+        # 立即根据屏幕高度计算并应用初始缩放，避免启动时因 widget 几何尚未准备好导致尺寸异常
+        try:
+            base_h = getattr(self.scale_timer, 'base_height', 1080)
+            prec = getattr(self.scale_timer, 'precision', 2)
+            raw = float(screen.height()) / float(base_h)
+            initial_scale = round(raw, prec)
+            # 裁剪到允许范围
+            initial_scale = max(getattr(self.scale_timer, 'min_scale', 0.45), min(initial_scale, getattr(self.scale_timer, 'max_scale', 2.5)))
+            self.scale_factor = initial_scale
+            self.scale_factor2 = self.scale_factor * 2
+            # 同步 ScaleTimer 的当前值以避免阈值抑制第一次更新
+            try:
+                self.scale_timer.current_scale_factor = float(self.scale_factor)
+            except Exception:
+                pass
+        except Exception:
+            pass
         # 游戏索引和布局
         self.player = {}
         self.current_index = 0  # 从第一个按钮开始
@@ -3553,8 +3566,8 @@ class GameSelector(QWidget):
             controller_name = controller_data['controller'].get_name()
             self.update_controller_status(controller_name)
         # 右侧文字
-        right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.95.3")
-        right_label.setStyleSheet(f"""
+        self.right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.95.3")
+        self.right_label.setStyleSheet(f"""
             QLabel {{
                 font-family: "Microsoft YaHei"; 
                 color: white;
@@ -3563,7 +3576,7 @@ class GameSelector(QWidget):
                 padding-right: {int(50 * self.scale_factor)}px;
             }}
         """)
-        texta_layout.addWidget(right_label, alignment=Qt.AlignRight)
+        texta_layout.addWidget(self.right_label, alignment=Qt.AlignRight)
         
         # 包装文字布局到 QWidget
         texta_widget = QWidget()
@@ -6351,6 +6364,21 @@ class GameSelector(QWidget):
                     padding-right: {int(20 * self.scale_factor)}px;
                 }}
             """)
+
+        # 更新底部右侧文字（帮助/提示）
+        if hasattr(self, 'right_label'):
+            try:
+                self.right_label.setStyleSheet(f"""
+                    QLabel {{
+                        font-family: "Microsoft YaHei"; 
+                        color: white;
+                        font-size: {int(25 * self.scale_factor)}px;
+                        padding-bottom: {int(10 * self.scale_factor)}px;
+                        padding-right: {int(50 * self.scale_factor)}px;
+                    }}
+                """)
+            except Exception:
+                pass
         
         # 更新网格布局间距
         if hasattr(self, 'grid_layout'):
@@ -6359,6 +6387,37 @@ class GameSelector(QWidget):
         # 更新顶部布局边距
         if hasattr(self, 'top_layout'):
             self.top_layout.setContentsMargins(int(20 * self.scale_factor), 0, int(20 * self.scale_factor), 0)
+
+        # 更新控制按钮区域（圆形按钮）
+        if hasattr(self, 'control_layout'):
+            try:
+                self.control_layout.setSpacing(int(50 * self.scale_factor))
+            except Exception:
+                pass
+        if hasattr(self, 'control_buttons'):
+            for btn in self.control_buttons:
+                try:
+                    size = int(125 * self.scale_factor)
+                    border_px = max(1, int(5 * self.scale_factor))
+                    font_px = max(8, int(40 * self.scale_factor))
+                    btn.setFixedSize(size, size)
+                    # 圆形半径为宽度的一半，使用像素值避免百分比差异
+                    radius_px = int(size / 2)
+                    checked_border = max(1, int(6 * self.scale_factor))
+                    btn.setStyleSheet(f"""
+                        QPushButton {{
+                            background-color: #575757;
+                            border-radius: {radius_px}px;
+                            font-size: {font_px}px; 
+                            border: {border_px}px solid #282828;
+                        }}
+                        QPushButton:checked {{
+                            background-color: #45a049;
+                            border: {checked_border}px solid #ffff00;
+                        }}
+                    """)
+                except Exception:
+                    pass
         
         # 更新游戏按钮
         if hasattr(self, 'buttons'):
