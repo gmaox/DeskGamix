@@ -912,12 +912,12 @@ class ScreenshotWindow(QDialog):
                 QMessageBox.warning(self, "提示", "未找到游戏路径。")
         def on_remove_clicked():
             # 创建确认弹窗
-            self.confirm_dialog = ConfirmDialog("确认从游戏列表移除该游戏吗？\n（不会删除游戏数据）")
+            self.confirm_dialog = ConfirmDialog("确认从游戏列表移除该游戏吗？\n（不会删除游戏数据）", scale_factor=self.scale_factor)
             result = self.confirm_dialog.exec_()  # 显示弹窗并获取结果
             self.ignore_input_until = pygame.time.get_ticks() + 350  
             if not result == QDialog.Accepted:  # 如果按钮没被点击
                 return
-            self.confirm_dialog = ConfirmDialog("确认从游戏列表移除该游戏吗？\n（二次确认）")
+            self.confirm_dialog = ConfirmDialog("确认从游戏列表移除该游戏吗？\n（二次确认）", scale_factor=self.scale_factor)
             result = self.confirm_dialog.exec_()  # 显示弹窗并获取结果
             self.ignore_input_until = pygame.time.get_ticks() + 350  
             if not result == QDialog.Accepted:  # 如果按钮没被点击
@@ -1941,7 +1941,7 @@ class ScreenshotWindow(QDialog):
         if hasattr(self, 'is_fullscreen_preview') and self.is_fullscreen_preview:
             # 使用 self.preview_index 获取当前放大显示的图片路径
             path = self.current_screenshots[self.preview_index][0]  # 获取当前预览图片的路径
-            self.confirm_dialog = ConfirmDialog(f"确认删除选中的截图？\n{path}")
+            self.confirm_dialog = ConfirmDialog(f"确认删除选中的截图？\n{path}", scale_factor=self.scale_factor)
             if self.confirm_dialog.exec_():
                 if os.path.exists(path):
                     os.remove(path)
@@ -1965,7 +1965,7 @@ class ScreenshotWindow(QDialog):
             # 弹出确认对话框
             for item in items:
                 path = item.data(Qt.UserRole)  # 修复：从选中项获取路径
-                self.confirm_dialog = ConfirmDialog(f"确认删除选中的截图？\n{path}")
+                self.confirm_dialog = ConfirmDialog(f"确认删除选中的截图？\n{path}", scale_factor=self.scale_factor)
                 if self.confirm_dialog.exec_():
                     if os.path.exists(path):
                         os.remove(path)
@@ -2002,41 +2002,90 @@ class ScreenshotWindow(QDialog):
         
         # 调用父类的 closeEvent
         super().closeEvent(event)
-DIALOGQSS = """
-            QDialog {
+class Overlay(QWidget):
+    """全屏灰色覆盖层类"""
+    def __init__(self, parent=None):
+        super().__init__()
+        # 作为独立的顶级窗口，不设置parent
+        # 可使用 Qt.WindowTransparentForInput 让事件穿过覆盖层
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint | Qt.NoDropShadowWindowHint)
+        # 使用纯色背景，确保可以看到
+        self.setStyleSheet("background-color: rgba(0, 0, 0, 0.5);")  # 半透明灰色
+        self.setGeometry(QApplication.primaryScreen().geometry())  # 覆盖全屏
+        self.setWindowOpacity(0.0)  # 初始透明度为0
+        self._fade_anim = None
+        self._is_fading = False
+    
+    def fade_in(self, duration=180):
+        """淡入效果"""
+        if self._is_fading:
+            return
+        self._is_fading = True
+        # 确保覆盖层显示
+        self.show()
+        # 确保覆盖层在对话框之下
+        self.lower()
+        anim = QPropertyAnimation(self, b"windowOpacity")
+        anim.setDuration(duration)
+        anim.setStartValue(0.0)
+        anim.setEndValue(0.5)  # 半透明
+        anim.finished.connect(lambda: setattr(self, '_is_fading', False))
+        self._fade_anim = anim
+        anim.start()
+    
+    def fade_out(self, duration=180):
+        """淡出效果"""
+        if self._is_fading:
+            return
+        self._is_fading = True
+        anim = QPropertyAnimation(self, b"windowOpacity")
+        anim.setDuration(duration)
+        anim.setStartValue(0.5)  # 半透明
+        anim.setEndValue(0.0)
+        def on_finished():
+            self.hide()
+            self._is_fading = False
+        anim.finished.connect(on_finished)
+        self._fade_anim = anim
+        anim.start()
+
+def get_dialog_qss(scale_factor):
+    """根据缩放因子生成对话框样式表"""
+    return f"""
+            QDialog {{
                 background-color: #2E2E2E;
-                border: 5px solid #4CAF50;
-                border-radius: 8px;
-            }
-            QLabel {
-                font-size: 36px;
+                border: {int(5 * scale_factor)}px solid #4CAF50;
+                border-radius: {int(8 * scale_factor)}px;
+            }}
+            QLabel {{
+                font-size: {int(36 * scale_factor)}px;
                 color: #FFFFFF;
-                margin-bottom: 40px;
+                margin-bottom: {int(40 * scale_factor)}px;
                 text-align: center;
-            }
-            QPushButton {
+            }}
+            QPushButton {{
                 background-color: #4CAF50;
                 color: white;
                 border: none;
-                padding: 20px 0;
-                font-size: 32px;
+                padding: {int(20 * scale_factor)}px 0;
+                font-size: {int(32 * scale_factor)}px;
                 margin: 0;
                 width: 100%;
-            }
-            QPushButton:hover {
+            }}
+            QPushButton:hover {{
                 background-color: #45a049;
-            }
-            QPushButton:pressed {
+            }}
+            QPushButton:pressed {{
                 background-color: #388e3c;
-            }
-            QVBoxLayout {
-                margin: 40px;
+            }}
+            QVBoxLayout {{
+                margin: {int(40 * scale_factor)}px;
                 spacing: 0;
-            }
-            QHBoxLayout {
+            }}
+            QHBoxLayout {{
                 justify-content: center;
                 spacing: 0;
-            }
+            }}
         """
 class ConfirmDialog(QDialog):
     def __init__(self, variable1, scale_factor=1.0):
@@ -2044,9 +2093,10 @@ class ConfirmDialog(QDialog):
         self.variable1 = variable1
         self.scale_factor = scale_factor
         self.setWindowTitle("游戏确认")
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool)
+        # 添加 Qt.WindowStaysOnTopHint 确保对话框在 Overlay 之上
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
         self.setFixedSize(int(800 * self.scale_factor), int(400 * self.scale_factor))  # 更新后的固定尺寸
-        self.setStyleSheet(DIALOGQSS)
+        self.setStyleSheet(get_dialog_qss(self.scale_factor))
         # 初始透明度为 0，使用动画淡入
         try:
             self.setWindowOpacity(0.0)
@@ -2055,7 +2105,9 @@ class ConfirmDialog(QDialog):
         self._fade_anim = None
         self._is_fading = False
         
-
+        # 创建覆盖层
+        self.overlay = Overlay(self)
+        
         self.init_ui()
         self.current_index = 1  # 当前选中的按钮索引
         self.buttons = [self.cancel_button, self.confirm_button]  # 按钮列表
@@ -2071,7 +2123,7 @@ class ConfirmDialog(QDialog):
         self.label = QLabel(self.variable1)
         self.label.setAlignment(Qt.AlignCenter)  # 设置文本居中
         if "※" in self.variable1:
-            self.label.setStyleSheet("font-size: 24px; color: #FFFFFF; margin-bottom: 40px; text-align: center;")
+            self.label.setStyleSheet(f"font-size: {24 * self.scale_factor}px; color: #FFFFFF; margin-bottom: 40px; text-align: center;")
         layout.addWidget(self.label)
 
         # 创建按钮区域
@@ -2115,12 +2167,41 @@ class ConfirmDialog(QDialog):
         except Exception:
             pass
         self.ignore_input_until = pygame.time.get_ticks() + 350  # 打开窗口后1秒内忽略输入
+        # 确保对话框在覆盖层之上并获取焦点
+        try:
+            # 先让 overlay 显示并处于 topmost
+            try:
+                self.overlay.show()
+                SetWindowPos(int(self.overlay.winId()), HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
+            except Exception:
+                pass
+            # 再把对话框置顶到 topmost（这样会在 overlay 之上）
+            try:
+                SetWindowPos(int(self.winId()), HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
+                SetForegroundWindow(int(self.winId()))
+            except Exception:
+                try:
+                    self.raise_()
+                    self.activateWindow()
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def fade_in(self, duration=180):
         try:
             if self._is_fading:
                 return
             self._is_fading = True
+            
+            # 先淡入覆盖层
+            self.overlay.fade_in(duration)
+            
+            # 显示对话框并确保在覆盖层之上
+            self.show()
+            self.raise_()
+            
+            # 再淡入对话框
             anim = QPropertyAnimation(self, b"windowOpacity")
             anim.setDuration(duration)
             anim.setStartValue(0.0)
@@ -2142,6 +2223,8 @@ class ConfirmDialog(QDialog):
             anim.setEndValue(0.0)
             def on_finished():
                 try:
+                    # 先淡出对话框，再淡出覆盖层
+                    self.overlay.fade_out(duration)
                     self._is_fading = False
                     super(ConfirmDialog, self).accept()
                 except Exception:
@@ -2150,6 +2233,7 @@ class ConfirmDialog(QDialog):
             self._fade_anim = anim
             anim.start()
         except Exception:
+            self.overlay.fade_out(duration)
             super(ConfirmDialog, self).accept()
 
     def fade_out_and_reject(self, duration=180):
@@ -2163,6 +2247,8 @@ class ConfirmDialog(QDialog):
             anim.setEndValue(0.0)
             def on_finished():
                 try:
+                    # 先淡出对话框，再淡出覆盖层
+                    self.overlay.fade_out(duration)
                     self._is_fading = False
                     super(ConfirmDialog, self).reject()
                 except Exception:
@@ -2171,6 +2257,7 @@ class ConfirmDialog(QDialog):
             self._fade_anim = anim
             anim.start()
         except Exception:
+            self.overlay.fade_out(duration)
             super(ConfirmDialog, self).reject()
 
     def keyPressEvent(self, event):
@@ -2259,11 +2346,15 @@ class LoadingDialog(QDialog):
             pass
         self._fade_anim = None
         self._is_fading = False
+        
+        # 创建覆盖层
+        self.overlay = Overlay(self)
+        
         self.init_ui()
 
     def init_ui(self):
         # 使样式与 ConfirmDialog 对齐
-        self.setStyleSheet(DIALOGQSS)
+        self.setStyleSheet(get_dialog_qss(self.scale_factor))
         layout = QVBoxLayout()
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
@@ -2296,12 +2387,39 @@ class LoadingDialog(QDialog):
         except Exception:
             pass
         super().showEvent(event)
+        # 确保对话框在覆盖层之上并获取焦点
+        try:
+            try:
+                self.overlay.show()
+                SetWindowPos(int(self.overlay.winId()), HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
+            except Exception:
+                pass
+            try:
+                SetWindowPos(int(self.winId()), HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
+                SetForegroundWindow(int(self.winId()))
+            except Exception:
+                try:
+                    self.raise_()
+                    self.activateWindow()
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def fade_in(self, duration=180):
         try:
             if self._is_fading:
                 return
             self._is_fading = True
+            
+            # 先淡入覆盖层
+            self.overlay.fade_in(duration)
+            
+            # 显示对话框并确保在覆盖层之上
+            self.show()
+            self.raise_()
+            
+            # 再淡入对话框
             anim = QPropertyAnimation(self, b"windowOpacity")
             anim.setDuration(duration)
             anim.setStartValue(0.0)
@@ -2331,6 +2449,8 @@ class LoadingDialog(QDialog):
             anim.setEndValue(0.0)
             def on_finished():
                 try:
+                    # 先淡出对话框，再淡出覆盖层
+                    self.overlay.fade_out(duration)
                     self._is_fading = False
                     try:
                         QApplication.restoreOverrideCursor()
@@ -2344,6 +2464,8 @@ class LoadingDialog(QDialog):
             anim.start()
         except Exception:
             try:
+                # 淡出覆盖层
+                self.overlay.fade_out(duration)
                 QApplication.restoreOverrideCursor()
             except Exception:
                 pass
@@ -2454,8 +2576,8 @@ class LaunchOverlay(QWidget):
         self.overlay_text = QLabel(self)
         self.overlay_text.setAlignment(Qt.AlignCenter)
         # 改进文字样式：更大字体、文字阴影、更好的字体
-        self.overlay_text.setStyleSheet("""
-            font-size: 42px; 
+        self.overlay_text.setStyleSheet(f"""
+            font-size: {int(42 * self.parent.scale_factor)}px; 
             color: #EEEEEE; 
             background: transparent;
         """)
@@ -2502,13 +2624,13 @@ class LaunchOverlay(QWidget):
         self.overlay_status = QLabel(self)
         self.overlay_status.setAlignment(Qt.AlignRight | Qt.AlignBottom)
         # 改进状态标签样式：半透明背景、圆角、阴影
-        self.overlay_status.setStyleSheet("""
-            font-size: 18px; 
+        self.overlay_status.setStyleSheet(f"""
+            font-size: {int(18 * self.parent.scale_factor)}px; 
             font-weight: 500;
             color: #E0E0E0; 
             background-color: rgba(20, 20, 20, 0.7);
-            border-radius: 8px;
-            padding: 12px 16px;
+            border-radius: {int(8 * self.parent.scale_factor)}px;
+            padding: {int(12 * self.parent.scale_factor)}px {int(16 * self.parent.scale_factor)}px;
         """)
         # 添加状态标签阴影
         status_shadow = QtWidgets.QGraphicsDropShadowEffect(self.overlay_status)
@@ -4021,7 +4143,7 @@ class GameSelector(QWidget):
             try:
                 if proc.info['name'] and proc.info['name'].lower() == 'maobackup.exe':
                     # 弹窗询问是否关闭
-                    self.confirm_dialog = ConfirmDialog("maobackup已经启动，是否要关闭？")
+                    self.confirm_dialog = ConfirmDialog("maobackup已经启动，是否要关闭？", scale_factor=self.scale_factor)
                     result = self.confirm_dialog.exec_()
                     if result == QDialog.Accepted:
                         proc.terminate()
@@ -4045,7 +4167,7 @@ class GameSelector(QWidget):
                     try:
                         msg = json.loads(line.decode(errors='ignore'))
                         if msg.get("type") in ("error", "info", "warning"):
-                            self.confirm_dialog = ConfirmDialog("※"+msg.get("message", ""))
+                            self.confirm_dialog = ConfirmDialog("※"+msg.get("message", ""), scale_factor=self.scale_factor)
                             result = self.confirm_dialog.exec_()
                         elif msg.get("type") == "confirm":
                             self.confirm_dialog = ConfirmDialog("※"+msg.get("message", ""))
@@ -4063,7 +4185,7 @@ class GameSelector(QWidget):
             process.finished.connect(handle_finished)
             process.start()
         else:
-            self.confirm_dialog = ConfirmDialog("未找到maobackup.exe").exec_()
+            self.confirm_dialog = ConfirmDialog("未找到maobackup.exe", scale_factor=self.scale_factor).exec_()
     def deep_reload_games(self):
         """深度刷新游戏库：重新读取apps.json并刷新界面"""
         load_apps()  # 重新加载有效应用列表
@@ -5611,7 +5733,7 @@ class GameSelector(QWidget):
             return
         if self.player:
             # 创建确认弹窗
-            self.confirm_dialog = ConfirmDialog("已经打开了一个游戏，还要再打开一个吗？")
+            self.confirm_dialog = ConfirmDialog("已经打开了一个游戏，还要再打开一个吗？", scale_factor=self.scale_factor)
             result = self.confirm_dialog.exec_()  # 显示弹窗并获取结果
             self.ignore_input_until = pygame.time.get_ticks() + 350  # 设置屏蔽时间为800毫秒
             if not result == QDialog.Accepted:  # 如果按钮没被点击
@@ -5667,7 +5789,7 @@ class GameSelector(QWidget):
             if not any(app["name"] == game["name"] for app in valid_apps):
                 print(f"未在 valid_apps 中找到 {game['name']}")
                 # 创建确认弹窗
-                self.confirm_dialog = ConfirmDialog("该游戏未绑定进程\n点击确定后将打开自定义进程页面")
+                self.confirm_dialog = ConfirmDialog("该游戏未绑定进程\n点击确定后将打开自定义进程页面", scale_factor=self.scale_factor)
                 result = self.confirm_dialog.exec_()  # 显示弹窗并获取结果
                 self.ignore_input_until = pygame.time.get_ticks() + 350  # 设置屏蔽时间为800毫秒
                 if result == QDialog.Accepted:  # 如果按钮被点击
@@ -6231,7 +6353,7 @@ class GameSelector(QWidget):
         #删除逻辑
         if game_name in self.player:
             # 创建确认弹窗
-            self.confirm_dialog = ConfirmDialog(f"是否关闭下列程序？\n{game_name}")
+            self.confirm_dialog = ConfirmDialog(f"是否关闭下列程序？\n{game_name}", scale_factor=self.scale_factor)
             result = self.confirm_dialog.exec_()  # 显示弹窗并获取结果
             self.ignore_input_until = pygame.time.get_ticks()
             if not result == QDialog.Accepted:  # 如果按钮没被点击
@@ -7867,7 +7989,7 @@ class FloatingWindow(QWidget):
         if current_file["name"] in self.current_running_apps:
             # 创建确认弹窗
             if not self.parent().is_mouse_simulation_running == True:
-                self.confirm_dialog = ConfirmDialog(f"是否关闭下列程序？\n{current_file['name']}")
+                self.confirm_dialog = ConfirmDialog(f"是否关闭下列程序？\n{current_file['name']}", scale_factor=self.scale_factor)
                 result = self.confirm_dialog.exec_()  # 显示弹窗并获取结果
                 self.ignore_input_until = pygame.time.get_ticks() + 350  # 设置屏蔽时间为800毫秒
             else:
