@@ -3242,8 +3242,6 @@ class QuickStreamAppAddThread(QThread):
             print(f"QuickStreamAppAddThread error: {e}")
         self.finished_signal.emit()
 
-
-
 class GameSelector(QWidget): 
     def __init__(self):
         global play_reload, GSHWND
@@ -3575,6 +3573,12 @@ class GameSelector(QWidget):
 
         # 初始化时隐藏悬浮窗
         self.control_buttons = []
+        # 初始化后台任务相关变量
+        self.background_windows = []  # 存储后台窗口信息
+        self.background_app_index = 0  # 后台应用的当前显示起始索引
+        self.show_background_apps = False  # 是否显示全部后台应用
+        self.texta_layout = None  # 保存对 texta_layout 的引用
+        self.extra_buttons_container = None  # 额外按钮容器
         # 初始化 control_layout
         self.control_layout = QHBoxLayout()
         self.control_layout.setSpacing(int(50 * self.scale_factor))  # 设置按钮之间的间距
@@ -3596,6 +3600,7 @@ class GameSelector(QWidget):
         main_layout.addLayout(centered_layout)
         main_layout.setSpacing(0)  # 设置主布局的间距为0
         # 创建7个圆形按钮
+        self.control_button_modes = {}  # 存储每个按钮的当前模式
         for i in range(7):
             btn = QPushButton()
             btn.setFixedSize(int(125 * self.scale_factor), int(125 * self.scale_factor))
@@ -3611,30 +3616,30 @@ class GameSelector(QWidget):
                     border: {int(6 * self.scale_factor)}px solid #ffff00;
                 }}
             """)
-            if i == 0:
-                btn.setText("🔉")
-                btn.clicked.connect(self.decrease_volume)
-            elif i == 1:
-                btn.setText("🔊")
-                btn.clicked.connect(self.increase_volume)
-            elif i == 2:
-                btn.setText("🔇")
-                btn.clicked.connect(self.toggle_mute)
+            if i == 0 or i == 1 or i == 2:
+                # 前3个按钮为后台任务切换按钮
+                self.control_button_modes[i] = 'background'
+                # 使用默认参数避免闭包问题
+                btn.clicked.connect(lambda checked=False, idx=i: self.on_background_button_clicked(idx))
             elif i == 3:
+                self.control_button_modes[i] = 'mouse'
                 btn.setText("🖱️")
                 btn.clicked.connect(lambda checked=False: (self.hide_window(), self.mouse_simulation()))
             elif i == 4:
+                self.control_button_modes[i] = 'image'
                 btn.setText("🗺️")
                 btn.clicked.connect(self.show_img_window)
             elif i == 5:
+                self.control_button_modes[i] = 'sleep'
                 btn.setText("💤")
                 btn.clicked.connect(self.sleep_system)
             elif i == 6:
+                self.control_button_modes[i] = 'shutdown'
                 btn.setText("🔌")
                 btn.clicked.connect(self.shutdown_system)
             self.control_buttons.append(btn)
             self.control_layout.addWidget(btn)
-
+        
         # 将控制区域添加到主布局
         main_layout.addLayout(self.control_layout)
         # 创建分割线和文字布局
@@ -3674,13 +3679,16 @@ class GameSelector(QWidget):
             }}
         """)
         texta_layout.addWidget(self.left_label, alignment=Qt.AlignLeft)
+        # 保存对 texta_layout 的引用，用于添加额外的后台应用按钮
+        self.texta_layout = texta_layout
+        self.extra_buttons_container = None
         # 连接手柄连接信号到槽函数
         self.controller_thread.controller_connected_signal.connect(self.update_controller_status)
         for controller_data in self.controller_thread.controllers.values():
             controller_name = controller_data['controller'].get_name()
             self.update_controller_status(controller_name)
         # 右侧文字
-        self.right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.95.3")
+        self.right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.95.4")
         self.right_label.setStyleSheet(f"""
             QLabel {{
                 font-family: "Microsoft YaHei"; 
@@ -3942,6 +3950,11 @@ class GameSelector(QWidget):
         self._kb_last_y_pressed = [False, False]
         self._kb_last_fkey_move_time = 0
         self._kb_ignore_start_until = 0
+        
+        # 初始化后台窗口信息并更新按钮
+        # 注意：必须在所有UI组件创建完成后调用
+        self.update_background_windows()
+        self.update_background_buttons()
         # ==============================
 
     def wintaskbarshow(self):
@@ -5254,7 +5267,7 @@ class GameSelector(QWidget):
                             font-size: {int(16 * self.scale_factor)}px;
                         }}
                         QPushButton:hover {{
-                            border: {int(2 * self.scale_factor)}px solid #555555;
+                            border: 0px solid transparent;
                         }}
                     """)
                 else:
@@ -5373,7 +5386,11 @@ class GameSelector(QWidget):
                         border: {int(2 * self.scale_factor)}px solid #888888;
                     }}
                 """)
+            # 如果离开控制按钮区域，则隐藏任何残留的控制按钮标签
+            self._hide_control_button_labels()
         elif self.current_section == 1:  # 控制按钮区域
+            # 先隐藏旧标签一次，避免在循环中被多次删除/覆盖
+            self._hide_control_button_labels()
             for index, btn in enumerate(self.control_buttons):
                 if index == self.current_index:
                     btn.setStyleSheet(f"""
@@ -5387,6 +5404,8 @@ class GameSelector(QWidget):
                             border: {int(4 * self.scale_factor)}px solid #25ade7;
                         }}
                     """)
+                    # 只为选中按钮显示标签（前3个显示窗口名，其余显示固定中文名）
+                    self._show_control_button_label(btn, index)
                 else:
                     btn.setStyleSheet(f"""
                         QPushButton {{
@@ -5633,6 +5652,430 @@ class GameSelector(QWidget):
         # 更新索引并高亮
         self.current_index = new_index
         self.update_highlight()
+    
+    # ===== 控制按钮标签显示方法 =====
+    def _show_control_button_label(self, btn, index):
+        """在控制按钮下方显示文字标签"""
+        # 支持两类标签：
+        # - index < 3: 使用 btn.window_info['title']（若存在）
+        # - index >=3: 使用固定中文名称映射
+        labels_map = {
+            3: '鼠标模拟',
+            4: '显示地图',
+            5: '系统休眠',
+            6: '系统关机'
+        }
+
+        title = ''
+        if index < 3 and hasattr(btn, 'window_info') and btn.window_info:
+            title = btn.window_info.get('title', '')
+        if not title:
+            title = labels_map.get(index, '')
+        if not title:
+            return
+
+        if len(title) > 15:
+            title = title[:15] + '...'
+
+        # 先隐藏旧标签（淡出）
+        self._hide_control_button_labels()
+
+        # 创建并样式化标签
+        label = QLabel(title, self)
+        label.setAlignment(Qt.AlignCenter)
+        # 使用与 game_name_label 相同的样式：白色、大号字体
+        label.setStyleSheet(f"""
+            QLabel {{
+                font-family: "Microsoft YaHei";
+                color: white;
+                font-size: {int(16 * self.scale_factor * 1.5)}px;
+                background: transparent;
+            }}
+        """)
+
+        # 计算位置并显示在按钮下方居中
+        try:
+            btn_pos = btn.mapToGlobal(QPoint(0, 0))
+            btn_size = btn.size()
+        except Exception:
+            btn_pos = QPoint(0, 0)
+            btn_size = btn.size() if hasattr(btn, 'size') else QSize(0, 0)
+
+        label.adjustSize()
+        label_x = btn_pos.x() + (btn_size.width() - label.width()) // 2
+        label_y = btn_pos.y() + btn_size.height() + int(10 * self.scale_factor)
+        label.move(label_x, label_y)
+
+        # 淡入动画
+        try:
+            eff = QtWidgets.QGraphicsOpacityEffect(label)
+            label.setGraphicsEffect(eff)
+            eff.setOpacity(0.0)
+            fade_in = QPropertyAnimation(eff, b"opacity")
+            fade_in.setDuration(180)
+            fade_in.setStartValue(0.0)
+            fade_in.setEndValue(1.0)
+            if not hasattr(self, '_label_fade_anims'):
+                self._label_fade_anims = []
+            self._label_fade_anims.append(fade_in)
+            fade_in.start()
+        except Exception:
+            pass
+
+        label.show()
+        self._current_control_button_label = label
+    
+    def _hide_control_button_labels(self):
+        """隐藏所有控制按钮标签"""
+        if hasattr(self, '_current_control_button_label') and self._current_control_button_label:
+            try:
+                old_label = self._current_control_button_label
+                try:
+                    eff_old = old_label.graphicsEffect()
+                    if not isinstance(eff_old, QtWidgets.QGraphicsOpacityEffect):
+                        eff_old = None
+                except Exception:
+                    eff_old = None
+                if eff_old is None:
+                    try:
+                        eff_old = QtWidgets.QGraphicsOpacityEffect(old_label)
+                        old_label.setGraphicsEffect(eff_old)
+                    except Exception:
+                        eff_old = None
+                if eff_old is not None:
+                    fade_out = QPropertyAnimation(eff_old, b"opacity")
+                    fade_out.setDuration(180)
+                    fade_out.setStartValue(1.0)
+                    fade_out.setEndValue(0.0)
+                    def _del_old():
+                        try:
+                            old_label.deleteLater()
+                        except Exception:
+                            pass
+                    fade_out.finished.connect(_del_old)
+                    if not hasattr(self, '_label_fade_anims'):
+                        self._label_fade_anims = []
+                    self._label_fade_anims.append(fade_out)
+                    fade_out.start()
+                else:
+                    try:
+                        old_label.deleteLater()
+                    except Exception:
+                        pass
+            except RuntimeError:
+                pass
+            self._current_control_button_label = None
+    
+    # ===== 后台任务切换相关方法 =====
+    def get_running_windows(self):
+        """获取所有正在运行的窗口列表，排除系统窗口"""
+        windows = []
+        def enum_window_callback(hwnd, lParam):
+            if win32gui.IsWindowVisible(hwnd):
+                title = win32gui.GetWindowText(hwnd)
+                # 过滤掉标题为空或系统窗口
+                if title and title.strip():
+                    try:
+                        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                        process = psutil.Process(pid)
+                        exe_path = process.exe()
+                        exe_name = os.path.basename(exe_path)
+                        # 过滤掉系统进程
+                        if exe_name.lower() not in ['explorer.exe', 'svchost.exe', 'csrss.exe', 'dwm.exe']:
+                            windows.append({
+                                'hwnd': hwnd,
+                                'title': title,
+                                'pid': pid,
+                                'exe_path': exe_path,
+                                'exe_name': exe_name
+                            })
+                    except Exception:
+                        pass
+            return True
+        
+        win32gui.EnumWindows(enum_window_callback, None)
+        return windows
+    
+    def get_window_icon(self, exe_path, size=40):
+        """从可执行文件获取图标"""
+        icon = QIcon()
+        try:
+            from icoextract import IconExtractor
+            extractor = IconExtractor(exe_path)
+            bio = extractor.get_icon(num=0)
+            data = bio.getvalue()
+            pix = QPixmap()
+            if pix.loadFromData(data):
+                pix = pix.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                icon = QIcon(pix)
+                return icon
+        except Exception:
+            pass
+        
+        # 尝试使用系统默认方式获取图标
+        try:
+            # 尝试从应用本身获取图标（通过文件管理器API）
+            from PIL import Image
+            import io
+            
+            # 使用 Windows 图标缓存
+            result = ctypes.windll.shell32.ExtractIconW(None, exe_path, 0)
+            if result:
+                # 将句柄转换为 QPixmap（这比较复杂，通常不推荐）
+                return QIcon()
+        except Exception:
+            pass
+        
+        return icon
+    
+    def update_background_windows(self):
+        """更新后台窗口列表"""
+        self.background_windows = self.get_running_windows()
+    
+    def update_background_buttons(self):
+        """更新前3个按钮的显示，显示后台应用程序图标"""
+        self.update_background_windows()
+        
+        # 显示前3个后台应用图标
+        for i in range(3):
+            btn = self.control_buttons[i]
+            if i < len(self.background_windows):
+                window_info = self.background_windows[i]
+                # 不设置文本，仅保存窗口信息
+                btn.setText('')  # 清空文本
+                
+                # 尝试设置图标
+                icon = self.get_window_icon(window_info['exe_path'], size=int(50 * self.scale_factor))
+                if icon:
+                    btn.setIcon(icon)
+                    btn.setIconSize(QSize(int(50 * self.scale_factor), int(50 * self.scale_factor)))
+                
+                # 保存窗口信息到按钮（用于点击时调用）
+                btn.window_info = window_info
+                btn.setVisible(True)
+            else:
+                btn.setText('')
+                btn.setIcon(QIcon())
+                btn.window_info = None
+                btn.setVisible(True)
+        
+        # 如果有超过3个后台应用，添加额外按钮容器
+        if len(self.background_windows) > 3:
+            self.create_extra_background_buttons()
+    
+    def on_background_button_clicked(self, button_index):
+        """处理后台任务按钮点击事件"""
+        btn = self.control_buttons[button_index]
+        if hasattr(btn, 'window_info') and btn.window_info:
+            window_info = btn.window_info
+            hwnd = window_info['hwnd']
+            # 恢复窗口
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            win32gui.SetForegroundWindow(hwnd)
+            self.hide_window()
+    
+    def create_extra_background_buttons(self):
+        """为超过3个的后台应用在 left_label 后面创建按钮"""
+        # 确保texta_layout和left_label已经初始化
+        if not hasattr(self, 'texta_layout') or not self.texta_layout or not hasattr(self, 'left_label') or not self.left_label:
+            return
+        
+        # 如果少于等于3个应用，不需要额外按钮
+        if len(self.background_windows) <= 3:
+            # 移除所有额外按钮
+            # 首先检查当前布局中是否已经有额外按钮
+            current_extra_buttons = []
+            for i in range(self.texta_layout.count()):
+                widget = self.texta_layout.itemAt(i).widget()
+                if widget and widget != self.left_label and widget != self.right_label:
+                    current_extra_buttons.append(widget)
+            
+            # 移除所有当前的额外按钮
+            for widget in current_extra_buttons:
+                try:
+                    self.texta_layout.removeWidget(widget)
+                    widget.deleteLater()
+                except Exception as e:
+                    print(f"Error removing extra buttons: {e}")
+            
+            # 更新布局
+            self.texta_layout.update()
+            if self.texta_layout.parentWidget():
+                self.texta_layout.parentWidget().update()
+            return
+        
+        # 移除旧的额外按钮
+        current_extra_buttons = []
+        for i in range(self.texta_layout.count()):
+            widget = self.texta_layout.itemAt(i).widget()
+            if widget and widget != self.left_label and widget != self.right_label:
+                current_extra_buttons.append(widget)
+        
+        # 移除所有当前的额外按钮
+        for widget in current_extra_buttons:
+            try:
+                self.texta_layout.removeWidget(widget)
+                widget.deleteLater()
+            except Exception as e:
+                print(f"Error removing old extra buttons: {e}")
+        
+        # 为超过3个的应用添加一个大按钮
+        if len(self.background_windows) > 3:
+            # 获取所有额外应用的图标（放大一倍）
+            extra_icons = []
+            for i in range(3, len(self.background_windows)):
+                window_info = self.background_windows[i]
+                icon = self.get_window_icon(window_info['exe_path'], size=int(36 * self.scale_factor))  # 放大一倍图标
+                if icon:
+                    extra_icons.append(icon.pixmap(QSize(int(36 * self.scale_factor), int(36 * self.scale_factor))))
+            
+            btn = QPushButton()
+            # 计算长条形按钮尺寸（放大一倍）
+            icon_size = int(16 * self.scale_factor) 
+            spacing = int(6 * self.scale_factor)    # 增加间距
+            btn_width = len(extra_icons) * icon_size + (len(extra_icons) - 1) * spacing + int(48
+             * self.scale_factor)
+            btn_height = int(60 * self.scale_factor)  
+            btn.setFixedSize(btn_width, btn_height)
+
+            
+            # 设置样式
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: #1e1e1e;
+                    border-radius: {int(8 * self.scale_factor)}px;
+                    border: 0px solid transparent;
+                    margin-left: 0px;
+                    margin-right: {int(10 * self.scale_factor)}px;
+                    text-align: left;
+                    padding-left: {int(12 * self.scale_factor)}px;
+                    padding-right: {int(12 * self.scale_factor)}px;
+                }}
+                QPushButton:hover {{
+                    background-color: #2e2e2e;
+                    border: {int(2 * self.scale_factor)}px solid #555555;
+                }}
+            """)
+            
+            # 创建合成图标
+            if extra_icons:
+                # 计算合成图标大小（放大一倍）
+                max_cols = len(extra_icons)  # 只显示一排
+                num_icons = len(extra_icons)
+                
+                icon_size = int(36 * self.scale_factor)
+                spacing = int(6 * self.scale_factor)
+                composite_size = QSize(
+                    num_icons * icon_size + (num_icons - 1) * spacing,
+                    icon_size
+                )
+                
+                # 创建合成图像
+                composite_pixmap = QPixmap(composite_size)
+                composite_pixmap.fill(Qt.transparent)  # 设置背景透明
+                
+                painter = QPainter(composite_pixmap)
+                
+                # 绘制所有图标（只显示一排，放大一倍）
+                for i, pixmap in enumerate(extra_icons):
+                    x = i * (icon_size + spacing)
+                    y = 0
+                    painter.drawPixmap(x, y, pixmap)
+                
+                painter.end()
+                
+                # 设置合成图标到按钮
+                btn.setIcon(QIcon(composite_pixmap))
+                btn.setIconSize(composite_size)
+            else:
+                # 如果没有图标，显示额外应用的数量
+                extra_apps_count = len(self.background_windows) - 3
+                # 调整按钮宽度以适应文本（放大一倍）
+                btn_width = int(80 * self.scale_factor) + len(str(extra_apps_count)) * int(24 * self.scale_factor)
+                btn_height = int(60 * self.scale_factor)
+                btn.setFixedSize(btn_width, btn_height)
+                btn.setText(f"+{extra_apps_count}")
+                btn.setStyleSheet(btn.styleSheet() + f"font-size: {int(36 * self.scale_factor)}px;")
+            # 点击额外按钮时，切换所有按钮到后台任务模式
+            btn.clicked.connect(self.switch_all_buttons_to_background_mode)
+            
+            # 直接添加到texta_layout中，位于left_label之后，设置靠左对齐并设置固定宽度
+            left_label_index = self.texta_layout.indexOf(self.left_label)
+            if left_label_index >= 0:
+                # 先移除右侧标签
+                right_label_index = self.texta_layout.indexOf(self.right_label)
+                if right_label_index >= 0:
+                    self.texta_layout.takeAt(right_label_index)
+                
+                # 添加按钮
+                self.texta_layout.insertWidget(left_label_index + 1, btn, alignment=Qt.AlignLeft)
+                
+                # 添加一个伸缩空间
+                self.texta_layout.addStretch()
+                
+                # 重新添加右侧标签
+                self.texta_layout.addWidget(self.right_label, alignment=Qt.AlignRight)
+        
+        # 更新布局
+        self.texta_layout.update()
+        if self.texta_layout.parentWidget():
+            self.texta_layout.parentWidget().update()
+    
+    def switch_all_buttons_to_background_mode(self):
+        """将所有按钮切换为后台任务模式"""
+        # 重新获取后台窗口列表
+        self.update_background_windows()
+        
+        # 清除所有点击事件并重新配置
+        # 使用后台任务数来确定需要切换的按钮数量
+        for i in range(min(len(self.background_windows), len(self.control_buttons))):
+            btn = self.control_buttons[i]
+            # 断开旧信号
+            try:
+                btn.clicked.disconnect()
+            except TypeError:
+                pass
+            
+            if i < len(self.background_windows):
+                window_info = self.background_windows[i]
+                title = window_info['title']
+                if len(title) > 10:
+                    title = title[:10] + '...'
+                btn.setText(title)
+                
+                icon = self.get_window_icon(window_info['exe_path'], size=int(50 * self.scale_factor))
+                if icon:
+                    btn.setIcon(icon)
+                    btn.setIconSize(QSize(int(50 * self.scale_factor), int(50 * self.scale_factor)))
+                
+                btn.window_info = window_info
+                btn.clicked.connect(lambda checked=False, info=window_info: self.restore_background_window(info))
+                btn.setVisible(True)
+            else:
+                btn.setText('')
+                btn.setIcon(QIcon())
+                btn.window_info = None
+                btn.setVisible(True)
+        
+        # 隐藏多余的按钮
+        for i in range(len(self.background_windows), len(self.control_buttons)):
+            if i < len(self.control_buttons):
+                btn = self.control_buttons[i]
+                btn.setText('')
+                btn.setIcon(QIcon())
+                btn.window_info = None
+                btn.setVisible(True)
+    
+    def restore_background_window(self, window_info):
+        """恢复后台窗口"""
+        hwnd = window_info['hwnd']
+        try:
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            win32gui.SetForegroundWindow(hwnd)
+        except Exception:
+            pass
+        self.hide_window()
+
     # 焦点检测
     def gsfocus(self):
         # 获取当前活动窗口句柄
