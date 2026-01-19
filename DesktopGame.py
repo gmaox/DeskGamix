@@ -856,61 +856,198 @@ class ScreenshotWindow(QDialog):
                 self.qsaa_thread.finished_signal.connect(self.parent().deep_reload_games)
             self.qsaa_thread.start()
         def on_rename_clicked():
-            # 弹出输入框让用户输入新名称
+            # 自定义重命名对话框，支持“使用存档游戏名称”按钮
             old_name = self.game_name_label.text()
-            new_name, ok = QtWidgets.QInputDialog.getText(
-                self,
-                "重命名游戏",
-                '<span style="color:white;">请输入新的游戏名称：</span>',
-                QLineEdit.Normal,
-                old_name
-            )
-            
-            if ok and new_name and new_name != old_name:
-                # 直接修改 apps.json
-                json_path = f"{APP_INSTALL_PATH}\\config\\apps.json"
-                try:
-                    with open(json_path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    changed = False
-                    for app in data.get("apps", []):
-                        if app.get("name") == old_name:
-                            app["name"] = new_name
-                            changed = True
-                    if changed:
-                        with open(json_path, "w", encoding="utf-8") as f:
-                            json.dump(data, f, indent=4, ensure_ascii=False)
-                    else:
-                        QMessageBox.warning(self, "提示", "未找到要重命名的游戏")
-                except Exception as e:
-                    QMessageBox.warning(self, "提示", f"重命名失败：{e}")
-                    return
+            dialog = QtWidgets.QDialog(self)
+            dialog.setWindowTitle("重命名游戏")
+            dialog.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
+            vbox = QtWidgets.QVBoxLayout(dialog)
+            prompt = QLabel('<span style="color:white;">请输入新的游戏名称：</span>')
+            prompt.setTextFormat(Qt.RichText)
+            # 放大一倍的字体大小并设为白色
+            large_font_px = int(40 * self.scale_factor)
+            prompt.setStyleSheet(f"color: white; font-size: {large_font_px}px;")
+            vbox.addWidget(prompt)
+            edit = QLineEdit(old_name)
+            edit.setStyleSheet(f"color: white; font-size: {large_font_px}px; background-color: #333333; border: 1px solid #555555; padding: 8px;")
+            edit.setFixedHeight(int(BTN_HEIGHT))
+            vbox.addWidget(edit)
+            hbox = QtWidgets.QHBoxLayout()
+            use_btn = QPushButton("使用存档游戏名称")
+            ok_btn = QPushButton("确定")
+            cancel_btn = QPushButton("取消")
+            btn_h = int(BTN_HEIGHT)
+            btn_style_big = f"background-color: #444444; color: white; font-size: {large_font_px}px; padding: {int(12 * self.scale_factor)}px; border: none; border-radius: 8px;"
+            use_btn.setStyleSheet(btn_style_big)
+            ok_btn.setStyleSheet(btn_style_big)
+            cancel_btn.setStyleSheet(btn_style_big)
+            use_btn.setFixedHeight(btn_h)
+            ok_btn.setFixedHeight(btn_h)
+            cancel_btn.setFixedHeight(btn_h)
+            hbox.addWidget(use_btn)
+            hbox.addStretch(1)
+            hbox.addWidget(ok_btn)
+            hbox.addWidget(cancel_btn)
+            vbox.addLayout(hbox)
 
-                # 替换 set.json 中所有 old_name
+            def use_save_name():
+                config_path = os.path.join(program_directory, "webdav_config.json")
+                if not os.path.exists(config_path):
+                    QMessageBox.warning(dialog, "提示", "未找到 webdav_config.json")
+                    return
                 try:
-                    set_path = "set.json"
-                    if os.path.exists(set_path):
-                        with open(set_path, "r", encoding="utf-8") as f:
-                            set_data = json.load(f)
-                        def replace_name(obj):
-                            if isinstance(obj, list):
-                                return [replace_name(x) for x in obj]
-                            elif isinstance(obj, dict):
-                                return {k: replace_name(v) for k, v in obj.items()}
-                            elif isinstance(obj, str):
-                                return new_name if obj == old_name else obj
-                            else:
-                                return obj
-                        set_data = replace_name(set_data)
-                        with open(set_path, "w", encoding="utf-8") as f:
-                            json.dump(set_data, f, indent=4, ensure_ascii=False)
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        cfg = json.load(f)
+                    names = [g.get("name") for g in cfg.get("games", []) if isinstance(g, dict) and g.get("name")]
                 except Exception as e:
-                    QMessageBox.warning(self, "提示", f"set.json替换失败：{e}")
-                # 刷新游戏列表
-                if self.parent() and hasattr(self.parent(), "deep_reload_games"):
-                    self.parent().deep_reload_games()
-                # 关闭窗口
-                self.close()
+                    QMessageBox.warning(dialog, "提示", f"读取配置失败：{e}")
+                    return
+                if not names:
+                    QMessageBox.warning(dialog, "提示", "配置文件中未找到游戏名称")
+                    return
+                # 使用自定义列表对话框以支持键盘/触屏操作
+                select_dlg = QtWidgets.QDialog(dialog)
+                select_dlg.setWindowTitle("选择存档游戏名称")
+                select_dlg.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
+                # 统一外观样式，圆角半透明背景
+                select_dlg.setStyleSheet("""
+                    QDialog { background-color: rgba(46,46,46,0.98); border-radius: 12px; border: 2px solid #444444; }
+                """)
+                select_layout = QtWidgets.QVBoxLayout(select_dlg)
+                select_layout.setContentsMargins(16, 12, 16, 12)
+                select_layout.setSpacing(12)
+
+                list_widget = QtWidgets.QListWidget(select_dlg)
+                list_widget.setFrameShape(QtWidgets.QFrame.NoFrame)
+                list_widget.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
+                list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+                list_widget.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+                list_widget.setSpacing(int(8 * self.scale_factor))
+                list_widget.setStyleSheet(f"""
+                    QListWidget {{ color: white; background-color: #2b2b2b; border-radius: 8px; padding: 8px; }}
+                    QListWidget::item {{ padding: 12px; }}
+                    QListWidget::item:selected {{ background-color: #93ffff; color: #222; border-radius: 6px; }}
+                    QScrollBar:vertical {{ background: transparent; width: 14px; margin: 0px 0px 0px 0px; }}
+                    QScrollBar::handle:vertical {{ background: #555; border-radius: 7px; min-height: 20px; }}
+                    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
+                """)
+                # 填充列表项并调整每项高度以便可读
+                item_h = int( (large_font_px * 1.6) )
+                for name in names:
+                    it = QtWidgets.QListWidgetItem(name)
+                    it.setSizeHint(QSize(0, item_h))
+                    list_widget.addItem(it)
+                list_widget.setCurrentRow(0)
+                select_layout.addWidget(list_widget)
+
+                # 按钮区域：居中显示
+                btn_h_small = int(BTN_HEIGHT * 1.2)
+                btn_ok2 = QPushButton("确定", select_dlg)
+                btn_cancel2 = QPushButton("取消", select_dlg)
+                btn_ok2.setFixedHeight(btn_h_small)
+                btn_cancel2.setFixedHeight(btn_h_small)
+                btn_ok2.setStyleSheet(f"background-color: #444444; color: white; font-size: {int(24 * self.scale_factor)}px; border: none; border-radius: 8px;")
+                btn_cancel2.setStyleSheet(f"background-color: #444444; color: white; font-size: {int(24 * self.scale_factor)}px; border: none; border-radius: 8px;")
+                h2 = QtWidgets.QHBoxLayout()
+                h2.setSpacing(int(12 * self.scale_factor))
+                btn_ok2.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+                btn_cancel2.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+                h2.addWidget(btn_ok2, 1)
+                h2.addWidget(btn_cancel2, 1)
+                select_layout.addLayout(h2)
+
+                # 支持触屏拖动滚动（若可用）
+                try:
+                    QScroller.grabGesture(list_widget.viewport(), QScroller.LeftMouseButtonGesture)
+                except Exception:
+                    pass
+
+                # 回车选择、双击选择
+                def on_accept():
+                    cur = list_widget.currentItem()
+                    if cur:
+                        edit.setText(cur.text())
+                    select_dlg.accept()
+                def on_reject():
+                    select_dlg.reject()
+                btn_ok2.clicked.connect(on_accept)
+                btn_cancel2.clicked.connect(on_reject)
+                list_widget.itemDoubleClicked.connect(lambda it: (edit.setText(it.text()), select_dlg.accept()))
+
+                # 键盘事件：Enter 接受, Esc 取消
+                def list_key_event(event):
+                    if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                        on_accept()
+                    elif event.key() == Qt.Key_Escape:
+                        on_reject()
+                    else:
+                        return QtWidgets.QListWidget.keyPressEvent(list_widget, event)
+                list_widget.keyPressEvent = list_key_event
+
+                # 限制对话框大小，以避免列表项过度拉伸
+                dlg_w = min(int(self.width() * 0.6), int(900 * self.scale_factor))
+                dlg_h = min(int(self.height() * 0.6), int(600 * self.scale_factor))
+                select_dlg.setFixedSize(dlg_w, dlg_h)
+
+                # 标记为当前活动弹窗，便于手柄事件转发
+                self.active_dialog = select_dlg
+                try:
+                    if select_dlg.exec_() == QDialog.Accepted:
+                        pass
+                finally:
+                    self.active_dialog = None
+
+            use_btn.clicked.connect(use_save_name)
+            ok_btn.clicked.connect(dialog.accept)
+            cancel_btn.clicked.connect(dialog.reject)
+
+            if dialog.exec_() == QDialog.Accepted:
+                new_name = edit.text().strip()
+                if new_name and new_name != old_name:
+                    # 直接修改 apps.json
+                    json_path = f"{APP_INSTALL_PATH}\\config\\apps.json"
+                    try:
+                        with open(json_path, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        changed = False
+                        for app in data.get("apps", []):
+                            if app.get("name") == old_name:
+                                app["name"] = new_name
+                                changed = True
+                        if changed:
+                            with open(json_path, "w", encoding="utf-8") as f:
+                                json.dump(data, f, indent=4, ensure_ascii=False)
+                        else:
+                            QMessageBox.warning(self, "提示", "未找到要重命名的游戏")
+                    except Exception as e:
+                        QMessageBox.warning(self, "提示", f"重命名失败：{e}")
+                        return
+
+                    # 替换 set.json 中所有 old_name
+                    try:
+                        set_path = "set.json"
+                        if os.path.exists(set_path):
+                            with open(set_path, "r", encoding="utf-8") as f:
+                                set_data = json.load(f)
+                            def replace_name(obj):
+                                if isinstance(obj, list):
+                                    return [replace_name(x) for x in obj]
+                                elif isinstance(obj, dict):
+                                    return {k: replace_name(v) for k, v in obj.items()}
+                                elif isinstance(obj, str):
+                                    return new_name if obj == old_name else obj
+                                else:
+                                    return obj
+                            set_data = replace_name(set_data)
+                            with open(set_path, "w", encoding="utf-8") as f:
+                                json.dump(set_data, f, indent=4, ensure_ascii=False)
+                    except Exception as e:
+                        QMessageBox.warning(self, "提示", f"set.json替换失败：{e}")
+                    # 刷新游戏列表
+                    if self.parent() and hasattr(self.parent(), "deep_reload_games"):
+                        self.parent().deep_reload_games()
+                    # 关闭窗口
+                    self.close()
         def on_open_folder_clicked():
             # 打开当前游戏的文件夹
             game_name = self.game_name_label.text()
@@ -2185,26 +2322,6 @@ class ConfirmDialog(QDialog):
         except Exception:
             pass
         self.ignore_input_until = pygame.time.get_ticks() + 350  # 打开窗口后1秒内忽略输入
-        # 确保对话框在覆盖层之上并获取焦点
-        try:
-            # 先让 overlay 显示并处于 topmost
-            try:
-                self.overlay.show()
-                SetWindowPos(int(self.overlay.winId()), HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
-            except Exception:
-                pass
-            # 再把对话框置顶到 topmost（这样会在 overlay 之上）
-            try:
-                SetWindowPos(int(self.winId()), HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
-                SetForegroundWindow(int(self.winId()))
-            except Exception:
-                try:
-                    self.raise_()
-                    self.activateWindow()
-                except Exception:
-                    pass
-        except Exception:
-            pass
 
     def fade_in(self, duration=180):
         try:
@@ -2317,7 +2434,7 @@ class ConfirmDialog(QDialog):
         elif action == 'A':
             self.buttons[self.current_index].click()
         elif action == 'B':
-            self.reject()
+            self.cancel_action()
         # 更新最后一次按键时间
         self.last_input_time = current_time
 
@@ -2405,24 +2522,6 @@ class LoadingDialog(QDialog):
         except Exception:
             pass
         super().showEvent(event)
-        # 确保对话框在覆盖层之上并获取焦点
-        try:
-            try:
-                self.overlay.show()
-                SetWindowPos(int(self.overlay.winId()), HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
-            except Exception:
-                pass
-            try:
-                SetWindowPos(int(self.winId()), HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
-                SetForegroundWindow(int(self.winId()))
-            except Exception:
-                try:
-                    self.raise_()
-                    self.activateWindow()
-                except Exception:
-                    pass
-        except Exception:
-            pass
 
     def fade_in(self, duration=180):
         try:
@@ -3680,7 +3779,7 @@ class GameSelector(QWidget):
             controller_name = controller_data['controller'].get_name()
             self.update_controller_status(controller_name)
         # 右侧文字
-        self.right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.95.3")
+        self.right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.95.4")
         self.right_label.setStyleSheet(f"""
             QLabel {{
                 font-family: "Microsoft YaHei"; 
@@ -6138,6 +6237,23 @@ class GameSelector(QWidget):
                     self.back_start_pressed_time = None
                     break
         print(f"处理手柄输入: {action}")
+        if hasattr(self, 'confirm_dialog') and self.confirm_dialog and self.confirm_dialog.isVisible():  # 如果确认弹窗显示中
+            print("确认弹窗显示中")
+            self.ignore_input_until = current_time + 500
+            self.confirm_dialog.handle_gamepad_input(action)
+            return
+        # 优先检查所有可能的 confirm_dialog，无论窗口是否可见
+        # 检查 screenshot_window 的 confirm_dialog
+        if hasattr(self, 'screenshot_window') and hasattr(self.screenshot_window, 'confirm_dialog') and self.screenshot_window.confirm_dialog and self.screenshot_window.confirm_dialog.isVisible():
+            self.screenshot_window.handle_gamepad_input(action)
+            self.ignore_input_until = pygame.time.get_ticks() + 300 
+            return
+        # 检查 floating_window 的 confirm_dialog
+        if getattr(self, 'floating_window', None) and hasattr(self.floating_window, 'confirm_dialog') and self.floating_window.confirm_dialog and self.floating_window.confirm_dialog.isVisible():
+            self.floating_window.handle_gamepad_input(action)
+            self.ignore_input_until = pygame.time.get_ticks() + 300 
+            return
+        
         if not self.gsfocus():  # 检测当前窗口是否为游戏选择界面
             if action == 'GUIDE':
                 try:
@@ -6196,28 +6312,14 @@ class GameSelector(QWidget):
             if self.launch_overlay and self.launch_overlay.isVisible():
                 self.launch_overlay.hide()
                 self.launch_overlay._stop_launch_animations()
-        if hasattr(self, 'confirm_dialog') and self.confirm_dialog.isVisible():  # 如果确认弹窗显示中
-            print("确认弹窗显示中")
-            self.ignore_input_until = current_time + 500
-            self.confirm_dialog.handle_gamepad_input(action)
-            return
+        # 正常窗口处理逻辑
         if hasattr(self, 'screenshot_window') and self.screenshot_window.isVisible():
-            # 如果 screenshot_window 有 confirm_dialog，优先转发
-            if hasattr(self.screenshot_window, 'confirm_dialog') and self.screenshot_window.confirm_dialog and self.screenshot_window.confirm_dialog.isVisible():
-                self.screenshot_window.handle_gamepad_input(action)
-                self.ignore_input_until = pygame.time.get_ticks() + 300 
-                return
             print("截图悬浮窗显示中")
             self.ignore_input_until = current_time + 200
             self.screenshot_window.handle_gamepad_input(action)
             return
         
         if getattr(self, 'floating_window', None) and self.floating_window.isVisible():
-            # 如果 floating_window 有 confirm_dialog，优先转发
-            if hasattr(self.floating_window, 'confirm_dialog') and self.floating_window.confirm_dialog and self.floating_window.confirm_dialog.isVisible():
-                self.floating_window.handle_gamepad_input(action)
-                self.ignore_input_until = pygame.time.get_ticks() + 300 
-                return
             # 添加防抖检查（方向键可绕过浮窗防抖以获得更灵敏的导航）
             if not is_direction and not self.floating_window.can_process_input():
                 return
