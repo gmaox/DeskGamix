@@ -3716,27 +3716,24 @@ class GameSelector(QWidget):
                     border: {int(6 * self.scale_factor)}px solid #ffff00;
                 }}
             """)
+            # 记录模式并统一连接到点击处理器，处理器会实现"第一次点击只聚焦，第二次执行"逻辑
             if i == 0 or i == 1 or i == 2:
                 # 前3个按钮为后台任务切换按钮
                 self.control_button_modes[i] = 'background'
-                # 使用默认参数避免闭包问题
-                btn.clicked.connect(lambda checked=False, idx=i: self.on_background_button_clicked(idx))
             elif i == 3:
                 self.control_button_modes[i] = 'mouse'
                 btn.setText("🖱️")
-                btn.clicked.connect(lambda checked=False: (self.hide_window(), self.mouse_simulation()))
             elif i == 4:
                 self.control_button_modes[i] = 'image'
                 btn.setText("🗺️")
-                btn.clicked.connect(self.show_img_window)
             elif i == 5:
                 self.control_button_modes[i] = 'sleep'
                 btn.setText("💤")
-                btn.clicked.connect(self.sleep_system)
             elif i == 6:
                 self.control_button_modes[i] = 'shutdown'
                 btn.setText("🔌")
-                btn.clicked.connect(self.shutdown_system)
+            # 统一使用本类处理器，以支持首次点击只聚焦的行为
+            btn.clicked.connect(lambda checked=False, idx=i: self.handle_control_button_click(idx))
             self.control_buttons.append(btn)
             self.control_layout.addWidget(btn)
         
@@ -4479,6 +4476,61 @@ class GameSelector(QWidget):
                             widget.setVisible(show)
 
 
+    # ==============================
+    # 控制按钮：首次点击仅聚焦（使用 current_section/current_index），已聚焦则执行动作
+    # ==============================
+    def handle_control_button_click(self, idx):
+        """如果当前焦点不是该控制按钮，则把焦点移动到它并返回；否则执行动作。"""
+        try:
+            # current_section: 0 = 游戏选择区域, 1 = 控制按钮区域
+            if self.current_section != 1 or self.current_index != idx:
+                self.current_section = 1
+                self.current_index = idx
+                try:
+                    self.update_highlight()
+                except Exception:
+                    pass
+                return
+            # 已处于该焦点，执行动作
+            self.perform_control_action(idx)
+        except Exception:
+            try:
+                self.perform_control_action(idx)
+            except Exception:
+                pass
+
+    def perform_control_action(self, idx):
+        """根据按钮模式执行对应动作（假定这些方法在类中存在）。"""
+        try:
+            mode = self.control_button_modes.get(idx)
+            if mode == 'background':
+                try:
+                    self.on_background_button_clicked(idx)
+                except Exception:
+                    pass
+            elif mode == 'mouse':
+                try:
+                    self.hide_window()
+                    self.mouse_simulation()
+                except Exception:
+                    pass
+            elif mode == 'image':
+                try:
+                    self.show_img_window()
+                except Exception:
+                    pass
+            elif mode == 'sleep':
+                try:
+                    self.sleep_system()
+                except Exception:
+                    pass
+            elif mode == 'shutdown':
+                try:
+                    self.shutdown_system()
+                except Exception:
+                    pass
+        except Exception:
+            pass
     # ==============================
     # 键盘覆盖层：创建/显示/关闭
     # ==============================
