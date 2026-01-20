@@ -7,7 +7,8 @@ import winreg
 from PyQt5 import QtWidgets
 from PyQt5 import QtGui
 import pygame, math
-import win32gui,win32process,psutil,win32api
+from PIL import Image
+import win32gui,win32process,psutil,win32api,win32ui
 from PyQt5.QtWidgets import QApplication, QListWidgetItem, QMainWindow, QMessageBox, QScroller, QSystemTrayIcon, QMenu , QVBoxLayout, QDialog, QGridLayout, QWidget, QPushButton, QLabel, QDesktopWidget, QHBoxLayout, QFileDialog, QSlider, QLineEdit, QProgressBar, QScrollArea, QFrame
 from PyQt5.QtGui import QPainter, QPen, QBrush, QFont, QPixmap, QIcon, QColor, QLinearGradient
 from PyQt5.QtCore import QDateTime, QSize, Qt, QThread, pyqtSignal, QTimer, QPoint, QProcess, QPropertyAnimation, QRect, QObject
@@ -4033,6 +4034,13 @@ class GameSelector(QWidget):
         self.play_time_timer.timeout.connect(self.update_play_time)
         self.play_time_timer.start(60 * 1000)  # 60秒
         # ==============================
+        # 控制按钮标签和缩略图初始化
+        # ==============================
+        self._current_control_button_label = None
+        self._current_control_button_thumbnail = None
+        self._label_fade_anims = []
+        
+        # ==============================
         # 键盘覆盖层（整合键盘逻辑至 GameSelector）
         # ==============================
         self.keyboard_overlay = None
@@ -5753,8 +5761,53 @@ class GameSelector(QWidget):
         self.update_highlight()
     
     # ===== 控制按钮标签显示方法 =====
+    def _capture_window_thumbnail(self, hwnd, width=160, height=120):
+        """捕获窗口的缩略图（使用 PrintWindow + Pillow，返回 QPixmap）"""
+        # 如果窗口最小化或不可见，跳过
+        if ctypes.windll.user32.IsIconic(hwnd) or not ctypes.windll.user32.IsWindowVisible(hwnd):
+            return None
+    
+        rect = ctypes.wintypes.RECT()
+        ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        w = rect.right - rect.left
+        h = rect.bottom - rect.top
+        if w <= 0 or h <= 0:
+            return None
+
+        hwnd_dc = win32gui.GetWindowDC(hwnd)
+        mfc_dc = win32ui.CreateDCFromHandle(hwnd_dc)
+        save_dc = mfc_dc.CreateCompatibleDC()
+        bitmap = win32ui.CreateBitmap()
+        bitmap.CreateCompatibleBitmap(mfc_dc, w, h)
+        save_dc.SelectObject(bitmap)
+        ctypes.windll.user32.PrintWindow(hwnd, save_dc.GetSafeHdc(), 3)
+
+        bmpinfo = bitmap.GetInfo()
+        bmpstr = bitmap.GetBitmapBits(True)
+
+        win32gui.DeleteObject(bitmap.GetHandle())
+        save_dc.DeleteDC()
+        mfc_dc.DeleteDC()
+        win32gui.ReleaseDC(hwnd, hwnd_dc)
+
+        # 从 BGRA 原始字节创建 Pillow 图像（不依赖 numpy）
+        pil_img = Image.frombuffer("RGBA", (bmpinfo["bmWidth"], bmpinfo["bmHeight"]), bmpstr, "raw", "BGRA", 0, 1)
+
+        # 将 Pillow 图像数据转为 QtImage
+        data = pil_img.tobytes("raw", "RGBA")
+        try:
+            qimg = QtGui.QImage(data, pil_img.width, pil_img.height, QtGui.QImage.Format_RGBA8888)
+        except AttributeError:
+            # 兼容老版 PyQt5，尝试 ARGB32 并交换通道
+            qimg = QtGui.QImage(data, pil_img.width, pil_img.height, QtGui.QImage.Format_ARGB32)
+            qimg = qimg.rgbSwapped()
+
+        pixmap = QPixmap.fromImage(qimg)
+        pixmap = pixmap.scaledToWidth(width, Qt.SmoothTransformation)
+        return pixmap
+
     def _show_control_button_label(self, btn, index):
-        """在控制按钮下方显示文字标签"""
+        """在控制按钮上方显示窗口缩略图，下方显示文字标签"""
         # 支持两类标签：
         # - index < 3: 使用 btn.window_info['title']（若存在）
         # - index >=3: 使用固定中文名称映射
@@ -5779,6 +5832,57 @@ class GameSelector(QWidget):
         # 先隐藏旧标签（淡出）
         self._hide_control_button_labels()
 
+        # 计算位置
+        try:
+            btn_pos = btn.mapToGlobal(QPoint(0, 0))
+            btn_size = btn.size()
+        except Exception:
+            btn_pos = QPoint(0, 0)
+            btn_size = btn.size() if hasattr(btn, 'size') else QSize(0, 0)
+
+        # ===== 显示窗口缩略图（上方）=====
+        if index < 3 and hasattr(btn, 'window_info') and btn.window_info:
+            hwnd = btn.window_info.get('hwnd')
+            if hwnd:
+                thumbnail = self._capture_window_thumbnail(hwnd, width=160, height=120)
+                if thumbnail:
+                    thumbnail_label = QLabel(self)
+                    thumbnail_label.setPixmap(thumbnail)
+                    thumbnail_label.setStyleSheet(f"""
+                        QLabel {{
+                            background-color: rgba(30, 30, 30, 0.9);
+                            border: 2px solid #555555;
+                            border-radius: {int(8 * self.scale_factor)}px;
+                            padding: {int(4 * self.scale_factor)}px;
+                        }}
+                    """)
+                    thumbnail_label.adjustSize()
+                    
+                    # 计算缩略图位置（按钮上方居中）
+                    thumb_x = btn_pos.x() + (btn_size.width() - thumbnail.width()) // 2
+                    thumb_y = btn_pos.y() - thumbnail.height() - int(20 * self.scale_factor)
+                    thumbnail_label.move(thumb_x, thumb_y)
+                    
+                    # 淡入动画
+                    try:
+                        eff = QtWidgets.QGraphicsOpacityEffect(thumbnail_label)
+                        thumbnail_label.setGraphicsEffect(eff)
+                        eff.setOpacity(0.0)
+                        fade_in = QPropertyAnimation(eff, b"opacity")
+                        fade_in.setDuration(180)
+                        fade_in.setStartValue(0.0)
+                        fade_in.setEndValue(1.0)
+                        if not hasattr(self, '_label_fade_anims'):
+                            self._label_fade_anims = []
+                        self._label_fade_anims.append(fade_in)
+                        fade_in.start()
+                    except Exception:
+                        pass
+                    
+                    thumbnail_label.show()
+                    self._current_control_button_thumbnail = thumbnail_label
+
+        # ===== 显示文字标签（下方）=====
         # 创建并样式化标签
         label = QLabel(title, self)
         label.setAlignment(Qt.AlignCenter)
@@ -5791,14 +5895,6 @@ class GameSelector(QWidget):
                 background: transparent;
             }}
         """)
-
-        # 计算位置并显示在按钮下方居中
-        try:
-            btn_pos = btn.mapToGlobal(QPoint(0, 0))
-            btn_size = btn.size()
-        except Exception:
-            btn_pos = QPoint(0, 0)
-            btn_size = btn.size() if hasattr(btn, 'size') else QSize(0, 0)
 
         label.adjustSize()
         label_x = btn_pos.x() + (btn_size.width() - label.width()) // 2
@@ -5825,7 +5921,48 @@ class GameSelector(QWidget):
         self._current_control_button_label = label
     
     def _hide_control_button_labels(self):
-        """隐藏所有控制按钮标签"""
+        """隐藏所有控制按钮标签和缩略图"""
+        # 隐藏缩略图
+        if hasattr(self, '_current_control_button_thumbnail') and self._current_control_button_thumbnail:
+            try:
+                old_thumb = self._current_control_button_thumbnail
+                try:
+                    eff_old_thumb = old_thumb.graphicsEffect()
+                    if not isinstance(eff_old_thumb, QtWidgets.QGraphicsOpacityEffect):
+                        eff_old_thumb = None
+                except Exception:
+                    eff_old_thumb = None
+                if eff_old_thumb is None:
+                    try:
+                        eff_old_thumb = QtWidgets.QGraphicsOpacityEffect(old_thumb)
+                        old_thumb.setGraphicsEffect(eff_old_thumb)
+                    except Exception:
+                        eff_old_thumb = None
+                if eff_old_thumb is not None:
+                    fade_out_thumb = QPropertyAnimation(eff_old_thumb, b"opacity")
+                    fade_out_thumb.setDuration(180)
+                    fade_out_thumb.setStartValue(1.0)
+                    fade_out_thumb.setEndValue(0.0)
+                    def _del_old_thumb():
+                        try:
+                            old_thumb.deleteLater()
+                        except Exception:
+                            pass
+                    fade_out_thumb.finished.connect(_del_old_thumb)
+                    if not hasattr(self, '_label_fade_anims'):
+                        self._label_fade_anims = []
+                    self._label_fade_anims.append(fade_out_thumb)
+                    fade_out_thumb.start()
+                else:
+                    try:
+                        old_thumb.deleteLater()
+                    except Exception:
+                        pass
+            except RuntimeError:
+                pass
+            self._current_control_button_thumbnail = None
+        
+        # 隐藏标签
         if hasattr(self, '_current_control_button_label') and self._current_control_button_label:
             try:
                 old_label = self._current_control_button_label
