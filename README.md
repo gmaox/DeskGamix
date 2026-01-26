@@ -63,6 +63,20 @@ DeskGamix（desk→犹如电脑桌面般轻松操作，gamix→game/mix→代表
 
 <hr>
 
+# 构建
+
+1.[下载python3.8.5-64bit](https://www.python.org/ftp/python/3.8.5/python-3.8.5-amd64.exe) 并安装（勾选PATH）
+
+2.下载任意ide（如微软商店的vs code）
+
+3.在终端输入如下指令安装依赖：
+
+ ` pip install PyQt5 pygame Pillow pywin32 psutil pyautogui icoextract -i https://pypi.tuna.tsinghua.edu.cn/simple ` 
+
+4.下载项目中的.py文件运行即可
+
+<hr>
+
 **下面是旧版简介**
 
 该前端的优势：
