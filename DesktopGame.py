@@ -10,8 +10,8 @@ import pygame, math
 from PIL import Image
 import win32gui,win32process,psutil,win32api,win32ui
 from PyQt5.QtWidgets import QApplication, QListWidgetItem, QMainWindow, QMessageBox, QScroller, QSystemTrayIcon, QMenu , QVBoxLayout, QDialog, QGridLayout, QWidget, QPushButton, QLabel, QDesktopWidget, QHBoxLayout, QFileDialog, QSlider, QLineEdit, QProgressBar, QScrollArea, QFrame
-from PyQt5.QtGui import QPainter, QPen, QBrush, QFont, QPixmap, QIcon, QColor, QLinearGradient
-from PyQt5.QtCore import QDateTime, QSize, Qt, QThread, pyqtSignal, QTimer, QPoint, QProcess, QPropertyAnimation, QRect, QObject
+from PyQt5.QtGui import QPainter, QPen, QBrush, QFont, QPixmap, QIcon, QColor, QLinearGradient, QKeySequence
+from PyQt5.QtCore import QDateTime, QSize, Qt, QThread, pyqtSignal, QTimer, QPoint, QProcess, QPropertyAnimation, QRect, QObject, QEasingCurve
 import subprocess, time, os,win32con, ctypes, re, win32com.client, ctypes, time, pyautogui
 from ctypes import wintypes
 #& C:/Users/86150/AppData/Local/Programs/Python/Python38/python.exe -m PyInstaller --add-data "fav.ico;." --add-data '1.png;.' --add-data 'pssuspend64.exe;.' -w DesktopGame.py -i '.\fav.ico' --uac-admin --noconfirm
@@ -28,6 +28,7 @@ SetWindowPos.restype = wintypes.BOOL
 SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
 SetForegroundWindow.restype = wintypes.BOOL
 SetForegroundWindow.argtypes = [wintypes.HWND]
+
 
 pyautogui.FAILSAFE = False    # 禁用角落快速退出
 pyautogui.PAUSE = 0           # 禁用自动暂停，确保动作即时响应
@@ -3354,6 +3355,11 @@ class GameSelector(QWidget):
         self.back_start_action = set()
         self.is_mouse_simulation_running = False
         self.ignore_input_until = 0  # 初始化防抖时间戳
+        
+        # 初始化QShortcut，用于在应用程序有焦点时捕获快捷键
+        self.shortcut = None
+        self.update_shortcut()
+        
         self.current_section = 0  # 0=游戏选择区域，1=控制按钮区域
         GSHWND = int(self.winId())
         self.setWindowIcon(QIcon('./_internal/fav.ico'))
@@ -4078,7 +4084,33 @@ class GameSelector(QWidget):
             self._startup_anim.start()
             
         # ==============================
-
+    
+    def update_shortcut(self):
+        """更新快捷键设置"""
+        # 移除旧的快捷键
+        if self.shortcut:
+            self.shortcut.setEnabled(False)
+            self.shortcut = None
+        
+        # 从设置中获取快捷键
+        try:
+            with open('set.json', 'r', encoding='utf-8') as f:
+                settings = json.load(f)
+            hotkey = settings.get("home_page_hotkey", None)
+        except Exception:
+            hotkey = None
+        
+        # 创建新的快捷键
+        if hotkey:
+            # 转换快捷键字符串为QKeySequence
+            try:
+                # 处理修饰键组合
+                key_sequence = QKeySequence(hotkey)
+                self.shortcut = QtWidgets.QShortcut(key_sequence, self)
+                self.shortcut.activated.connect(self.show_window)
+                print(f"QShortcut创建成功: {hotkey}")
+            except Exception as e:
+                print(f"QShortcut创建失败: {e}")
     def wintaskbarshow(self):
         hide_desktop_icons()
         hide_taskbar()
@@ -5394,6 +5426,8 @@ class GameSelector(QWidget):
 
         # 修改：点击时先判断光标位置
         def on_button_clicked(checked=False, idx=index):
+            if getattr(self, 'show_background_apps', False):  # 仅在处于后台应用模式时恢复
+                self.restore_control_buttons()
             if self.current_index != idx or self.current_section != 0:
                 self.current_section = 0
                 self.current_index = idx
@@ -6344,6 +6378,9 @@ class GameSelector(QWidget):
             # 点击额外按钮时，切换所有按钮到后台任务模式
             btn.clicked.connect(self.switch_all_buttons_to_background_mode)
             
+            # 存储额外按钮引用
+            self.extra_background_button = btn
+            
             # 直接添加到texta_layout中，位于left_label之后，设置靠左对齐并设置固定宽度
             left_label_index = self.texta_layout.indexOf(self.left_label)
             if left_label_index >= 0:
@@ -6368,12 +6405,49 @@ class GameSelector(QWidget):
     
     def switch_all_buttons_to_background_mode(self):
         """将前6个按钮设为任务按钮，第7个设为'显示全部'"""
-        # 重新获取后台窗口列表
-        self.update_background_windows()
-        self.show_background_apps = True
-        
+        # 切换到控制按钮区域并设置当前索引
+        if getattr(self, 'show_background_apps', True):
+            return  # 已经是后台应用模式，直接返回
+        # 隐藏额外按钮并添加向上消失的动画
+        if hasattr(self, 'extra_background_button') and self.extra_background_button:
+            # 创建向上消失的动画
+            self.animation = QPropertyAnimation(self.extra_background_button, b"geometry")
+            self.animation.setDuration(150)
+            
+            # 获取按钮当前位置和大小
+            start_geometry = self.extra_background_button.geometry()
+            
+            # 计算结束位置（向上移动并缩小）
+            end_geometry = QRect(
+                start_geometry.x(),
+                start_geometry.y() - 50,  # 向上移动50像素
+                start_geometry.width(),
+                start_geometry.height()
+            )
+            self.animation.setStartValue(start_geometry)
+            self.animation.setEndValue(end_geometry)
+            self.animation.setEasingCurve(QEasingCurve.OutCubic)
+            
+            # 动画结束后隐藏按钮和更新背景窗口
+            def on_animation_finished():
+                self.extra_background_button.hide()
+                self.current_section = 1  # 切换到控制按钮区域
+                self.current_index = 0  # 设置按钮索引
+                self.update_highlight()
+            
+            self.animation.finished.connect(on_animation_finished)
+            self.animation.start()
+            # 直接更新后台窗口列表
+            self.update_background_windows()
+            self.show_background_apps = True
+            self._continue_background_mode_switch()
+    
+    def _continue_background_mode_switch(self):
+        """继续执行后台模式切换的剩余逻辑"""
         # 获取剩余的应用（跳过前3个）
         remaining_windows = self.background_windows[3:]
+        # 存储剩余应用数量用于导航限制
+        self.remaining_windows_count = len(remaining_windows)
         
         # 遍历前6个控制按钮作为任务按钮
         for i in range(6):
@@ -6431,6 +6505,46 @@ class GameSelector(QWidget):
             show_all_btn.clicked.connect(show_all_apps)
         else:
             show_all_btn.setVisible(False)
+    
+    def restore_control_buttons(self):
+        """将控制按钮区域恢复为初始模样（3后台+4功能键）"""
+        # 重置显示状态
+        self.show_background_apps = False
+        
+        # 恢复前3个按钮为后台任务按钮
+        self.update_background_buttons()
+        
+        # 恢复所有按钮的点击事件和显示状态
+        for i in range(7):
+            btn = self.control_buttons[i]
+            try:
+                btn.clicked.disconnect()
+            except TypeError:
+                pass
+            
+            if i < 3:
+                # 前3个按钮已通过update_background_buttons更新
+                pass
+            elif i == 3:
+                btn.setText("🖱️")
+                btn.setIcon(QIcon())
+            elif i == 4:
+                btn.setText("🗺️")
+                btn.setIcon(QIcon())
+            elif i == 5:
+                btn.setText("💤")
+                btn.setIcon(QIcon())
+            elif i == 6:
+                btn.setText("🔌")
+                btn.setIcon(QIcon())
+            
+            # 重新连接到原始处理器
+            btn.clicked.connect(lambda checked=False, idx=i: self.handle_control_button_click(idx))
+            btn.setVisible(True)
+        
+        # 显示额外后台按钮（如果需要）
+        if len(self.background_windows) > 3:
+            self.create_extra_background_buttons()
     
     def restore_background_window(self, window_info):
         """恢复后台窗口"""
@@ -7067,12 +7181,46 @@ class GameSelector(QWidget):
             self.current_index = int(self.current_index/2)
             self.update_highlight()
             print("当前区域：游戏选择区域")
+            if getattr(self, 'show_background_apps', False):  # 仅在处于后台应用模式时恢复
+                self.restore_control_buttons()
+        elif action == 'DOWN' and firstinput and self.current_section == 1 and self.more_section == 0:
+            self.switch_all_buttons_to_background_mode()
         elif action == 'B' and self.more_section == 1:
             self.switch_to_main_interface()
         else:
+            if action == 'GUIDE':  # 回桌面
+                if current_time < ((self.ignore_input_until)+500):
+                    return
+                self.ignore_input_until = pygame.time.get_ticks() + 500 
+                #self.exitdef()  # 退出程序
+                self.hide_window()
+                pyautogui.hotkey('win', 'd')
+                return
+            elif action == 'LB':  # LB减音量
+                self.decrease_volume()
+            elif action == 'RB':  # RB加音量
+                self.increase_volume()
             if self.current_section == 1:  # 控制按钮区域
                 if action.lower() == "right":
-                    self.current_index = min(self.current_index + 1, len(self.control_buttons)-1)
+                    # 限制导航范围：在后台应用模式下只允许导航到可见按钮
+                    if getattr(self, 'show_background_apps', False):
+                        # 在后台应用模式下
+                        remaining_count = getattr(self, 'remaining_windows_count', 0)
+                        # 计算最大可见索引
+                        if remaining_count > 0:
+                            max_visible_index = min(remaining_count - 1, 5)
+                            # 如果有超过6个应用，显示"..."按钮
+                            if remaining_count > 6:
+                                max_visible_index = 6
+                        else:
+                            max_visible_index = -1  # 没有应用
+                    else:
+                        # 正常模式下
+                        max_visible_index = len(self.control_buttons) - 1
+                    
+                    # 只有当还有可见按钮时才移动
+                    if max_visible_index >= 0 and self.current_index < max_visible_index:
+                        self.current_index += 1
                 elif action.lower() == "left":
                     self.current_index = max(self.current_index - 1, 0)
                 #elif action.lower() == "down":
@@ -7084,14 +7232,6 @@ class GameSelector(QWidget):
                 elif action == 'B':
                     #self.exitdef()  # 退出程序
                     self.hide_window()
-                elif action == 'GUIDE':  # 回桌面
-                    if current_time < ((self.ignore_input_until)+500):
-                        return
-                    self.ignore_input_until = pygame.time.get_ticks() + 500 
-                    #self.exitdef()  # 退出程序
-                    self.hide_window()
-                    pyautogui.hotkey('win', 'd')
-                        
                 self.update_highlight()
             else:
                 if action == 'UP' and self.more_section == 1:
@@ -7129,13 +7269,6 @@ class GameSelector(QWidget):
                     self.show_settings_window()
                     self.mouse_simulation()
                     QTimer.singleShot(10, lambda: pyautogui.moveTo(int(self.settings_button.mapToGlobal(self.settings_button.rect().center()).x()+100), int(self.settings_button.mapToGlobal(self.settings_button.rect().center()).y())+270))
-                elif action == 'GUIDE':  # 回桌面
-                    if current_time < ((self.ignore_input_until)+500):
-                        return
-                    self.ignore_input_until = pygame.time.get_ticks() + 500 
-                    #self.exitdef()  # 退出程序
-                    self.hide_window()
-                    pyautogui.hotkey('win', 'd')
 
         # 更新最后一次按键时间
         self.last_input_time = current_time
@@ -9188,6 +9321,31 @@ class SettingsWindow(QWidget):
         self.open_folder_button.clicked.connect(self.is_startup_enabled)
         self.layout.addWidget(self.open_folder_button)
 
+        # 添加打开主页面快捷键设置按钮
+        self.home_page_hotkey = settings.get("home_page_hotkey", None)
+        hotkey_text = self.home_page_hotkey if self.home_page_hotkey else "未设置"
+        self.hotkey_label = QLabel(f"打开主页面快捷键: {hotkey_text}")
+        self.hotkey_label.setStyleSheet(f"color: white; font-size: {int(16 * parent.scale_factor)}px;")
+        self.hotkey_label.setFixedHeight(int(30 * parent.scale_factor))
+        self.layout.addWidget(self.hotkey_label)
+
+        self.hotkey_button = QPushButton("设置快捷键")
+        self.hotkey_button.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #444444;
+                color: white;
+                text-align: center;
+                padding: {int(10 * parent.scale_factor)}px;
+                border: none;
+                font-size: {int(16 * parent.scale_factor)}px;
+            }}
+            QPushButton:hover {{
+                background-color: #555555;
+            }}
+        """)
+        self.hotkey_button.clicked.connect(self.set_home_page_hotkey)
+        self.layout.addWidget(self.hotkey_button)
+
         # 在其他按钮之后添加关闭程序按钮
         self.close_program_button = QPushButton("关闭程序")
         self.close_program_button.setStyleSheet(f"""
@@ -10006,6 +10164,175 @@ class SettingsWindow(QWidget):
             self.add_dialog.show()
         # 填充路径
         self.path_edit.setText(selected_file.replace('/', '\\'))
+
+    def set_home_page_hotkey(self):
+        """设置打开主页面的快捷键"""
+        # 创建快捷键设置对话框
+        hotkey_dialog = QDialog(self)
+        hotkey_dialog.setWindowTitle("设置打开主页面快捷键")
+        hotkey_dialog.setWindowFlags(Qt.FramelessWindowHint | Qt.Popup)
+        hotkey_dialog.setStyleSheet(f"""
+            QDialog {{
+                background-color: rgba(46, 46, 46, 0.98);
+                border-radius: {int(10 * self.parent().scale_factor)}px;
+                border: {int(2 * self.parent().scale_factor)}px solid #444444;
+            }}
+        """)
+        hotkey_dialog.setFixedSize(int(500 * self.parent().scale_factor), int(200 * self.parent().scale_factor))
+        layout = QVBoxLayout(hotkey_dialog)
+        layout.setSpacing(int(20 * self.parent().scale_factor))
+        layout.setContentsMargins(
+            int(30 * self.parent().scale_factor),
+            int(30 * self.parent().scale_factor),
+            int(30 * self.parent().scale_factor),
+            int(30 * self.parent().scale_factor)
+        )
+
+        # 添加提示标签
+        hint_label = QLabel("请按下要设置的快捷键（任意键）")
+        hint_label.setStyleSheet(f"color: white; font-size: {int(18 * self.parent().scale_factor)}px;")
+        hint_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(hint_label)
+
+        # 添加显示当前按键的标签
+        key_label = QLabel("等待按键...")
+        key_label.setStyleSheet(f"color: #93ffff; font-size: {int(24 * self.parent().scale_factor)}px; font-weight: bold;")
+        key_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(key_label)
+
+        # 用于存储用户按下的键
+        selected_key = None
+
+        # 重写keyPressEvent方法，捕获用户按下的键
+        def keyPressEvent(event):
+            nonlocal selected_key
+            key = event.key()
+            # 检查是否有修饰键（Ctrl, Alt, Shift, Win）
+            modifiers = []
+            if event.modifiers() & Qt.ControlModifier:
+                modifiers.append("Ctrl")
+            if event.modifiers() & Qt.AltModifier:
+                modifiers.append("Alt")
+            if event.modifiers() & Qt.ShiftModifier:
+                modifiers.append("Shift")
+            if event.modifiers() & Qt.MetaModifier:
+                modifiers.append("Win")
+            
+            # 获取主按键
+            # 过滤掉修饰键作为主按键的情况
+            if key in (Qt.Key_Shift, Qt.Key_Control, Qt.Key_Alt, Qt.Key_Meta):
+                # 如果只有修饰键被按下，不设置主按键
+                return
+            
+            # 直接使用键码转换为字符
+            if key >= Qt.Key_Space and key <= Qt.Key_AsciiTilde:
+                # 对于可打印字符，直接转换
+                main_key = chr(key)
+            elif key >= Qt.Key_F1 and key <= Qt.Key_F12:
+                main_key = f"F{key - Qt.Key_F1 + 1}"
+            else:
+                # 对于其他特殊键，使用键名
+                # 键码到键名的映射
+                key_name_map = {
+                    Qt.Key_Escape: "Escape",
+                    Qt.Key_Tab: "Tab",
+                    Qt.Key_Backspace: "Backspace",
+                    Qt.Key_Return: "Enter",
+                    Qt.Key_Enter: "Enter",
+                    Qt.Key_Space: "Space",
+                    Qt.Key_Up: "Up",
+                    Qt.Key_Down: "Down",
+                    Qt.Key_Left: "Left",
+                    Qt.Key_Right: "Right",
+                    Qt.Key_Home: "Home",
+                    Qt.Key_End: "End",
+                    Qt.Key_PageUp: "PageUp",
+                    Qt.Key_PageDown: "PageDown",
+                    Qt.Key_Insert: "Insert",
+                    Qt.Key_Delete: "Delete",
+                    Qt.Key_CapsLock: "CapsLock",
+                    Qt.Key_NumLock: "NumLock",
+                    Qt.Key_ScrollLock: "ScrollLock",
+                    Qt.Key_Pause: "Pause",
+                }
+                if key in key_name_map:
+                    main_key = key_name_map[key]
+                else:
+                    # 对于无法获取文本的键，使用键码
+                    main_key = f"Key_{key}"
+            
+            # 组合键格式：Mod1+Mod2+Key
+            if modifiers:
+                selected_key = "+".join(modifiers + [main_key])
+            else:
+                selected_key = main_key
+            
+            key_label.setText(f"已选择: '{selected_key}'")
+
+        hotkey_dialog.keyPressEvent = keyPressEvent
+
+        # 添加确认和取消按钮
+        button_layout = QHBoxLayout()
+        confirm_button = QPushButton("确认")
+        confirm_button.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #4CAF50;
+                color: white;
+                text-align: center;
+                padding: {int(10 * self.parent().scale_factor)}px;
+                border: none;
+                font-size: {int(16 * self.parent().scale_factor)}px;
+                border-radius: {int(5 * self.parent().scale_factor)}px;
+            }}
+            QPushButton:hover {{
+                background-color: #45a049;
+            }}
+        """)
+
+        cancel_button = QPushButton("取消")
+        cancel_button.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #f44336;
+                color: white;
+                text-align: center;
+                padding: {int(10 * self.parent().scale_factor)}px;
+                border: none;
+                font-size: {int(16 * self.parent().scale_factor)}px;
+                border-radius: {int(5 * self.parent().scale_factor)}px;
+            }}
+            QPushButton:hover {{
+                background-color: #da190b;
+            }}
+        """)
+
+        def confirm():
+            nonlocal selected_key
+            if selected_key:
+                # 保存快捷键设置
+                settings["home_page_hotkey"] = selected_key
+                with open(settings_path, "w", encoding="utf-8") as f:
+                    json.dump(settings, f, indent=4, ensure_ascii=False)
+                # 更新标签显示
+                self.hotkey_label.setText(f"打开主页面快捷键: {selected_key}")
+                # 更新QShortcut设置
+                self.parent().update_shortcut()
+                hotkey_dialog.accept()
+
+        confirm_button.clicked.connect(confirm)
+        cancel_button.clicked.connect(hotkey_dialog.reject)
+
+        button_layout.addWidget(confirm_button)
+        button_layout.addWidget(cancel_button)
+        layout.addLayout(button_layout)
+
+        # 居中显示对话框
+        parent_geom = self.parent().geometry()
+        x = parent_geom.x() + (parent_geom.width() - hotkey_dialog.width()) // 2
+        y = parent_geom.y() + (parent_geom.height() - hotkey_dialog.height()) // 2
+        hotkey_dialog.move(x, y)
+
+        # 显示对话框并获取结果
+        hotkey_dialog.exec_()
 
     # 检查程序是否设置为开机自启
     def is_startup_enabled(self):
