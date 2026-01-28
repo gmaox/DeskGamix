@@ -3795,7 +3795,7 @@ class GameSelector(QWidget):
             controller_name = controller_data['controller'].get_name()
             self.update_controller_status(controller_name)
         # 右侧文字
-        self.right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.95.4")
+        self.right_label = QLabel("A / 进入游戏        B / 最小化        Y / 收藏        X / 更多            📦️DeskGamix v0.95.5")
         self.right_label.setStyleSheet(f"""
             QLabel {{
                 font-family: "Microsoft YaHei"; 
@@ -4504,6 +4504,11 @@ class GameSelector(QWidget):
             pass
             
         def on_finished():
+            self.current_index = 0
+            self.current_section = 0
+            self.update_highlight()
+            if getattr(self, 'show_background_apps', False):  # 仅在处于后台应用模式时恢复
+                self.restore_control_buttons()
             hwnd = int(self.winId())
             ctypes.windll.user32.ShowWindow(hwnd, 0)  # 0=SW_HIDE
             # 恢复透明度
@@ -6397,6 +6402,37 @@ class GameSelector(QWidget):
                 
                 # 重新添加右侧标签
                 self.texta_layout.addWidget(self.right_label, alignment=Qt.AlignRight)
+                
+                # 添加从上至下飞入的动画
+                # 强制布局更新以确保按钮有正确的几何位置
+                QApplication.processEvents()
+                self.texta_layout.update()
+                if self.texta_layout.parentWidget():
+                    self.texta_layout.parentWidget().update()
+                QApplication.processEvents()
+                
+                # 获取按钮当前位置和大小
+                end_geometry = btn.geometry()
+                
+                # 计算起始位置（上方，不可见）
+                start_geometry = QRect(
+                    end_geometry.x(),
+                    end_geometry.y() - 20,  # 从上方20像素开始
+                    end_geometry.width(),
+                    end_geometry.height()
+                )
+                
+                # 设置按钮到起始位置
+                btn.setGeometry(start_geometry)
+                btn.show()  # 确保按钮可见
+                
+                # 创建飞入动画并存储为实例变量以防被回收
+                self.fly_in_animation = QPropertyAnimation(btn, b"geometry")
+                self.fly_in_animation.setDuration(300)
+                self.fly_in_animation.setStartValue(start_geometry)
+                self.fly_in_animation.setEndValue(end_geometry)
+                self.fly_in_animation.setEasingCurve(QEasingCurve.OutCubic)
+                self.fly_in_animation.start()
         
         # 更新布局
         self.texta_layout.update()
