@@ -4086,31 +4086,213 @@ class GameSelector(QWidget):
         # ==============================
     
     def update_shortcut(self):
-        """更新快捷键设置"""
-        # 移除旧的快捷键
-        if self.shortcut:
-            self.shortcut.setEnabled(False)
-            self.shortcut = None
-        
-        # 从设置中获取快捷键
+        """更新快捷键设置：支持应用内 QShortcut 回退，同时使用 Windows RegisterHotKey 注册全局热键。
+
+        行为：
+        - 取消并删除原有的 QShortcut（如果存在）
+        - 注销已注册的全局热键
+        - 从 set.json 读取 home_page_hotkey（如 "Ctrl+Alt+H"）并尝试注册为全局热键
+        - 在注册成功时通过原生事件过滤器接收 WM_HOTKEY 并触发 `show_window()`
+        """
+        # 取消旧的 QShortcut（只在应用内生效的快捷键）
+        try:
+            if self.shortcut:
+                try:
+                    self.shortcut.setEnabled(False)
+                except Exception:
+                    pass
+                self.shortcut = None
+        except Exception:
+            pass
+
+        # 注销先前通过 RegisterHotKey 注册的全局热键（如果有）
+        try:
+            self.unregister_all_hotkeys()
+        except Exception:
+            pass
+
+        # 从设置中获取快捷键字符串
         try:
             with open('set.json', 'r', encoding='utf-8') as f:
                 settings = json.load(f)
             hotkey = settings.get("home_page_hotkey", None)
         except Exception:
             hotkey = None
-        
-        # 创建新的快捷键
-        if hotkey:
-            # 转换快捷键字符串为QKeySequence
+
+        # 如果未配置全局热键，则保留原有行为（可选创建应用内 QShortcut）
+        if not hotkey:
+            return
+
+        # 确保已安装原生事件过滤器以接收 WM_HOTKEY
+        try:
+            self._ensure_hotkey_filter_installed()
+        except Exception as e:
+            print(f"安装原生事件过滤器失败: {e}")
+
+        # 注册全局热键
+        try:
+            ok, hid = self.register_global_hotkey(hotkey)
+            if ok:
+                print(f"全局热键注册成功: {hotkey} (id={hid})")
+            else:
+                print(f"全局热键注册失败: {hotkey}")
+        except Exception as e:
+            print(f"注册全局热键异常: {e}")
+
+    def _ensure_hotkey_filter_installed(self):
+        """安装一个 QAbstractNativeEventFilter，用于捕获 WM_HOTKEY 并调用 _on_hotkey_triggered。"""
+        try:
+            if getattr(self, '_hotkey_filter_installed', False):
+                return
+            from PyQt5.QtCore import QAbstractNativeEventFilter, QCoreApplication
+            import ctypes
+            # 常量
+            WM_HOTKEY = 0x0312
+
+            class _HotkeyFilter(QAbstractNativeEventFilter):
+                def __init__(self, parent):
+                    super().__init__()
+                    self._parent = parent
+
+                def nativeEventFilter(self, eventType, message):
+                    # 仅处理 Windows 消息
+                    if eventType != 'windows_generic_MSG':
+                        return False, 0
+                    try:
+                        # message 是一个指向 MSG 结构体的指针
+                        msg = ctypes.wintypes.MSG.from_address(int(message))
+                        if msg.message == WM_HOTKEY:
+                            hid = int(msg.wParam)
+                            try:
+                                self._parent._on_hotkey_triggered(hid)
+                            except Exception:
+                                pass
+                            return True, 0
+                    except Exception:
+                        pass
+                    return False, 0
+
+            self._hotkey_filter = _HotkeyFilter(self)
+            from PyQt5.QtCore import QCoreApplication
+            QCoreApplication.instance().installNativeEventFilter(self._hotkey_filter)
+            self._hotkey_filter_installed = True
+        except Exception:
+            # 失败则继续不阻塞主流程
+            self._hotkey_filter_installed = False
+
+    def register_global_hotkey(self, hotkey_str):
+        """解析 hotkey_str（例如 'Ctrl+Alt+H'）并调用 RegisterHotKey。返回 (success, id)。"""
+        try:
+            import ctypes
+            import re
+            from ctypes import wintypes
+
+            MOD_ALT = 0x0001
+            MOD_CONTROL = 0x0002
+            MOD_SHIFT = 0x0004
+            MOD_WIN = 0x0008
+
+            def _parse(s):
+                s = (s or '').replace('＋', '+')
+                parts = [p.strip() for p in s.split('+') if p.strip()]
+                mods = 0
+                key = None
+                for p in parts:
+                    low = p.lower()
+                    if low in ('ctrl', 'control'):
+                        mods |= MOD_CONTROL
+                    elif low in ('alt',):
+                        mods |= MOD_ALT
+                    elif low in ('shift',):
+                        mods |= MOD_SHIFT
+                    elif low in ('win', 'windows'):
+                        mods |= MOD_WIN
+                    else:
+                        key = p
+                if not key:
+                    return mods, None
+                k = key.upper()
+                # F1-F24
+                m = re.match(r'^F(\d{1,2})$', k)
+                if m:
+                    n = int(m.group(1))
+                    if 1 <= n <= 24:
+                        return mods, 0x70 + n - 1
+                # 单字符字母/数字
+                if len(k) == 1:
+                    return mods, ord(k)
+                # 常用特殊键
+                special = {
+                    'SPACE': 0x20, 'ENTER': 0x0D, 'TAB': 0x09, 'ESC': 0x1B,
+                    'BACKSPACE': 0x08, 'INSERT':0x2D, 'DELETE':0x2E, 'HOME':0x24,
+                    'END':0x23, 'PGUP':0x21, 'PGDN':0x22, 'LEFT':0x25, 'UP':0x26,
+                    'RIGHT':0x27, 'DOWN':0x28
+                }
+                return mods, special.get(k.upper(), None)
+
+            mods, vk = _parse(hotkey_str)
+            if vk is None:
+                return False, None
+
+            if not hasattr(self, '_next_hotkey_id'):
+                self._next_hotkey_id = 1
+            hid = self._next_hotkey_id
+            self._next_hotkey_id += 1
+
+            # 使用 NULL HWND（线程级注册），消息会投递到线程消息队列，nativeEventFilter 可捕获
+            if ctypes.windll.user32.RegisterHotKey(None, hid, mods, vk):
+                if not hasattr(self, '_registered_hotkeys'):
+                    self._registered_hotkeys = {}
+                self._registered_hotkeys[hid] = (mods, vk, hotkey_str)
+                return True, hid
+            else:
+                return False, None
+        except Exception as e:
+            print(f"register_global_hotkey 异常: {e}")
+            return False, None
+
+    def unregister_all_hotkeys(self):
+        """注销本进程中已注册的所有全局热键并清理注册表。"""
+        try:
+            import ctypes
+            if hasattr(self, '_registered_hotkeys') and self._registered_hotkeys:
+                for hid in list(self._registered_hotkeys.keys()):
+                    try:
+                        ctypes.windll.user32.UnregisterHotKey(None, int(hid))
+                    except Exception:
+                        pass
+                self._registered_hotkeys = {}
+        except Exception:
+            pass
+
+    def _on_hotkey_triggered(self, hotkey_id):
+        """全局热键触发回调（由 native event filter 调用）。"""
+        try:
+            # 简单地显示主窗口
+            self.show_window()
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        # 程序退出或窗口关闭时注销热键并移除事件过滤器
+        try:
             try:
-                # 处理修饰键组合
-                key_sequence = QKeySequence(hotkey)
-                self.shortcut = QtWidgets.QShortcut(key_sequence, self)
-                self.shortcut.activated.connect(self.show_window)
-                print(f"QShortcut创建成功: {hotkey}")
-            except Exception as e:
-                print(f"QShortcut创建失败: {e}")
+                self.unregister_all_hotkeys()
+            except Exception:
+                pass
+            if getattr(self, '_hotkey_filter_installed', False):
+                try:
+                    from PyQt5.QtCore import QCoreApplication
+                    QCoreApplication.instance().removeNativeEventFilter(self._hotkey_filter)
+                except Exception:
+                    pass
+                self._hotkey_filter_installed = False
+        except Exception:
+            pass
+        try:
+            super().closeEvent(event)
+        except Exception:
+            event.accept()
     def wintaskbarshow(self):
         hide_desktop_icons()
         hide_taskbar()
