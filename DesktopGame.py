@@ -6454,12 +6454,14 @@ class GameSelector(QWidget):
         """处理后台任务按钮点击事件"""
         btn = self.control_buttons[button_index]
         if hasattr(btn, 'window_info') and btn.window_info:
-            window_info = btn.window_info
-            hwnd = window_info['hwnd']
-            # 恢复窗口
-            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-            win32gui.SetForegroundWindow(hwnd)
             self.hide_window()
+            def wake_window():
+                window_info = btn.window_info
+                hwnd = window_info['hwnd']
+                # 恢复窗口
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                win32gui.SetForegroundWindow(hwnd)
+            QTimer.singleShot(200, wake_window)
     
     def create_extra_background_buttons(self):
         """为超过3个的后台应用在 left_label 后面创建按钮"""
@@ -6922,7 +6924,8 @@ class GameSelector(QWidget):
                 if app["name"] == game["name"]:
                     game_path = app["path"]
                     break
-            self.restore_window(game_path)
+            self.hide_window()
+            QTimer.singleShot(200, lambda: self.restore_window(game_path))
             return
         if self.player:
             # 创建确认弹窗
