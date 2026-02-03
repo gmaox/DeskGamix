@@ -3791,6 +3791,10 @@ class GameSelector(QWidget):
         self.extra_buttons_container = None
         # 连接手柄连接信号到槽函数
         self.controller_thread.controller_connected_signal.connect(self.update_controller_status)
+        # 连接手柄断开信号到槽函数
+        self.controller_thread.controller_disconnected_signal.connect(self.on_controller_disconnected)
+        # 连接手柄错误信号到槽函数
+        self.controller_thread.controller_error_signal.connect(self.on_controller_error)
         for controller_data in self.controller_thread.controllers.values():
             controller_name = controller_data['controller'].get_name()
             self.update_controller_status(controller_name)
@@ -4647,11 +4651,10 @@ class GameSelector(QWidget):
         self.time_label.setText(f"{current_time}    {network_status}")
     def show_window(self):
         """显示窗口"""
-        hwnd = int(self.winId())
         # 先设置透明度为0，避免闪烁
         self.setWindowOpacity(0.0)
-        ctypes.windll.user32.ShowWindow(hwnd, 9) # 9=SW_RESTORE            
-        ctypes.windll.user32.SetForegroundWindow(hwnd)
+        ctypes.windll.user32.ShowWindow(GSHWND, 9) # 9=SW_RESTORE            
+        ctypes.windll.user32.SetForegroundWindow(GSHWND)
         
         # 创建淡入动画
         self._show_anim = QPropertyAnimation(self, b"windowOpacity", self)
@@ -4664,6 +4667,7 @@ class GameSelector(QWidget):
         except Exception:
             pass
         self._show_anim.start()
+        self.update_highlight()
 
     def exitbutton(self):
         """退出按钮"""
@@ -4791,12 +4795,16 @@ class GameSelector(QWidget):
                     pass
             elif mode == 'sleep':
                 try:
-                    self.sleep_system()
+                    self.confirm_dialog = ConfirmDialog("要进入睡眠吗", scale_factor=self.scale_factor)
+                    if self.confirm_dialog.exec_():
+                        self.sleep_system()
                 except Exception:
                     pass
             elif mode == 'shutdown':
                 try:
-                    self.shutdown_system()
+                    self.confirm_dialog = ConfirmDialog("确认要关机吗", scale_factor=self.scale_factor)
+                    if self.confirm_dialog.exec_():
+                        self.shutdown_system()
                 except Exception:
                     pass
         except Exception:
@@ -5719,16 +5727,28 @@ class GameSelector(QWidget):
         if self.current_section == 0: 
             for index, button in enumerate(self.buttons):
                 if index == self.current_index:
-                    button.setStyleSheet(f"""
-                        QPushButton {{
-                            background-color: #2e2e2e; 
-                            border-radius: {int(10 * self.scale_factor2)}px; 
-                            border: {int(3 * self.scale_factor2)}px solid #93ffff;
-                        }}
-                        QPushButton:hover {{
-                            border: {int(3 * self.scale_factor2)}px solid #25ade7;
-                        }}
-                    """)
+                    if self.gsfocus():
+                        button.setStyleSheet(f"""
+                            QPushButton {{
+                                background-color: #2e2e2e; 
+                                border-radius: {int(10 * self.scale_factor2)}px; 
+                                border: {int(3 * self.scale_factor2)}px solid #93ffff;
+                            }}
+                            QPushButton:hover {{
+                                border: {int(3 * self.scale_factor2)}px solid #25ade7;
+                            }}
+                        """)
+                    else:
+                        button.setStyleSheet(f"""
+                            QPushButton {{
+                                background-color: #2e2e2e; 
+                                border-radius: {int(10 * self.scale_factor2)}px; 
+                                border: {int(3 * self.scale_factor2)}px solid #555555;
+                            }}
+                            QPushButton:hover {{
+                                border: {int(3 * self.scale_factor2)}px solid #888888;
+                            }}
+                        """)
                     # 为高亮按钮添加发光阴影并做一次脉冲动画（保存引用防止被回收）
                     try:
                         effect = button.graphicsEffect()
@@ -6134,7 +6154,7 @@ class GameSelector(QWidget):
         """在控制按钮上方显示窗口缩略图，下方显示文字标签"""
         labels_map = {
             3: '鼠标模拟',
-            4: '显示地图',
+            4: '全部截图',
             5: '系统休眠',
             6: '系统关机'
         }
@@ -7278,7 +7298,7 @@ class GameSelector(QWidget):
                 else:
                     self.back_start_pressed_time = None
                     break
-        print(f"处理手柄输入: {action}")
+        #print(f"处理手柄输入: {action}")
         if hasattr(self, 'confirm_dialog') and self.confirm_dialog and self.confirm_dialog.isVisible():  # 如果确认弹窗显示中
             print("确认弹窗显示中")
             self.ignore_input_until = current_time + 500
@@ -7321,29 +7341,27 @@ class GameSelector(QWidget):
                     #    return True
                     #win32gui.EnumWindows(enum_windows_callback, None)
                     self.is_current_window_fullscreen()
-                    hwnd = int(self.winId())
-                    ctypes.windll.user32.ShowWindow(hwnd, 9) # 9=SW_RESTORE            
+                    hwnd = GSHWND
+                    # 尝试将窗口带到前台
+                    self.show_window()
                     result = ctypes.windll.user32.SetForegroundWindow(hwnd)
-                    screen_width, screen_height = pyautogui.size()
                     # 设置右下角坐标
+                    screen_width, screen_height = pyautogui.size()
                     right_bottom_x = screen_width - 1  # 最右边
                     right_bottom_y = screen_height - 1  # 最底部
                     pyautogui.moveTo(right_bottom_x, right_bottom_y)
-                    if result:
-                        print("窗口已成功带到前台")
-                    else:
-                        print("未能将窗口带到前台，正在尝试设置为最上层")
-                        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
-                        if self.killexplorer == False:
-                            hide_taskbar()
-                        time.sleep(0.2)
-                    # 移动鼠标到屏幕右下角并进行右键点击
-                        pyautogui.rightClick(right_bottom_x, right_bottom_y)
-                        if self.killexplorer == False:
-                            show_taskbar()
-                        # 恢复原来的 Z 顺序
-                        #for hwnd in reversed(z_order):
-                        SetWindowPos(hwnd, -2, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
+                    QTimer.singleShot(200, lambda: (
+                        print("窗口已成功带到前台") if result else (
+                            print("未能将窗口带到前台，正在尝试设置为最上层"),
+                            SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE),
+                            hide_taskbar() if self.killexplorer == False else None,
+                            time.sleep(0.2),
+                            pyautogui.rightClick(right_bottom_x, right_bottom_y),
+                            show_taskbar() if self.killexplorer == False else None,
+                            SetWindowPos(hwnd, -2, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE),
+                            self.update_highlight()
+                        )
+                    ))
                 except Exception as e:
                     print(f"Error: {e}")
             self.ignore_input_until = current_time + 500
@@ -8032,6 +8050,26 @@ class GameSelector(QWidget):
             self.left_label.setText(f"🎮️ {controller_name}")
         else:
             print("left_label 未正确初始化")
+    
+    def on_controller_disconnected(self):
+        """当手柄断开时更新左侧标签"""
+        if hasattr(self, 'left_label') and isinstance(self.left_label, QLabel):
+            # 检查是否还有其他连接的手柄
+            if hasattr(self, 'controller_thread') and hasattr(self.controller_thread, 'controllers') and len(self.controller_thread.controllers) > 0:
+                # 如果还有其他手柄，显示第一个手柄的名称
+                for controller_data in self.controller_thread.controllers.values():
+                    controller_name = controller_data['controller'].get_name()
+                    self.left_label.setText(f"🎮️ {controller_name}")
+                    break
+            else:
+                # 如果没有其他手柄，显示"未连接手柄"
+                self.left_label.setText("🎮️未连接手柄")
+    
+    def on_controller_error(self, error_msg):
+        """当手柄执行出错时更新左侧标签为错误信息"""
+        if hasattr(self, 'left_label') and isinstance(self.left_label, QLabel):
+            # 将左侧标签的文字改成错误信息
+            self.left_label.setText(f"❌ {error_msg}")
     class KeyboardWidget(QWidget):
         def __init__(self):
             super().__init__()
@@ -8300,6 +8338,8 @@ class GameControllerThread(QThread):
     """子线程用来监听手柄输入"""
     gamepad_signal = pyqtSignal(str)
     controller_connected_signal = pyqtSignal(str)  # 新增信号，用于通知主线程手柄连接
+    controller_error_signal = pyqtSignal(str)  # 新增信号，用于通知主线程发生错误
+    controller_disconnected_signal = pyqtSignal()  # 新增信号，用于通知主线程手柄断开
 
     def __init__(self, parent):
         super().__init__(parent)
@@ -8407,6 +8447,8 @@ class GameControllerThread(QThread):
                         if event.instance_id in self.controllers:
                             print(f"Controller {event.instance_id} disconnected")
                             del self.controllers[event.instance_id]
+                            # 发出手柄断开信号
+                            self.controller_disconnected_signal.emit()
                         # 清理方向状态
                         try:
                             if event.instance_id in self.direction_states:
@@ -8522,29 +8564,11 @@ class GameControllerThread(QThread):
 
                 time.sleep(0.01)
             except Exception as e:
-                print(f"Error in event loop: {e}")
-                self.restart_thread()
+                error_msg = f"Error in event loop: {e}"
+                print(error_msg)
+                # 发出错误信号
+                self.controller_error_signal.emit(error_msg)
 
-    def restart_thread(self):
-        """重启线程"""
-        try:
-            # 关闭所有现有的控制器
-            for controller_data in self.controllers.values():
-                controller_data['controller'].quit()
-            self.controllers.clear()
-            
-            # 重新初始化 pygame
-            pygame.quit()
-            pygame.init()
-            
-            # 重置计时器和状态
-            self.last_move_time = 0
-            self.last_hat_time = 0
-            self.last_hat_value = (0, 0)
-            
-            print("手柄监听线程已重启")
-        except Exception as e:
-            print(f"重启线程时发生错误: {e}")
 class FileDialogThread(QThread):
     file_selected = pyqtSignal(str)  # 信号，用于传递选中的文件路径
 
