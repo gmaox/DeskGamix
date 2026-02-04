@@ -2912,6 +2912,8 @@ class LaunchOverlay(QWidget):
         fade_in.setStartValue(0.0)
         fade_in.setEndValue(1.0)
         self.launch_animations.append(fade_in)
+        # 开始焦点监听
+        self._start_focus_monitoring()
         
         def on_fade_in_finished():
             # 第二阶段：封面从光标位置移动到中央，同时添加缩放和变暗效果
@@ -3199,8 +3201,6 @@ class LaunchOverlay(QWidget):
                 
                 # 开始更新状态
                 self._start_status_update()
-                # 开始焦点监听
-                self._start_focus_monitoring()
             
             text_move.finished.connect(on_text_move_finished)
             text_move.start()
@@ -3273,8 +3273,6 @@ class LaunchOverlay(QWidget):
     
     def _start_focus_monitoring(self):
         """开始监听焦点变化"""
-        self.last_focus_hwnd = GSHWND  # 初始化为GSHWND，因为悬浮窗显示时焦点应该在GSHWND
-        
         def check_focus():
             if not self.isVisible():
                 if self.focus_check_timer:
@@ -3284,34 +3282,13 @@ class LaunchOverlay(QWidget):
             try:
                 hwnd = win32gui.GetForegroundWindow()
                 if hwnd:
-                    # 检查是否是全屏游戏窗口（不是GSHWND）
+                    # 检查是否是游戏窗口（不是GSHWND）
                     if hwnd != GSHWND:
-                        # 焦点切换到其他窗口（全屏游戏窗口）
-                        # 如果之前焦点在GSHWND，现在切换到了全屏窗口，关闭悬浮窗
-                        if self.last_focus_hwnd == GSHWND:
-                            # 焦点从GSHWND切换到全屏窗口，关闭悬浮窗
+                            # 焦点从GSHWND切换到窗口，关闭悬浮窗
+                            self.parent.hide_window()
                             self.hide()
                             self._stop_launch_animations()
                             return
-                        
-                        # 焦点在其他窗口，隐藏加载条和状态文字
-                        self.overlay_progress.hide()
-                        self.overlay_status.hide()
-                        self.last_focus_hwnd = hwnd
-                    else:
-                        # 焦点在GSHWND
-                        # 如果之前焦点不在GSHWND，现在切换回来了，关闭悬浮窗
-                        if self.last_focus_hwnd is not None and self.last_focus_hwnd != GSHWND:
-                            # 焦点从其他窗口切换回GSHWND，关闭悬浮窗
-                            self.hide()
-                            self._stop_launch_animations()
-                            return
-                        
-                        # 显示加载条和状态
-                        if self.current_game_path:
-                            self.overlay_progress.show()
-                            self.overlay_status.show()
-                        self.last_focus_hwnd = hwnd
             except Exception:
                 pass
         
@@ -8356,6 +8333,91 @@ class GameControllerThread(QThread):
         self.last_hat_time = 0
         self.hat_delay = 0.05
         self.last_hat_value = (0, 0)
+        # sleep/wake 后 pygame 可能处于坏状态，做一次有限频率的自动恢复
+        self._last_reinit_time = 0.0
+        self._reinit_cooldown = 1.5  # seconds
+        self._consecutive_failures = 0
+
+    def _safe_index(self, arr, idx):
+        """安全读取列表索引，越界/异常返回 False（用于按钮状态）。"""
+        try:
+            if arr is None:
+                return False
+            if idx is None:
+                return False
+            if idx < 0:
+                return False
+            if idx >= len(arr):
+                return False
+            return bool(arr[idx])
+        except Exception:
+            return False
+
+    def _rescan_controllers(self):
+        """重新扫描当前可用的手柄并初始化（用于睡眠/唤醒后的自动重连）。"""
+        try:
+            pygame.joystick.quit()
+        except Exception:
+            pass
+        try:
+            pygame.joystick.init()
+        except Exception:
+            return
+
+        # 尽量清空旧状态，避免 instance_id 复用导致的脏数据
+        try:
+            self.controllers.clear()
+        except Exception:
+            self.controllers = {}
+
+        try:
+            count = pygame.joystick.get_count()
+        except Exception:
+            count = 0
+
+        for device_index in range(count):
+            try:
+                controller = pygame.joystick.Joystick(device_index)
+                controller.init()
+                mapping = ControllerMapping(controller)
+                iid = controller.get_instance_id()
+                self.controllers[iid] = {'controller': controller, 'mapping': mapping}
+                try:
+                    self._init_repeat_state_for_controller(iid)
+                except Exception:
+                    pass
+                try:
+                    self.controller_connected_signal.emit(controller.get_name())
+                except Exception:
+                    pass
+            except Exception:
+                continue
+
+    def _maybe_reinit_pygame_on_error(self, err: Exception):
+        """检测到 pygame/SDL 在睡眠唤醒后的异常时，做一次节流的恢复。"""
+        now = time.time()
+        if now - getattr(self, "_last_reinit_time", 0.0) < getattr(self, "_reinit_cooldown", 1.5):
+            return
+
+        msg = str(err)
+        # pygame/SDL 在 Win 睡眠唤醒后常见的错误形态
+        should_reinit = (
+            isinstance(err, SystemError)
+            or "returned a result with an error set" in msg
+            or "video system not initialized" in msg.lower()
+            or "joystick system not initialized" in msg.lower()
+            or "not initialized" in msg.lower()
+        )
+        if not should_reinit:
+            return
+
+        self._last_reinit_time = now
+        try:
+            pygame.event.clear()
+        except Exception:
+            pass
+        # 重扫手柄
+        self._rescan_controllers()
 
     def stop(self):
         """停止线程"""
@@ -8425,7 +8487,14 @@ class GameControllerThread(QThread):
                 pygame.event.pump()  # 确保事件队列被更新
 
                 # 处理事件
-                for event in pygame.event.get():
+                try:
+                    events = pygame.event.get()
+                except Exception as e:
+                    # 睡眠/唤醒后这里最容易炸（SystemError: <built-in function get> returned a result with an error set）
+                    self._maybe_reinit_pygame_on_error(e)
+                    raise
+
+                for event in events:
                     # 处理手柄连接事件
                     if event.type == pygame.JOYDEVICEADDED:
                         try:
@@ -8538,31 +8607,31 @@ class GameControllerThread(QThread):
                             pass
 
                     # 检查动作按钮
-                    if buttons[mapping.button_a]:  # A/Cross/○
+                    if self._safe_index(buttons, mapping.button_a):  # A/Cross/○
                         self.gamepad_signal.emit('A')
-                    if buttons[mapping.button_b]:  # B/Circle/×
+                    if self._safe_index(buttons, mapping.button_b):  # B/Circle/×
                         self.gamepad_signal.emit('B')
-                    if buttons[mapping.button_x]:  # X/Square/□
+                    if self._safe_index(buttons, mapping.button_x):  # X/Square/□
                         self.gamepad_signal.emit('X')
-                    if buttons[mapping.button_y]:  # Y/Triangle/△
+                    if self._safe_index(buttons, mapping.button_y):  # Y/Triangle/△
                         self.gamepad_signal.emit('Y')
-                    if buttons[mapping.guide]:
+                    if self._safe_index(buttons, mapping.guide):
                         self.gamepad_signal.emit('GUIDE')
-                    if buttons[mapping.back]:  # Back
+                    if self._safe_index(buttons, mapping.back):  # Back
                         self.gamepad_signal.emit('BACK')
-                    if buttons[mapping.start]:  # Start
+                    if self._safe_index(buttons, mapping.start):  # Start
                         self.gamepad_signal.emit('START')
-                    if buttons[mapping.left_bumper]:  # LB
+                    if self._safe_index(buttons, mapping.left_bumper):  # LB
                         self.gamepad_signal.emit('LB')
-                    if buttons[mapping.right_bumper]:  # RB
+                    if self._safe_index(buttons, mapping.right_bumper):  # RB
                         self.gamepad_signal.emit('RB')
                     #if buttons[mapping.left_trigger]:  # LT
                     #    self.gamepad_signal.emit('LT')
                     #if buttons[mapping.right_trigger]:  # RT
                     #    self.gamepad_signal.emit('RT')
-                    if buttons[mapping.left_stick_in]:  # LS
+                    if self._safe_index(buttons, mapping.left_stick_in):  # LS
                         self.gamepad_signal.emit('LS')
-                    if buttons[mapping.right_stick_in]:  # RS
+                    if self._safe_index(buttons, mapping.right_stick_in):  # RS
                         self.gamepad_signal.emit('RS')
 
                 time.sleep(0.01)
@@ -8571,6 +8640,16 @@ class GameControllerThread(QThread):
                 print(error_msg)
                 # 发出错误信号
                 self.controller_error_signal.emit(error_msg)
+                # 尝试在错误后做一次恢复（节流），避免唤醒后卡死在报错循环里
+                try:
+                    self._maybe_reinit_pygame_on_error(e)
+                except Exception:
+                    pass
+                # 小睡一下，避免错误时 CPU 飙升
+                try:
+                    time.sleep(0.2)
+                except Exception:
+                    pass
 
 class FileDialogThread(QThread):
     file_selected = pyqtSignal(str)  # 信号，用于传递选中的文件路径
@@ -10590,21 +10669,78 @@ class SettingsWindow(QWidget):
             return self.set_startup_enabled(enable=True)
     
     # 设置程序开机自启
-    def set_startup_enabled(self,enable):
+    def set_startup_enabled(self, enable):
+        tn = "DesktopGameStartup"
         if enable:
+            # 弹窗询问是否开机唤出主页面
+            confirm_dialog = ConfirmDialog("开机启动时是否打开主页面？\n（选择“取消”使用后台静默启动）", scale_factor=self.parent().scale_factor)
+            result = confirm_dialog.exec_()
+            if result == QDialog.Accepted:
+                args = ""  # 唤出主页面
+            else:
+                args = "startup"  # 不唤出主页面
             app_path = sys.executable
-            command = [
-                'schtasks', '/create', '/tn', "DesktopGameStartup", '/tr', f'"{app_path}" startup',
-                '/sc', 'onlogon', '/rl', 'highest', '/f'
-            ]
-            subprocess.run(command, check=True)
+            import tempfile, datetime, getpass
+            # 构建任务的 XML（确保电源相关设置为 false）
+            xml = f'''<?xml version="1.0" encoding="utf-16"?>
+<Task version="1.3" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Date>{datetime.datetime.now().isoformat()}</Date>
+    <Author>{getpass.getuser()}</Author>
+    <Description>DeskGamix auto start on logon</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>"{app_path}"</Command>
+      <Arguments>{args}</Arguments>
+    </Exec>
+  </Actions>
+</Task>'''
+            # 在 Windows 上确保写入并关闭临时文件后再调用 schtasks
+            fd, path = tempfile.mkstemp(suffix=".xml")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-16") as f:
+                    f.write(xml)
+                # 使用文本模式捕获输出，便于诊断失败原因
+                res = subprocess.run(['schtasks', '/create', '/tn', tn, '/xml', path, '/f'],
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                if res.returncode != 0:
+                    # 抛出包含 stderr 的异常，便于上层或日志查看
+                    raise subprocess.CalledProcessError(res.returncode, res.args, output=res.stdout, stderr=res.stderr)
+            finally:
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
         else:
             try:
-                command = ['schtasks', '/delete', '/tn', "DesktopGameStartup", '/f']
-                subprocess.run(command, check=True)
-            except FileNotFoundError:
+                subprocess.run(['schtasks', '/delete', '/tn', tn, '/f'], check=True)
+                # 添加取消开机自启成功弹窗
+                confirm_dialog = ConfirmDialog("已取消开机自启", scale_factor=self.parent().scale_factor)
+                confirm_dialog.exec_()
+            except subprocess.CalledProcessError:
                 pass
-            
     def toggle_killexplorer(self):
         """切换 killexplorer 状态并保存设置"""
         settings["killexplorer"] = not settings.get("killexplorer", False)
