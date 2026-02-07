@@ -473,12 +473,14 @@ class TaskbarWindow(QMainWindow):
 class MonitorRunningAppsThread(QThread):
     play_reload_signal = pyqtSignal()  # 用于通知主线程重载
     play_app_name_signal = pyqtSignal(list)  # 用于传递 play_app_name 到主线程
+    background_windows_changed = pyqtSignal()  # 当前可见窗口数量变化
 
     def __init__(self, play_lock, play_app_name):
         super().__init__()
         self.play_lock = play_lock
         self.play_app_name = play_app_name
         self.running = True
+        self._last_visible_count = None
 
     def check_running_apps(self):
         """检查当前运行的应用"""
@@ -511,6 +513,37 @@ class MonitorRunningAppsThread(QThread):
                 self.play_app_name_signal.emit(self.play_app_name)  # 将 play_app_name 发送到主线程
             else:
                 play_reload = False
+
+        # 额外：检查前台可见窗口数量是否变化，变化时通知主线程更新后台窗口列表
+        try:
+            visible_count = 0
+            def _cb(hwnd, lparam):
+                nonlocal visible_count
+                try:
+                    if win32gui.IsWindowVisible(hwnd):
+                        ex_style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+                        # 过滤工具窗口和无标题窗口
+                        if (ex_style & win32con.WS_EX_TOOLWINDOW) and not (ex_style & win32con.WS_EX_APPWINDOW):
+                            return True
+                        if win32gui.GetWindow(hwnd, win32con.GW_OWNER) and not (ex_style & win32con.WS_EX_APPWINDOW):
+                            return True
+                        title = win32gui.GetWindowText(hwnd)
+                        if title and title.strip():
+                            visible_count += 1
+                except Exception:
+                    pass
+                return True
+            win32gui.EnumWindows(_cb, None)
+            if self._last_visible_count is None:
+                self._last_visible_count = visible_count
+            elif visible_count != self._last_visible_count:
+                self._last_visible_count = visible_count
+                try:
+                    self.background_windows_changed.emit()
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def run(self):
         """后台线程的运行方法"""
@@ -3636,6 +3669,11 @@ class GameSelector(QWidget):
         self.monitor_thread = MonitorRunningAppsThread(self.play_lock, self.play_app_name)
         self.monitor_thread.play_app_name_signal.connect(self.update_play_app_name)  # 连接信号到槽
         self.monitor_thread.play_reload_signal.connect(self.handle_reload_signal)  # 连接信号到槽
+        # 当前台可见窗口数量发生变化时，刷新后台窗口列表以即时更新按钮
+        try:
+            self.monitor_thread.background_windows_changed.connect(self.update_background_buttons)
+        except Exception:
+            pass
         self.monitor_thread.start() 
         
         # 创建启动游戏的悬浮窗
@@ -4047,8 +4085,6 @@ class GameSelector(QWidget):
         self._kb_ignore_start_until = 0
         
         # 初始化后台窗口信息并更新按钮
-        # 注意：必须在所有UI组件创建完成后调用
-        self.update_background_windows()
         self.update_background_buttons()
         
         # 启动时的淡入动画（如果不是静默启动）
@@ -6328,35 +6364,35 @@ class GameSelector(QWidget):
         """获取所有正在运行的窗口列表，排除系统窗口"""
         windows = []
         def enum_window_callback(hwnd, lParam):
-            if win32gui.IsWindowVisible(hwnd):
-                # 过滤掉不在任务栏显示的窗口
-                ex_style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
-                if (ex_style & win32con.WS_EX_TOOLWINDOW) and not (ex_style & win32con.WS_EX_APPWINDOW):
-                    return True
-                if win32gui.GetWindow(hwnd, win32con.GW_OWNER) and not (ex_style & win32con.WS_EX_APPWINDOW):
-                    return True
-
+            try:
+                if not win32gui.IsWindowVisible(hwnd): return True
+                try: style = win32gui.GetWindowLong(hwnd, win32con.GWL_STYLE)
+                except: style = 0
+                if style & win32con.WS_CHILD: return True
+                try:
+                    DWMWA_CLOAKED = 14
+                    cloaked = ctypes.c_int(0)
+                    res = ctypes.windll.dwmapi.DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, ctypes.byref(cloaked), ctypes.sizeof(cloaked))
+                    if res == 0 and cloaked.value != 0: return True
+                except: pass
+                try: ex_style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+                except: ex_style = 0
+                if (ex_style & win32con.WS_EX_TOOLWINDOW) and not (ex_style & win32con.WS_EX_APPWINDOW): return True
+                owner = win32gui.GetWindow(hwnd, win32con.GW_OWNER)
+                if owner and not (ex_style & win32con.WS_EX_APPWINDOW): return True
                 title = win32gui.GetWindowText(hwnd)
-                # 过滤掉标题为空或系统窗口
-                if title and title.strip():
-                    try:
-                        _, pid = win32process.GetWindowThreadProcessId(hwnd)
-                        process = psutil.Process(pid)
-                        exe_path = process.exe()
-                        exe_name = os.path.basename(exe_path)
-                        # 过滤掉系统进程
-                        if exe_name.lower() not in ['TabTip.exe','explorer.exe', 'svchost.exe', 'csrss.exe', 'dwm.exe','taskhostw.exe','SearchUI.exe','SearchProtocolHost.exe','RuntimeBroker.exe','ShellExperienceHost.exe','SystemSettings.exe']:
-                            windows.append({
-                                'hwnd': hwnd,
-                                'title': title,
-                                'pid': pid,
-                                'exe_path': exe_path,
-                                'exe_name': exe_name
-                            })
-                    except Exception:
-                        pass
+                if not title or not title.strip(): return True
+                try:
+                    _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                    process = psutil.Process(pid)
+                    exe_path = process.exe()
+                    exe_name = os.path.basename(exe_path)
+                    if exe_name.lower() in ['tabtip.exe','svchost.exe','csrss.exe','dwm.exe','taskhostw.exe','searchui.exe','searchprotocolhost.exe','runtimebroker.exe','shellexperiencehost.exe','systemsettings.exe','desktopgame.exe']:
+                        return True
+                    windows.append({'hwnd': hwnd,'title': title,'pid': pid,'exe_path': exe_path,'exe_name': exe_name})
+                except: return True
+            except: return True
             return True
-        
         win32gui.EnumWindows(enum_window_callback, None)
         return windows
     
@@ -6392,13 +6428,9 @@ class GameSelector(QWidget):
         
         return icon
     
-    def update_background_windows(self):
-        """更新后台窗口列表"""
-        self.background_windows = self.get_running_windows()
-    
     def update_background_buttons(self):
         """更新前3个按钮的显示，显示后台应用程序图标"""
-        self.update_background_windows()
+        self.background_windows = self.get_running_windows()
         
         # 显示前3个后台应用图标
         for i in range(3):
@@ -6410,10 +6442,36 @@ class GameSelector(QWidget):
                 
                 # 尝试设置图标
                 icon = self.get_window_icon(window_info['exe_path'], size=int(50 * self.scale_factor))
-                if icon:
+                # 如果有可用图标则直接使用，否则用窗口标题的第一个字符生成占位图标
+                if icon and not icon.isNull():
                     btn.setIcon(icon)
                     btn.setIconSize(QSize(int(50 * self.scale_factor), int(50 * self.scale_factor)))
-                
+                else:
+                    title = window_info.get('title', '') if window_info else ''
+                    ch = title.strip()[0] if title and title.strip() else '?'
+                    size_px = int(50 * self.scale_factor)
+                    pix = QPixmap(QSize(size_px, size_px))
+                    pix.fill(Qt.transparent)
+                    painter = QPainter(pix)
+                    painter.setRenderHint(QPainter.Antialiasing)
+                    # 背景圆角矩形
+                    bg_color = QColor(80, 80, 80)
+                    painter.setBrush(bg_color)
+                    painter.setPen(Qt.NoPen)
+                    radius = int(size_px * 0.2)
+                    painter.drawRoundedRect(0, 0, size_px, size_px, radius, radius)
+                    # 绘制文字
+                    font = QFont("Microsoft YaHei", max(10, int(size_px * 0.5)))
+                    painter.setFont(font)
+                    painter.setPen(QColor(255, 255, 255))
+                    fm = QtGui.QFontMetrics(font)
+                    w = fm.horizontalAdvance(ch)
+                    h = fm.height()
+                    painter.drawText((size_px - w) // 2, (size_px + h) // 2 - fm.descent(), ch)
+                    painter.end()
+                    btn.setIcon(QIcon(pix))
+                    btn.setIconSize(pix.size())
+
                 # 保存窗口信息到按钮（用于点击时调用）
                 btn.window_info = window_info
                 btn.setVisible(True)
@@ -6435,6 +6493,11 @@ class GameSelector(QWidget):
             def wake_window():
                 window_info = btn.window_info
                 hwnd = window_info['hwnd']
+                # 检查窗口是否存在
+                if not win32gui.IsWindow(hwnd):
+                    # 如果窗口不存在，刷新后台窗口列表
+                    self.update_background_buttons()
+                    return
                 # 恢复窗口
                 win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
                 win32gui.SetForegroundWindow(hwnd)
@@ -6655,73 +6718,69 @@ class GameSelector(QWidget):
             self.animation.finished.connect(on_animation_finished)
             self.animation.start()
             # 直接更新后台窗口列表
-            self.update_background_windows()
+            self.background_windows = self.get_running_windows()
             self.show_background_apps = True
-            self._continue_background_mode_switch()
-    
-    def _continue_background_mode_switch(self):
-        """继续执行后台模式切换的剩余逻辑"""
-        # 获取剩余的应用（跳过前3个）
-        remaining_windows = self.background_windows[3:]
-        # 存储剩余应用数量用于导航限制
-        self.remaining_windows_count = len(remaining_windows)
-        
-        # 遍历前6个控制按钮作为任务按钮
-        for i in range(6):
-            btn = self.control_buttons[i]
+            # 获取剩余的应用（跳过前3个）
+            remaining_windows = self.background_windows[3:]
+            # 存储剩余应用数量用于导航限制
+            self.remaining_windows_count = len(remaining_windows)
+            
+            # 遍历前6个控制按钮作为任务按钮
+            for i in range(6):
+                btn = self.control_buttons[i]
+                try:
+                    btn.clicked.disconnect()
+                except TypeError:
+                    pass
+                
+                btn.setText('')
+                btn.setIcon(QIcon())
+                btn.window_info = None
+                
+                if i < len(remaining_windows):
+                    window_info = remaining_windows[i]
+                    icon = self.get_window_icon(window_info['exe_path'], size=int(50 * self.scale_factor))
+                    if icon:
+                        btn.setIcon(icon)
+                        btn.setIconSize(QSize(int(50 * self.scale_factor), int(50 * self.scale_factor)))
+                    
+                    btn.window_info = window_info
+                    
+                    def on_click(checked=False, idx=i, info=window_info):
+                        if self.current_section != 1 or self.current_index != idx:
+                            self.current_section = 1
+                            self.current_index = idx
+                            self.update_highlight()
+                            return
+                        self.restore_background_window(info)
+
+                    btn.clicked.connect(on_click)
+                    btn.setVisible(True)
+                else:
+                    btn.setVisible(False)
+
+            # 处理第7个按钮
+            show_all_btn = self.control_buttons[6]
             try:
-                btn.clicked.disconnect()
+                show_all_btn.clicked.disconnect()
             except TypeError:
                 pass
-            
-            btn.setText('')
-            btn.setIcon(QIcon())
-            btn.window_info = None
-            
-            if i < len(remaining_windows):
-                window_info = remaining_windows[i]
-                icon = self.get_window_icon(window_info['exe_path'], size=int(50 * self.scale_factor))
-                if icon:
-                    btn.setIcon(icon)
-                    btn.setIconSize(QSize(int(50 * self.scale_factor), int(50 * self.scale_factor)))
-                
-                btn.window_info = window_info
-                
-                def on_click(checked=False, idx=i, info=window_info):
-                    if self.current_section != 1 or self.current_index != idx:
-                        self.current_section = 1
-                        self.current_index = idx
-                        self.update_highlight()
-                        return
-                    self.restore_background_window(info)
 
-                btn.clicked.connect(on_click)
-                btn.setVisible(True)
+            if len(remaining_windows) > 6:
+                show_all_btn.setText("...")  # 或其他图标
+                show_all_btn.setIcon(QIcon()) # 清除旧图标
+                show_all_btn.setVisible(True)
+                
+                def show_all_apps():
+                    self.hide_window()
+                    # 模拟 Win + Tab
+                    pyautogui.keyDown('win')
+                    pyautogui.press('tab')
+                    pyautogui.keyUp('win')
+
+                show_all_btn.clicked.connect(show_all_apps)
             else:
-                btn.setVisible(False)
-
-        # 处理第7个按钮
-        show_all_btn = self.control_buttons[6]
-        try:
-            show_all_btn.clicked.disconnect()
-        except TypeError:
-            pass
-
-        if len(remaining_windows) > 6:
-            show_all_btn.setText("...")  # 或其他图标
-            show_all_btn.setIcon(QIcon()) # 清除旧图标
-            show_all_btn.setVisible(True)
-            
-            def show_all_apps():
-                self.hide_window()
-                # 模拟 Win + Tab
-                pyautogui.keyDown('win')
-                pyautogui.press('tab')
-                pyautogui.keyUp('win')
-
-            show_all_btn.clicked.connect(show_all_apps)
-        else:
-            show_all_btn.setVisible(False)
+                show_all_btn.setVisible(False)
     
     def restore_control_buttons(self):
         """将控制按钮区域恢复为初始模样（3后台+4功能键）"""
