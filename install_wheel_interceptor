@@ -1,0 +1,104 @@
+#鼠标滚轮下滑进入主页面参考代码
+----------------------------------------------------------1
+        # 在主界面时拦截滚轮（向下滚动切换到所有软件），初始化时如果处于主界面则安装拦截器
+        try: self._install_wheel_interceptor() 
+        except Exception: pass
+----------------------------------------------------------0
+...
+----------------------------------------------------------
+    def switch_to_all_software(self):
+        """切换到"所有软件"界面"""
+        self.scale_factor2 = self.scale_factor  # 用于按钮和图像的缩放因数
+        self.current_index = 0
+        self.more_section = 1
+----------------------------------------------------------1
+        # 切换到 "所有软件" 时取消拦截滚轮
+        try:
+            self._remove_wheel_interceptor()
+        except Exception:
+            pass
+----------------------------------------------------------0
+        # 使用淡出过渡动画改变 scroll_area 大小并隐藏控制按钮
+        try:
+            target_h = int(self.height() * 0.85)
+            self.animate_scroll_area_transition(target_h, show_controls=False, duration=200)
+        except Exception:
+            self.scroll_area.setFixedHeight(int(self.height() * 0.85))
+            self.toggle_control_buttons(False)
+            self.reload_interface()
+    def switch_to_main_interface(self):
+        """切换到主界面"""
+        self.scale_factor2 = self.scale_factor * 2  # 用于按钮和图像的缩放因数
+        self.current_section = 0
+        self.current_index = 0
+        self.more_section = 0
+        target_h = int(320 * self.scale_factor * 2.4)
+        try:
+            self.animate_scroll_area_transition(target_h, show_controls=True, duration=200)
+        except Exception:
+            self.scroll_area.setFixedHeight(target_h)
+            self.toggle_control_buttons(True)
+            self.reload_interface()
+----------------------------------------------------------1
+        # 切换回主界面时安装滚轮拦截器
+        try:
+            self._install_wheel_interceptor()
+        except Exception:
+            pass
+
+    def _install_wheel_interceptor(self):
+        """安装滚轮拦截器：当在主界面时，向下滚动切换到“所有软件”。"""
+        try:
+            from PyQt5.QtCore import QObject, QEvent, QTimer
+            class _WheelFilter(QObject):
+                def __init__(self, parent):
+                    super().__init__(parent)
+                    self._parent = parent
+                def eventFilter(self, obj, event):
+                    try:
+                        if event.type() == QEvent.Wheel:
+                            # Qt5: use angleDelta().y()
+                            delta = 0
+                            try:
+                                delta = event.angleDelta().y()
+                            except Exception:
+                                try:
+                                    delta = event.delta()
+                                except Exception:
+                                    delta = 0
+                            # 下滚为负值 -> 切换到所有软件
+                            if delta < 0:
+                                QTimer.singleShot(0, self._parent.switch_to_all_software)
+                                return True
+                        return False
+                    except Exception:
+                        return False
+
+            # 先尝试移除已存在的拦截器
+            try:
+                self._remove_wheel_interceptor()
+            except Exception:
+                pass
+
+            if hasattr(self, 'scroll_area') and self.scroll_area is not None:
+                self._wheel_filter = _WheelFilter(self)
+                try:
+                    self.scroll_area.viewport().installEventFilter(self._wheel_filter)
+                    self._wheel_intercept_enabled = True
+                except Exception:
+                    self._wheel_filter = None
+        except Exception:
+            pass
+
+    def _remove_wheel_interceptor(self):
+        try:
+            if hasattr(self, '_wheel_filter') and getattr(self, '_wheel_filter') is not None:
+                try:
+                    self.scroll_area.viewport().removeEventFilter(self._wheel_filter)
+                except Exception:
+                    pass
+                self._wheel_filter = None
+            self._wheel_intercept_enabled = False
+        except Exception:
+            pass
+----------------------------------------------------------0
