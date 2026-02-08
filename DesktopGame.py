@@ -3742,12 +3742,9 @@ class GameSelector(QWidget):
                 }}
             """)
             # 记录模式并统一连接到点击处理器，处理器会实现"第一次点击只聚焦，第二次执行"逻辑
-            if i == 0 or i == 1 or i == 2:
+            if i == 0 or i == 1 or i == 2 or i == 3:
                 # 前3个按钮为后台任务切换按钮
                 self.control_button_modes[i] = 'background'
-            elif i == 3:
-                self.control_button_modes[i] = 'mouse'
-                btn.setText("🖱️")
             elif i == 4:
                 self.control_button_modes[i] = 'image'
                 btn.setText("🗺️")
@@ -4793,12 +4790,6 @@ class GameSelector(QWidget):
             if mode == 'background':
                 try:
                     self.on_background_button_clicked(idx)
-                except Exception:
-                    pass
-            elif mode == 'mouse':
-                try:
-                    self.hide_window()
-                    self.mouse_simulation()
                 except Exception:
                     pass
             elif mode == 'image':
@@ -5868,7 +5859,7 @@ class GameSelector(QWidget):
                             border: {int(4 * self.scale_factor)}px solid #25ade7;
                         }}
                     """)
-                    # 只为选中按钮显示标签（前3个显示窗口名，其余显示固定中文名）
+                    # 只为选中按钮显示标签（前4个显示窗口名，其余显示固定中文名）
                     self._show_control_button_label(btn, index)
                 else:
                     btn.setStyleSheet(f"""
@@ -6166,7 +6157,6 @@ class GameSelector(QWidget):
     def _show_control_button_label(self, btn, index):
         """在控制按钮上方显示窗口缩略图，下方显示文字标签"""
         labels_map = {
-            3: '鼠标模拟',
             4: '全部截图',
             5: '系统休眠',
             6: '系统关机'
@@ -6428,12 +6418,36 @@ class GameSelector(QWidget):
         
         return icon
     
+    def _create_text_placeholder_icon(self, text, size_px):
+        """根据文本生成占位图标"""
+        ch = text.strip()[0] if text and text.strip() else '?'
+        pix = QPixmap(QSize(size_px, size_px))
+        pix.fill(Qt.transparent)
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.Antialiasing)
+        # 背景圆角矩形
+        bg_color = QColor(80, 80, 80)
+        painter.setBrush(bg_color)
+        painter.setPen(Qt.NoPen)
+        radius = int(size_px * 0.2)
+        painter.drawRoundedRect(0, 0, size_px, size_px, radius, radius)
+        # 绘制文字
+        font = QFont("Microsoft YaHei", max(10, int(size_px * 0.5)))
+        painter.setFont(font)
+        painter.setPen(QColor(255, 255, 255))
+        fm = QtGui.QFontMetrics(font)
+        w = fm.horizontalAdvance(ch)
+        h = fm.height()
+        painter.drawText((size_px - w) // 2, (size_px + h) // 2 - fm.descent(), ch)
+        painter.end()
+        return QIcon(pix)
+    
     def update_background_buttons(self):
         """更新前3个按钮的显示，显示后台应用程序图标"""
         self.background_windows = self.get_running_windows()
         
         # 显示前3个后台应用图标
-        for i in range(3):
+        for i in range(4):
             btn = self.control_buttons[i]
             if i < len(self.background_windows):
                 window_info = self.background_windows[i]
@@ -6448,29 +6462,10 @@ class GameSelector(QWidget):
                     btn.setIconSize(QSize(int(50 * self.scale_factor), int(50 * self.scale_factor)))
                 else:
                     title = window_info.get('title', '') if window_info else ''
-                    ch = title.strip()[0] if title and title.strip() else '?'
                     size_px = int(50 * self.scale_factor)
-                    pix = QPixmap(QSize(size_px, size_px))
-                    pix.fill(Qt.transparent)
-                    painter = QPainter(pix)
-                    painter.setRenderHint(QPainter.Antialiasing)
-                    # 背景圆角矩形
-                    bg_color = QColor(80, 80, 80)
-                    painter.setBrush(bg_color)
-                    painter.setPen(Qt.NoPen)
-                    radius = int(size_px * 0.2)
-                    painter.drawRoundedRect(0, 0, size_px, size_px, radius, radius)
-                    # 绘制文字
-                    font = QFont("Microsoft YaHei", max(10, int(size_px * 0.5)))
-                    painter.setFont(font)
-                    painter.setPen(QColor(255, 255, 255))
-                    fm = QtGui.QFontMetrics(font)
-                    w = fm.horizontalAdvance(ch)
-                    h = fm.height()
-                    painter.drawText((size_px - w) // 2, (size_px + h) // 2 - fm.descent(), ch)
-                    painter.end()
-                    btn.setIcon(QIcon(pix))
-                    btn.setIconSize(pix.size())
+                    icon = self._create_text_placeholder_icon(title, size_px)
+                    btn.setIcon(icon)
+                    btn.setIconSize(QSize(size_px, size_px))
 
                 # 保存窗口信息到按钮（用于点击时调用）
                 btn.window_info = window_info
@@ -6482,7 +6477,7 @@ class GameSelector(QWidget):
                 btn.setVisible(True)
         
         # 如果有超过3个后台应用，添加额外按钮容器
-        if len(self.background_windows) > 3:
+        if len(self.background_windows) > 4:
             self.create_extra_background_buttons()
     
     def on_background_button_clicked(self, button_index):
@@ -6510,7 +6505,7 @@ class GameSelector(QWidget):
             return
         
         # 如果少于等于3个应用，不需要额外按钮
-        if len(self.background_windows) <= 3:
+        if len(self.background_windows) <= 4:
             # 移除所有额外按钮
             # 首先检查当前布局中是否已经有额外按钮
             current_extra_buttons = []
@@ -6549,13 +6544,18 @@ class GameSelector(QWidget):
                 print(f"Error removing old extra buttons: {e}")
         
         # 为超过3个的应用添加一个大按钮
-        if len(self.background_windows) > 3:
+        if len(self.background_windows) > 4:
             # 获取所有额外应用的图标（放大一倍）
             extra_icons = []
-            for i in range(3, len(self.background_windows)):
+            for i in range(4, len(self.background_windows)):
                 window_info = self.background_windows[i]
                 icon = self.get_window_icon(window_info['exe_path'], size=int(36 * self.scale_factor))  # 放大一倍图标
-                if icon:
+                if icon and not icon.isNull():
+                    extra_icons.append(icon.pixmap(QSize(int(36 * self.scale_factor), int(36 * self.scale_factor))))
+                else:
+                    # 图标加载失败，使用文字占位图标
+                    title = window_info.get('title', '') if window_info else ''
+                    icon = self._create_text_placeholder_icon(title, int(36 * self.scale_factor))
                     extra_icons.append(icon.pixmap(QSize(int(36 * self.scale_factor), int(36 * self.scale_factor))))
             
             btn = QPushButton()
@@ -6721,7 +6721,7 @@ class GameSelector(QWidget):
             self.background_windows = self.get_running_windows()
             self.show_background_apps = True
             # 获取剩余的应用（跳过前3个）
-            remaining_windows = self.background_windows[3:]
+            remaining_windows = self.background_windows[4:]
             # 存储剩余应用数量用于导航限制
             self.remaining_windows_count = len(remaining_windows)
             
@@ -6740,9 +6740,15 @@ class GameSelector(QWidget):
                 if i < len(remaining_windows):
                     window_info = remaining_windows[i]
                     icon = self.get_window_icon(window_info['exe_path'], size=int(50 * self.scale_factor))
-                    if icon:
+                    if icon and not icon.isNull():
                         btn.setIcon(icon)
                         btn.setIconSize(QSize(int(50 * self.scale_factor), int(50 * self.scale_factor)))
+                    else:
+                        title = window_info.get('title', '') if window_info else ''
+                        size_px = int(50 * self.scale_factor)
+                        icon = self._create_text_placeholder_icon(title, size_px)
+                        btn.setIcon(icon)
+                        btn.setIconSize(QSize(size_px, size_px))
                     
                     btn.window_info = window_info
                     
@@ -6783,7 +6789,7 @@ class GameSelector(QWidget):
                 show_all_btn.setVisible(False)
     
     def restore_control_buttons(self):
-        """将控制按钮区域恢复为初始模样（3后台+4功能键）"""
+        """将控制按钮区域恢复为初始模样（4后台+3功能键）"""
         # 重置显示状态
         self.show_background_apps = False
         
@@ -6798,12 +6804,9 @@ class GameSelector(QWidget):
             except TypeError:
                 pass
             
-            if i < 3:
+            if i < 4:
                 # 前3个按钮已通过update_background_buttons更新
                 pass
-            elif i == 3:
-                btn.setText("🖱️")
-                btn.setIcon(QIcon())
             elif i == 4:
                 btn.setText("🗺️")
                 btn.setIcon(QIcon())
@@ -7503,7 +7506,8 @@ class GameSelector(QWidget):
                 elif action == 'A':
                     self.control_buttons[self.current_index].click()
                 elif action == 'X':  # X键开悬浮窗
-                    self.show_more_window()  # 打开悬浮窗
+                    self.control_buttons[self.current_index].click()
+                    QTimer.singleShot(250, self.mouse_simulation)
                 elif action == 'B':
                     #self.exitdef()  # 退出程序
                     self.hide_window()
@@ -8412,46 +8416,6 @@ class GameControllerThread(QThread):
         except Exception:
             return False
 
-    def _rescan_controllers(self):
-        """重新扫描当前可用的手柄并初始化（用于睡眠/唤醒后的自动重连）。"""
-        try:
-            pygame.joystick.quit()
-        except Exception:
-            pass
-        try:
-            pygame.joystick.init()
-        except Exception:
-            return
-
-        # 尽量清空旧状态，避免 instance_id 复用导致的脏数据
-        try:
-            self.controllers.clear()
-        except Exception:
-            self.controllers = {}
-
-        try:
-            count = pygame.joystick.get_count()
-        except Exception:
-            count = 0
-
-        for device_index in range(count):
-            try:
-                controller = pygame.joystick.Joystick(device_index)
-                controller.init()
-                mapping = ControllerMapping(controller)
-                iid = controller.get_instance_id()
-                self.controllers[iid] = {'controller': controller, 'mapping': mapping}
-                try:
-                    self._init_repeat_state_for_controller(iid)
-                except Exception:
-                    pass
-                try:
-                    self.controller_connected_signal.emit(controller.get_name())
-                except Exception:
-                    pass
-            except Exception:
-                continue
-
     def _maybe_reinit_pygame_on_error(self, err: Exception):
         """检测到 pygame/SDL 在睡眠唤醒后的异常时，做一次节流的恢复。"""
         now = time.time()
@@ -8475,8 +8439,7 @@ class GameControllerThread(QThread):
             pygame.event.clear()
         except Exception:
             pass
-        # 重扫手柄
-        self._rescan_controllers()
+        self.run()
 
     def stop(self):
         """停止线程"""
@@ -9146,113 +9109,6 @@ class FloatingWindow(QWidget):
         # 保持悬浮窗可见
         self.add_item_window.show()
 
-    #def show_custom_bat_editor(self):
-    #    """显示自定义bat编辑器"""
-    #    # 创建自定义 BAT 编辑器窗口
-    #    self.custom_bat_editor = QWidget(self, Qt.Popup)
-    #    self.custom_bat_editor.setWindowFlags(Qt.FramelessWindowHint | Qt.Popup)
-    #    self.custom_bat_editor.setStyleSheet(f"""
-    #        QWidget {{
-    #            background-color: rgba(46, 46, 46, 0.95);
-    #            border-radius: {int(15 * self.parent().scale_factor)}px;
-    #            border: {int(2 * self.parent().scale_factor)}px solid #444444;
-    #        }}
-    #    """)
-#
-    #    layout = QVBoxLayout(self.custom_bat_editor)
-    #    layout.setSpacing(int(15 * self.parent().scale_factor))
-    #    layout.setContentsMargins(int(20 * self.parent().scale_factor), int(20 * self.parent().scale_factor), int(20 * self.parent().scale_factor), int(20 * self.parent().scale_factor))
-#
-    #    # 文本框：显示和编辑 bat 脚本
-    #    self.bat_text_edit = QTextEdit()
-    #    self.bat_text_edit.setPlaceholderText("请输入脚本内容...")
-    #    self.bat_text_edit.setStyleSheet(f"""
-    #        QTextEdit {{
-    #            background-color: rgba(255, 255, 255, 0.1);
-    #            color: white;
-    #            border: {int(1 * self.parent().scale_factor)}px solid #444444;
-    #            border-radius: {int(10 * self.parent().scale_factor)}px;
-    #            padding: {int(12 * self.parent().scale_factor)}px;
-    #            font-size: {int(14 * self.parent().scale_factor)}px;           
-    #        }}
-    #    """)
-    #    layout.addWidget(self.bat_text_edit)
-#
-    #    # 添加程序按钮
-    #    self.add_program_button = QPushButton("添加程序")
-    #    self.add_program_button.setStyleSheet(f"""
-    #        QPushButton {{
-    #            background-color: #5f5f5f;
-    #            color: white;
-    #            border: none;
-    #            border-radius: {int(8 * self.parent().scale_factor)}px;
-    #            padding: {int(10 * self.parent().scale_factor)}px {int(20 * self.parent().scale_factor)}px;
-    #            font-size: {int(14 * self.parent().scale_factor)}px;
-    #        }}
-    #        QPushButton:hover {{
-    #            background-color: #808080;
-    #        }}
-    #        QPushButton:pressed {{
-    #            background-color: #333333;
-    #        }}
-    #    """)
-    #    self.add_program_button.clicked.connect(self.add_program_to_bat)
-    #    layout.addWidget(self.add_program_button)
-#
-    #    # 保存bat按钮
-    #    self.save_bat_button = QPushButton("保存bat")
-    #    self.save_bat_button.setStyleSheet(f"""
-    #        QPushButton {{
-    #            background-color: #4CAF50;
-    #            color: white;
-    #            border: none;
-    #            border-radius: {int(8 * self.parent().scale_factor)}px;
-    #            padding: {int(10 * self.parent().scale_factor)}px {int(20 * self.parent().scale_factor)}px;
-    #            font-size: {int(16 * self.parent().scale_factor)}px;
-    #        }}
-    #        QPushButton:hover {{
-    #            background-color: #45a049;
-    #        }}
-    #        QPushButton:pressed {{
-    #            background-color: #388e3c;
-    #        }}
-    #    """)
-    #    self.save_bat_button.clicked.connect(self.save_custom_bat)
-    #    layout.addWidget(self.save_bat_button)
-    #    self.custom_bat_editor.move(0, 100)
-    #    self.custom_bat_editor.setLayout(layout)
-    #    self.custom_bat_editor.show()
-
-
-    #def add_program_to_bat(self):
-    #    """添加程序到bat"""
-    #    file_dialog = QFileDialog(self, "选择一个可执行文件", "", "Executable Files (*.exe)")
-    #    file_dialog.setFileMode(QFileDialog.ExistingFile)
-    #    if file_dialog.exec_():
-    #        selected_file = file_dialog.selectedFiles()[0]
-    #        program_dir = os.path.dirname(selected_file)
-    #        self.bat_text_edit.append(f'cd /d "{program_dir}"\nstart "" "{selected_file}"\n')
-    #        self.add_item_window.show()
-    #        self.custom_bat_editor.show()
-#
-    #def save_custom_bat(self):
-    #    """保存自定义bat"""
-    #    bat_dir = './bat/Customize'
-    #    if not os.path.exists(bat_dir):
-    #        os.makedirs(bat_dir)  # 创建目录
-    #    bat_content = self.bat_text_edit.toPlainText()
-    #    bat_path = os.path.join(program_directory, "./bat/Customize/Customize.bat")
-    #    counter = 1
-    #    while os.path.exists(bat_path):
-    #        bat_path = os.path.join(program_directory, f"./bat/Customize/Customize_{counter}.bat")
-    #        counter += 1
-    #    bat_path = os.path.abspath(bat_path)
-    #    with open(bat_path, "w", encoding="utf-8") as f:
-    #        f.write(bat_content)
-    #    self.selected_item_label.setText(bat_path)
-    #    self.custom_bat_editor.hide()
-    #    self.add_item_window.show()
-
     def save_item(self):
         """保存项目"""
         name = self.name_edit.text()
@@ -9421,16 +9277,28 @@ class ControllerMapping:
         self.button_b = 1
         self.button_x = 2
         self.button_y = 3
-        self.dpad_up = 11
-        self.dpad_down = 12
-        self.dpad_left = 13
-        self.dpad_right = 14
-        self.guide = 5
-        self.left_stick_x = 0
-        self.left_stick_y = 1
-        self.right_stick_x = 3
-        self.right_stick_y = 4
-        self.has_hat = False
+        
+        # 摇杆映射
+        self.left_stick_x = 0   # 左摇杆左右
+        self.left_stick_y = 1   # 左摇杆上下
+        self.right_stick_x = 2  # 右摇杆左右
+        self.right_stick_y = 3  # 右摇杆上下
+        
+        # 扳机键映射（如果需要）
+        self.left_trigger = 2   # 左扳机
+        self.right_trigger = 5  # 右扳机
+        
+        # 其他按钮映射（如果需要）
+        self.left_bumper = 4    # 左肩键
+        self.right_bumper = 5   # 右肩键
+        self.back = 6           # Back 键
+        self.start = 7          # Start 键
+        self.left_stick_in = 8  # 左摇杆按下
+        self.right_stick_in = 9 # 右摇杆按下
+        self.guide = 10         # Guide 键
+            
+        # D-pad 使用 hat
+        self.has_hat = True
         self.controller_type = "unknown"  # 添加控制器类型标识
         
         # Xbox 360 Controller
