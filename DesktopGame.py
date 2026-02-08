@@ -9,7 +9,7 @@ from PyQt5 import QtGui
 import pygame, math
 from PIL import Image
 import win32gui,win32process,psutil,win32api,win32ui
-from PyQt5.QtWidgets import QApplication, QListWidgetItem, QMainWindow, QMessageBox, QScroller, QSystemTrayIcon, QMenu , QVBoxLayout, QDialog, QGridLayout, QWidget, QPushButton, QLabel, QDesktopWidget, QHBoxLayout, QFileDialog, QSlider, QLineEdit, QProgressBar, QScrollArea, QFrame
+from PyQt5.QtWidgets import QApplication, QListWidgetItem, QMainWindow, QMessageBox, QScroller, QSystemTrayIcon, QMenu , QVBoxLayout, QDialog, QGridLayout, QWidget, QPushButton, QLabel, QDesktopWidget, QHBoxLayout, QFileDialog, QSlider, QLineEdit, QProgressBar, QScrollArea, QFrame, QTabWidget
 from PyQt5.QtGui import QPainter, QPen, QBrush, QFont, QPixmap, QIcon, QColor, QLinearGradient, QKeySequence
 from PyQt5.QtCore import QDateTime, QSize, Qt, QThread, pyqtSignal, QTimer, QPoint, QProcess, QPropertyAnimation, QRect, QObject, QEasingCurve
 import subprocess, time, os,win32con, ctypes, re, win32com.client, ctypes, time, pyautogui
@@ -7354,7 +7354,7 @@ class GameSelector(QWidget):
             return
         # 检查 floating_window 的 confirm_dialog
         if getattr(self, 'floating_window', None) and hasattr(self.floating_window, 'confirm_dialog') and self.floating_window.confirm_dialog and self.floating_window.confirm_dialog.isVisible():
-            self.floating_window.handle_gamepad_input(action)
+            self.floating_window.handle_gamepad_input(action, firstinput)
             self.ignore_input_until = pygame.time.get_ticks() + 300 
             return
         
@@ -7416,32 +7416,13 @@ class GameSelector(QWidget):
                 self.launch_overlay._stop_launch_animations()
         # 正常窗口处理逻辑
         if hasattr(self, 'screenshot_window') and self.screenshot_window.isVisible():
-            print("截图悬浮窗显示中")
             self.ignore_input_until = current_time + 200
             self.screenshot_window.handle_gamepad_input(action)
             return
         
         if getattr(self, 'floating_window', None) and self.floating_window.isVisible():
-            # 添加防抖检查（方向键可绕过浮窗防抖以获得更灵敏的导航）
-            if not is_direction and not self.floating_window.can_process_input():
-                return
-            
-            if action == 'UP':
-                self.floating_window.current_index = max(0, self.floating_window.current_index - 1)
-                self.floating_window.update_highlight()
-            elif action == 'DOWN':
-                self.floating_window.current_index = min(
-                    len(self.floating_window.buttons) - 1,
-                    self.floating_window.current_index + 1
-                )
-                self.floating_window.update_highlight()
-            elif action == 'A':
-                self.execute_more_item()
-            elif action in ('B', 'X'):  # B键或X键都可以关闭悬浮窗
-                self.floating_window.hide()
-            elif action == 'Y':
-                self.floating_window.toggle_favorite()
-            self.last_input_time = current_time
+            self.ignore_input_until = current_time + 200
+            self.floating_window.handle_gamepad_input(action, firstinput)
             return
 
         # 新增焦点切换逻辑
@@ -7539,6 +7520,7 @@ class GameSelector(QWidget):
                     self.ignore_input_until = pygame.time.get_ticks() + 300 
                 elif action == 'X':  # X键开悬浮窗
                     self.show_more_window()  # 打开悬浮窗
+                    self.ignore_input_until = current_time + 400
                 elif action == 'START':  # START键打开游戏详情
                     self.open_selected_game_screenshot()
                 elif action == 'BACK':  # SELECT键打开设置
@@ -7993,47 +7975,65 @@ class GameSelector(QWidget):
 
     def show_more_window(self):
         """显示更多选项窗口"""
-        if not self.floating_window:
-            self.floating_window = FloatingWindow(self)
-            
+        # 每次打开时都创建一个新的FloatingWindow实例，确保懒加载状态正确
+        self.floating_window = FloatingWindow(self)
+        
         # 计算悬浮窗位置
         button_pos = self.more_button.mapToGlobal(self.more_button.rect().bottomLeft())
         self.floating_window.move(button_pos.x(), button_pos.y() + 10)
         
         self.floating_window.show()
-        # 重新加载按钮
-        for button in self.floating_window.buttons:
-            button.setParent(None)
-        self.floating_window.buttons.clear()
-        self.floating_window.create_buttons()
+        # 初始加载工具标签页的按钮
+        self.floating_window.load_tab_buttons(0)
+        self.floating_window.tabs_loaded[0] = True
         self.floating_window.update_highlight()
 
-    def execute_more_item(self, file=None, enable_mouse_sim=True):
+    def execute_more_item(self, file=None):
         """执行更多选项中的项目"""
         if not self.floating_window:
             return
     
-        sorted_files = self.floating_window.sort_files()
+        # 根据当前标签页获取文件列表
         if file:
             current_file = file
         else:
+            if self.floating_window.current_tab_index == 0:  # 工具标签页
+                sorted_files = self.floating_window.sort_files()
+            elif self.floating_window.current_tab_index == 1:  # 桌面标签页
+                sorted_files = self.floating_window.get_desktop_files()
+            elif self.floating_window.current_tab_index == 2:  # 全部应用标签页
+                sorted_files = self.floating_window.get_start_menu_items()
+            else:
+                return
+            
+            if self.floating_window.current_index >= len(sorted_files):
+                return
             current_file = sorted_files[self.floating_window.current_index]
     
-        current_file["path"] = os.path.abspath(os.path.join("./morefloder/", current_file["path"]))
-        if current_file["name"] in self.floating_window.current_running_apps:
+        # 处理文件路径
+        if current_file.get("type") == "tool":
+            # 工具标签页的文件路径是相对路径
+            current_file["path"] = os.path.abspath(os.path.join("./morefloder/", current_file["path"]))
+        else:
+            # 桌面和开始菜单的文件路径已经是绝对路径
+            current_file["path"] = os.path.abspath(current_file["path"])
+        
+        # 检查是否在运行中（仅工具标签页）
+        if current_file.get("type") == "tool" and current_file["name"] in self.floating_window.current_running_apps:
             self.restore_window(get_target_path(current_file["path"]))
         else:
-            # 更新最近使用列表
-            if "more_last_used" not in settings:
-                settings["more_last_used"] = []
-    
-            if current_file["name"] in settings["more_last_used"]:
-                settings["more_last_used"].remove(current_file["name"])
-            settings["more_last_used"].insert(0, current_file["name"])
-    
-            # 保存设置
-            with open(settings_path, "w", encoding="utf-8") as f:
-                json.dump(settings, f, indent=4)
+            # 更新最近使用列表（仅工具标签页）
+            if current_file.get("type") == "tool":
+                if "more_last_used" not in settings:
+                    settings["more_last_used"] = []
+        
+                if current_file["name"] in settings["more_last_used"]:
+                    settings["more_last_used"].remove(current_file["name"])
+                settings["more_last_used"].insert(0, current_file["name"])
+        
+                # 保存设置
+                with open(settings_path, "w", encoding="utf-8") as f:
+                    json.dump(settings, f, indent=4)
     
             # 执行文件
             print(f"执行文件: {current_file['path']}")
@@ -8042,8 +8042,6 @@ class GameSelector(QWidget):
         self.floating_window.current_index = 0
         self.floating_window.update_highlight()
         self.floating_window.hide()
-        if enable_mouse_sim:
-            self.mouse_simulation()
 
     def show_settings_window(self):
         """显示设置窗口"""
@@ -8707,23 +8705,482 @@ class FloatingWindow(QWidget):
         """)
         
         self.current_index = 0
-        self.layout = QVBoxLayout(self)
-        self.layout.setSpacing(int(5 * parent.scale_factor))
-        self.buttons = []
+        self.current_tab_index = 0  # 当前标签页索引
+        self.buttons = []  # 所有标签页的按钮列表
+        self.tab_buttons = {}  # 存储每个标签页的按钮列表 {tab_index: [buttons]}
+        
+        # 添加懒加载相关属性
+        self.tab_widgets = {}  # 存储每个标签页的widget
+        self.tab_layouts = {}  # 存储每个标签页的layout
+        self.tabs_loaded = {}  # 存储每个标签页是否已加载
+        
+        # 添加字母表选择模式相关属性
+        self.in_alphabet_mode = False  # 是否处于字母表选择模式
+        self.current_alphabet_index = 0  # 当前选中的字母索引
         
         # 添加防抖相关属性
         self.last_input_time = 0
         self.input_delay = 200  # 设置200毫秒的防抖延迟
         
-        # 读取目录中的文件
-        self.files = self.get_files()
-        self.create_buttons(False)
+        # 创建主布局
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        
+        # 创建一个水平布局来包含标签页和字母排序表
+        tab_with_alphabet_layout = QHBoxLayout()
+        tab_with_alphabet_layout.setContentsMargins(0, 0, 0, 0)
+        tab_with_alphabet_layout.setSpacing(0)
+        
+        # 创建标签页
+        self.tab_widget = QTabWidget(self)
+        # 设置标签栏为伸展模式，让标签平均分配宽度
+        self.tab_widget.setTabBarAutoHide(False)
+        self.tab_widget.tabBar().setExpanding(True)
+        self.tab_widget.setStyleSheet(f"""
+            QTabWidget::pane {{
+                border: none;
+                background-color: transparent;
+            }}
+            QTabBar {{
+                background-color: rgba(50, 50, 50, 0.8);
+            }}
+            QTabBar::tab {{
+                background-color: rgba(60, 60, 60, 0.8);
+                color: white;
+                padding: {int(12 * parent.scale_factor)}px {int(16 * parent.scale_factor)}px;
+                margin-right: {int(2 * parent.scale_factor)}px;
+                border-top-left-radius: {int(5 * parent.scale_factor)}px;
+                border-top-right-radius: {int(5 * parent.scale_factor)}px;
+                font-size: {int(14 * parent.scale_factor)}px;
+                min-width: {int(98 * parent.scale_factor)}px;
+            }}
+            QTabBar::tab:selected {{
+                background-color: rgba(80, 80, 80, 0.9);
+            }}
+            QTabBar::tab:hover {{
+                background-color: rgba(70, 70, 70, 0.9);
+            }}
+        """)
+        
+        # 创建字母排序表
+        self.alphabet_widget = QWidget(self)
+        self.alphabet_widget.setFixedWidth(int(200 * parent.scale_factor))
+        self.alphabet_layout = QGridLayout(self.alphabet_widget)
+        self.alphabet_layout.setContentsMargins(int(5 * parent.scale_factor), int(10 * parent.scale_factor), int(5 * parent.scale_factor), int(10 * parent.scale_factor))
+        self.alphabet_layout.setSpacing(0)
+        self.alphabet_widget.setStyleSheet(f"""
+            QWidget {{
+                background-color: rgba(40, 40, 40, 0.8);
+            }}
+        """)
+        
+        # 定义字母表，按照图示排列
+        alphabet = [
+            ['&', '#', 'A', 'B'],
+            ['C', 'D', 'E', 'F'],
+            ['G', 'H', 'I', 'J'],
+            ['K', 'L', 'M', 'N'],
+            ['O', 'P', 'Q', 'R'],
+            ['S', 'T', 'U', 'V'],
+            ['W', 'X', 'Y', 'Z']
+        ]
+        
+        # 创建字母按钮
+        self.alphabet_buttons = {}
+        for row, letters in enumerate(alphabet):
+            for col, letter in enumerate(letters):
+                btn = QPushButton(letter)
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: transparent;
+                        color: white;
+                        font-size: {int(20 * parent.scale_factor)}px;
+                        min-width: {int(48 * parent.scale_factor)}px;
+                        min-height: {int(64 * parent.scale_factor)}px;
+                        border: none;
+                        border-radius: {int(4 * parent.scale_factor)}px;
+                    }}
+                    QPushButton:hover {{
+                        background-color: rgba(255, 255, 255, 0.2);
+                    }}
+                    QPushButton:pressed {{
+                        background-color: rgba(255, 255, 255, 0.3);
+                    }}
+                """)
+                btn.clicked.connect(lambda checked, l=letter: self.jump_to_letter(l))
+                self.alphabet_layout.addWidget(btn, row, col)
+                self.alphabet_buttons[letter] = btn
+        
+        # 初始隐藏字母排序表
+        self.alphabet_widget.setVisible(False)
+        
+        # 将标签页和字母排序表添加到水平布局
+        tab_with_alphabet_layout.addWidget(self.tab_widget, 1)  # 标签页占据主要空间
+        tab_with_alphabet_layout.addWidget(self.alphabet_widget)  # 字母排序表在右侧
+        
+        # 将水平布局添加到主布局
+        main_layout.addLayout(tab_with_alphabet_layout)
+        
+        # 创建三个标签页
+        self.create_tool_tab()  # 工具标签页
+        self.create_desktop_tab()  # 桌面标签页
+        self.create_all_apps_tab()  # 全部应用标签页
+        
+        # 连接标签页切换信号
+        self.tab_widget.currentChanged.connect(self.on_tab_changed)
+        
+        # 设置窗口大小和位置
+        self.setFixedSize(int(400 * parent.scale_factor), int(500 * parent.scale_factor))
+        # 计算居中位置
+        screen = QApplication.primaryScreen().geometry()
+        x = (screen.width() - self.width()) // 2
+        y = (screen.height() - self.height()) // 2
+        self.move(x, y)
     
-    def handle_gamepad_input(self, action):
-        """处理手柄输入，转发到 confirm_dialog"""
+    def handle_gamepad_input(self, action, firstinput):
+        """处理手柄输入"""
         if hasattr(self, 'confirm_dialog') and self.confirm_dialog and self.confirm_dialog.isVisible():
             self.confirm_dialog.handle_gamepad_input(action)
+            return
+        
+        # 检查是否可以处理输入（方向键可绕过防抖以获得更灵敏的导航）
+        is_direction = action in ('UP', 'DOWN', 'LEFT', 'RIGHT')
+        if not is_direction and not self.can_process_input():
+            return
+        
+        # 字母表选择模式
+        if self.in_alphabet_mode:
+            # 定义字母表顺序
+            alphabet_order = ['&', '#', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z']
             
+            if action == 'UP':
+                # 向上移动（减少索引）
+                self.current_alphabet_index = max(0, self.current_alphabet_index - 4)  # 一行4个字母
+                if self.current_alphabet_index < len(alphabet_order):
+                    letter = alphabet_order[self.current_alphabet_index]
+                    if letter in self.alphabet_buttons:
+                        # 高亮显示当前字母
+                        for btn_letter, btn in self.alphabet_buttons.items():
+                            if btn_letter == letter:
+                                btn.setStyleSheet(f"""
+                                    QPushButton {{
+                                        background-color: rgba(255, 255, 255, 0.2);
+                                        color: white;
+                                        font-size: {int(20 * self.parent().scale_factor)}px;
+                                        min-width: {int(48 * self.parent().scale_factor)}px;
+                                        min-height: {int(64 * self.parent().scale_factor)}px;
+                                        border: none;
+                                        border-radius: {int(4 * self.parent().scale_factor)}px;
+                                    }}
+                                    QPushButton:hover {{
+                                        background-color: rgba(255, 255, 255, 0.3);
+                                    }}
+                                    QPushButton:pressed {{
+                                        background-color: rgba(255, 255, 255, 0.4);
+                                    }}
+                                """)
+                            else:
+                                btn.setStyleSheet(f"""
+                                    QPushButton {{
+                                        background-color: transparent;
+                                        color: white;
+                                        font-size: {int(20 * self.parent().scale_factor)}px;
+                                        min-width: {int(48 * self.parent().scale_factor)}px;
+                                        min-height: {int(64 * self.parent().scale_factor)}px;
+                                        border: none;
+                                        border-radius: {int(4 * self.parent().scale_factor)}px;
+                                    }}
+                                    QPushButton:hover {{
+                                        background-color: rgba(255, 255, 255, 0.2);
+                                    }}
+                                    QPushButton:pressed {{
+                                        background-color: rgba(255, 255, 255, 0.3);
+                                    }}
+                                """)
+            elif action == 'DOWN':
+                # 向下移动（增加索引）
+                self.current_alphabet_index = min(len(alphabet_order) - 1, self.current_alphabet_index + 4)  # 一行4个字母
+                if self.current_alphabet_index < len(alphabet_order):
+                    letter = alphabet_order[self.current_alphabet_index]
+                    if letter in self.alphabet_buttons:
+                        # 高亮显示当前字母
+                        for btn_letter, btn in self.alphabet_buttons.items():
+                            if btn_letter == letter:
+                                btn.setStyleSheet(f"""
+                                    QPushButton {{
+                                        background-color: rgba(255, 255, 255, 0.2);
+                                        color: white;
+                                        font-size: {int(20 * self.parent().scale_factor)}px;
+                                        min-width: {int(48 * self.parent().scale_factor)}px;
+                                        min-height: {int(64 * self.parent().scale_factor)}px;
+                                        border: none;
+                                        border-radius: {int(4 * self.parent().scale_factor)}px;
+                                    }}
+                                    QPushButton:hover {{
+                                        background-color: rgba(255, 255, 255, 0.3);
+                                    }}
+                                    QPushButton:pressed {{
+                                        background-color: rgba(255, 255, 255, 0.4);
+                                    }}
+                                """)
+                            else:
+                                btn.setStyleSheet(f"""
+                                    QPushButton {{
+                                        background-color: transparent;
+                                        color: white;
+                                        font-size: {int(20 * self.parent().scale_factor)}px;
+                                        min-width: {int(48 * self.parent().scale_factor)}px;
+                                        min-height: {int(64 * self.parent().scale_factor)}px;
+                                        border: none;
+                                        border-radius: {int(4 * self.parent().scale_factor)}px;
+                                    }}
+                                    QPushButton:hover {{
+                                        background-color: rgba(255, 255, 255, 0.2);
+                                    }}
+                                    QPushButton:pressed {{
+                                        background-color: rgba(255, 255, 255, 0.3);
+                                    }}
+                                """)
+            elif action == 'LEFT':
+                # 向左移动（减少索引）
+                if self.current_alphabet_index % 4 > 0:  # 不是行首
+                    self.current_alphabet_index -= 1
+                    if self.current_alphabet_index < len(alphabet_order):
+                        letter = alphabet_order[self.current_alphabet_index]
+                        if letter in self.alphabet_buttons:
+                            # 高亮显示当前字母
+                            for btn_letter, btn in self.alphabet_buttons.items():
+                                if btn_letter == letter:
+                                    btn.setStyleSheet(f"""
+                                        QPushButton {{
+                                            background-color: rgba(255, 255, 255, 0.2);
+                                            color: white;
+                                            font-size: {int(20 * self.parent().scale_factor)}px;
+                                            min-width: {int(48 * self.parent().scale_factor)}px;
+                                            min-height: {int(64 * self.parent().scale_factor)}px;
+                                            border: none;
+                                            border-radius: {int(4 * self.parent().scale_factor)}px;
+                                        }}
+                                        QPushButton:hover {{
+                                            background-color: rgba(255, 255, 255, 0.3);
+                                        }}
+                                        QPushButton:pressed {{
+                                            background-color: rgba(255, 255, 255, 0.4);
+                                        }}
+                                    """)
+                                else:
+                                    btn.setStyleSheet(f"""
+                                        QPushButton {{
+                                            background-color: transparent;
+                                            color: white;
+                                            font-size: {int(20 * self.parent().scale_factor)}px;
+                                            min-width: {int(48 * self.parent().scale_factor)}px;
+                                            min-height: {int(64 * self.parent().scale_factor)}px;
+                                            border: none;
+                                            border-radius: {int(4 * self.parent().scale_factor)}px;
+                                        }}
+                                        QPushButton:hover {{
+                                            background-color: rgba(255, 255, 255, 0.2);
+                                        }}
+                                        QPushButton:pressed {{
+                                            background-color: rgba(255, 255, 255, 0.3);
+                                        }}
+                                    """)
+                else:
+                    # 是行首，退出字母表选择模式
+                    self.in_alphabet_mode = False
+                    self.update_highlight()  # 更新高亮为蓝色
+                    # 恢复所有字母按钮的样式
+                    for btn in self.alphabet_buttons.values():
+                        btn.setStyleSheet(f"""
+                            QPushButton {{
+                                background-color: transparent;
+                                color: white;
+                                font-size: {int(20 * self.parent().scale_factor)}px;
+                                min-width: {int(48 * self.parent().scale_factor)}px;
+                                min-height: {int(64 * self.parent().scale_factor)}px;
+                                border: none;
+                                border-radius: {int(4 * self.parent().scale_factor)}px;
+                            }}
+                            QPushButton:hover {{
+                                background-color: rgba(255, 255, 255, 0.2);
+                            }}
+                            QPushButton:pressed {{
+                                background-color: rgba(255, 255, 255, 0.3);
+                            }}
+                        """)
+            elif action == 'RIGHT':
+                # 向右移动（增加索引）
+                if (self.current_alphabet_index + 1) % 4 > 0:  # 不是行尾
+                    self.current_alphabet_index = min(len(alphabet_order) - 1, self.current_alphabet_index + 1)
+                    if self.current_alphabet_index < len(alphabet_order):
+                        letter = alphabet_order[self.current_alphabet_index]
+                        if letter in self.alphabet_buttons:
+                            # 高亮显示当前字母
+                            for btn_letter, btn in self.alphabet_buttons.items():
+                                if btn_letter == letter:
+                                    btn.setStyleSheet(f"""
+                                        QPushButton {{
+                                            background-color: rgba(255, 255, 255, 0.2);
+                                            color: white;
+                                            font-size: {int(20 * self.parent().scale_factor)}px;
+                                            min-width: {int(48 * self.parent().scale_factor)}px;
+                                            min-height: {int(64 * self.parent().scale_factor)}px;
+                                            border: none;
+                                            border-radius: {int(4 * self.parent().scale_factor)}px;
+                                        }}
+                                        QPushButton:hover {{
+                                            background-color: rgba(255, 255, 255, 0.3);
+                                        }}
+                                        QPushButton:pressed {{
+                                            background-color: rgba(255, 255, 255, 0.4);
+                                        }}
+                                    """)
+                                else:
+                                    btn.setStyleSheet(f"""
+                                        QPushButton {{
+                                            background-color: transparent;
+                                            color: white;
+                                            font-size: {int(20 * self.parent().scale_factor)}px;
+                                            min-width: {int(48 * self.parent().scale_factor)}px;
+                                            min-height: {int(64 * self.parent().scale_factor)}px;
+                                            border: none;
+                                            border-radius: {int(4 * self.parent().scale_factor)}px;
+                                        }}
+                                        QPushButton:hover {{
+                                            background-color: rgba(255, 255, 255, 0.2);
+                                        }}
+                                        QPushButton:pressed {{
+                                            background-color: rgba(255, 255, 255, 0.3);
+                                        }}
+                                    """)
+            elif action == 'A':
+                # 确认选择字母
+                if self.current_alphabet_index < len(alphabet_order):
+                    letter = alphabet_order[self.current_alphabet_index]
+                    self.jump_to_letter(letter)
+                    # 退出字母表选择模式
+                    self.in_alphabet_mode = False
+                    self.update_highlight()  # 更新高亮为蓝色
+                    # 恢复所有字母按钮的样式
+                    for btn in self.alphabet_buttons.values():
+                        btn.setStyleSheet(f"""
+                            QPushButton {{
+                                background-color: transparent;
+                                color: white;
+                                font-size: {int(20 * self.parent().scale_factor)}px;
+                                min-width: {int(48 * self.parent().scale_factor)}px;
+                                min-height: {int(64 * self.parent().scale_factor)}px;
+                                border: none;
+                                border-radius: {int(4 * self.parent().scale_factor)}px;
+                            }}
+                            QPushButton:hover {{
+                                background-color: rgba(255, 255, 255, 0.2);
+                            }}
+                            QPushButton:pressed {{
+                                background-color: rgba(255, 255, 255, 0.3);
+                            }}
+                        """)
+            elif action in ('B', 'X'):
+                # 退出字母表选择模式
+                self.in_alphabet_mode = False
+                # 恢复所有字母按钮的样式
+                for btn in self.alphabet_buttons.values():
+                    btn.setStyleSheet(f"""
+                        QPushButton {{
+                            background-color: transparent;
+                            color: white;
+                            font-size: {int(20 * self.parent().scale_factor)}px;
+                            min-width: {int(48 * self.parent().scale_factor)}px;
+                            min-height: {int(64 * self.parent().scale_factor)}px;
+                            border: none;
+                            border-radius: {int(4 * self.parent().scale_factor)}px;
+                        }}
+                        QPushButton:hover {{
+                            background-color: rgba(255, 255, 255, 0.2);
+                        }}
+                        QPushButton:pressed {{
+                            background-color: rgba(255, 255, 255, 0.3);
+                        }}
+                    """)
+            return
+        # 正常模式
+        if action == 'UP':
+            current_tab_buttons = self.tab_buttons.get(self.current_tab_index, [])
+            if current_tab_buttons:
+                self.current_index = max(0, self.current_index - 1)
+                self.update_highlight()
+        elif action == 'DOWN':
+            current_tab_buttons = self.tab_buttons.get(self.current_tab_index, [])
+            if current_tab_buttons:
+                self.current_index = min(
+                    len(current_tab_buttons) - 1,
+                    self.current_index + 1
+                )
+                self.update_highlight()
+        elif action == 'LEFT' and firstinput:
+            # 切换到上一个标签页
+            new_index = max(0, self.current_tab_index - 1)
+            self.tab_widget.setCurrentIndex(new_index)
+        elif action == 'RIGHT' and firstinput:
+            if self.current_tab_index == 2:  # 全部应用标签页
+                # 进入字母表手柄选择模式
+                self.in_alphabet_mode = True
+                self.update_highlight()  # 更新高亮为灰色
+                self.current_alphabet_index = 0  # 从第一个字母开始
+                # 高亮显示第一个字母
+                alphabet_order = ['&', '#', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z']
+                if alphabet_order and alphabet_order[0] in self.alphabet_buttons:
+                    self.alphabet_buttons[alphabet_order[0]].setStyleSheet(f"""
+                        QPushButton {{
+                            background-color: rgba(255, 255, 255, 0.2);
+                            color: white;
+                            font-size: {int(20 * self.parent().scale_factor)}px;
+                            min-width: {int(48 * self.parent().scale_factor)}px;
+                            min-height: {int(64 * self.parent().scale_factor)}px;
+                            border: none;
+                            border-radius: {int(4 * self.parent().scale_factor)}px;
+                        }}
+                        QPushButton:hover {{
+                            background-color: rgba(255, 255, 255, 0.3);
+                        }}
+                        QPushButton:pressed {{
+                            background-color: rgba(255, 255, 255, 0.4);
+                        }}
+                    """)
+            else:
+                # 切换到下一个标签页
+                new_index = (self.current_tab_index + 1) % self.tab_widget.count()
+                self.tab_widget.setCurrentIndex(new_index)
+        elif action == 'A':
+            # 获取当前标签页的按钮列表
+            current_tab_buttons = self.tab_buttons.get(self.current_tab_index, [])
+            if not current_tab_buttons or self.current_index >= len(current_tab_buttons):
+                return
+            
+            # 获取当前高亮的按钮
+            current_button = current_tab_buttons[self.current_index]
+            
+            # 检查是否是返回按钮
+            button_text = current_button.text()
+            if button_text.startswith("⬅️ 返回|"):
+                # 点击返回按钮
+                current_button.click()
+            else:
+                # 非返回按钮，直接模拟鼠标点击
+                current_button.click()
+        elif action == 'X':
+            self.parent().execute_more_item()
+            self.parent().mouse_simulation()
+        elif action == 'B':  # B键或X键都可以关闭悬浮窗
+            self.hide()
+        elif action == 'Y':
+            self.toggle_favorite()
+        
+        # 更新最后输入时间
+        self.last_input_time = pygame.time.get_ticks()
+        
     def can_process_input(self):
         """检查是否可以处理输入"""
         current_time = pygame.time.get_ticks()
@@ -8732,126 +9189,597 @@ class FloatingWindow(QWidget):
         self.last_input_time = current_time
         return True
     
-    def get_files(self):
-        """获取目录中的文件"""
-        files = []
-        # 获取当前目录的文件
-            # 获取目录中的所有文件和文件夹
-        all_files = os.listdir('./morefloder/')
-
-        # 过滤掉文件夹，保留文件
-        filess = [f for f in all_files if os.path.isfile(os.path.join('./morefloder/', f))]
-        for file in filess:
-            #if file.endswith(('.bat', '.url')) and not file.endswith('.lnk'):
-            files.append({
-                "name": os.path.splitext(file)[0],
-                "path": file
-            })
-
-        return files
-    #create_buttons()可刷新按钮
-    def create_buttons(self, settitype=True): 
-        """创建按钮"""
-        self.files = self.get_files()
-        if settitype:
-            if self.select_add_btn:  # 确保按钮已经定义
-                self.layout.removeWidget(self.select_add_btn)
-            if self.select_del_btn:  # 确保按钮已经定义
-                self.layout.removeWidget(self.select_del_btn)
+    def on_tab_changed(self, index):
+        """标签页切换时的处理"""
+        self.current_tab_index = index
+        self.current_index = 0
         
-        # 获取当前运行的所有进程
-        self.current_running_apps.clear()
-        for process in psutil.process_iter(['pid', 'exe']):
-            try:
-                exe_path = process.info['exe']
-                if exe_path:
-                    for app in more_apps:
-                        if exe_path.lower() == app['path'].lower():
-                            self.current_running_apps.add(app['name'])
-                            break
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
-        sorted_files = self.sort_files()
-        for file in sorted_files:
-            # 尝试为文件项加载图标：优先解析 .lnk 目标或 exe 并用 icoextract 提取，失败回退为图片加载
-            def _get_icon_for_file(relpath, size=24):
+        # 显示或隐藏字母排序表，并调整窗口大小
+        if index == 2:  # 全部应用标签页
+            self.alphabet_widget.setVisible(True)
+            # 增加窗口宽度以容纳字母表
+            new_width = int(600 * self.parent().scale_factor)
+            new_height = int(500 * self.parent().scale_factor)
+            self.setFixedSize(new_width, new_height)
+        else:
+            self.alphabet_widget.setVisible(False)
+            # 恢复窗口原始宽度
+            new_width = int(400 * self.parent().scale_factor)
+            new_height = int(500 * self.parent().scale_factor)
+            self.setFixedSize(new_width, new_height)
+        
+        # 检查标签页是否已加载，如果没有则加载
+        if not self.tabs_loaded.get(index, False):
+            self.load_tab_buttons(index)
+            self.tabs_loaded[index] = True
+        
+        # 确保按钮列表已初始化
+        current_tab_buttons = self.tab_buttons.get(index, [])
+        print(f"切换到标签页 {index}, 按钮数量: {len(current_tab_buttons)}")
+        if current_tab_buttons:
+            self.update_highlight()
+        else:
+            print(f"警告: 标签页 {index} 没有按钮")
+    
+    def jump_to_letter(self, letter):
+        """跳转到对应字母开头的应用"""
+        if self.current_tab_index != 2:  # 只在全部应用标签页生效
+            return
+        
+        # 获取当前标签页的按钮列表
+        current_tab_buttons = self.tab_buttons.get(2, [])
+        if not current_tab_buttons:
+            return
+        
+        # 定义字母表顺序，用于向前查找
+        alphabet_order = ['&', '#', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z']
+        
+        # 获取当前字母在字母表中的索引
+        try:
+            current_letter_index = alphabet_order.index(letter)
+        except ValueError:
+            return
+        
+        # 尝试从当前字母开始，向前查找有对应按钮的字母
+        for i in range(current_letter_index, -1, -1):
+            search_letter = alphabet_order[i]
+            
+            # 遍历按钮，找到第一个以对应字母开头的应用
+            for index, btn in enumerate(current_tab_buttons):
+                # 跳过非QPushButton对象（如分隔线）
+                if not isinstance(btn, QtWidgets.QPushButton):
+                    continue
+                
+                # 跳过返回按钮
+                if btn.text().startswith("⬅️"):
+                    continue
+                
+                # 获取按钮文本，移除可能的前缀（如📁）
+                btn_text = btn.text()
+                if btn_text.startswith("📁"):
+                    btn_text = btn_text[2:]  # 移除📁和空格
+                
+                # 检查是否以对应字母开头
+                if btn_text.strip().upper().startswith(search_letter.upper()):
+                    # 更新当前索引并高亮
+                    self.current_index = index
+                    self.update_highlight()
+                    # 滚动到对应按钮
+                    scroll_area = self.tab_widget.widget(2)
+                    if scroll_area and hasattr(scroll_area, 'verticalScrollBar'):
+                        # 计算按钮位置并滚动
+                        btn_pos = btn.pos()
+                        scroll_area.verticalScrollBar().setValue(btn_pos.y() - 50)
+                    return
+    
+    def load_tab_buttons(self, tab_index):
+        """加载指定标签页的按钮"""
+        layout = self.tab_layouts.get(tab_index)
+        if not layout:
+            print(f"警告: 标签页 {tab_index} 的布局未找到")
+            return
+        
+        # 清空布局中的所有按钮（保留添加和删除按钮）
+        for i in reversed(range(layout.count())):
+            item = layout.itemAt(i)
+            if item and item.widget():
+                widget = item.widget()
+                if widget != self.select_add_btn and widget != self.select_del_btn:
+                    widget.setParent(None)
+        
+        # 移除弹性空间（如果有）
+        for i in reversed(range(layout.count())):
+            item = layout.itemAt(i)
+            if item and isinstance(item, QtWidgets.QSpacerItem):
+                layout.removeItem(item)
+        
+        # 加载对应标签页的按钮
+        if tab_index == 0:  # 工具标签页
+            # 获取当前运行的所有进程
+            self.current_running_apps.clear()
+            for process in psutil.process_iter(['pid', 'exe']):
                 try:
-                    abs_path = os.path.abspath(os.path.join('./morefloder/', relpath))
-                    # 如果是快捷方式，解析目标
-                    if abs_path.lower().endswith('.lnk'):
-                        try:
-                            shell = win32com.client.Dispatch('WScript.Shell')
-                            shortcut = shell.CreateShortCut(abs_path)
-                            target = shortcut.Targetpath
-                            if target and os.path.exists(target):
-                                abs_path = target
-                        except Exception:
-                            pass
-                    # 如果目标存在且可能为可执行文件，尝试用 icoextract 提取
-                    if os.path.exists(abs_path):
-                        try:
-                            from icoextract import IconExtractor
-                            extractor = IconExtractor(abs_path)
-                            bio = extractor.get_icon(num=0)
-                            data = bio.getvalue()
-                            pix = QPixmap()
-                            if pix.loadFromData(data):
-                                pix = pix.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                                return QIcon(pix)
-                        except Exception:
-                            pass
-                        # 回退：尝试作为图片加载（例如 .ico/.png/.jpg）
-                        try:
-                            pix = QPixmap(abs_path)
-                            if not pix.isNull():
-                                pix = pix.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                                return QIcon(pix)
-                        except Exception:
-                            pass
+                    exe_path = process.info['exe']
+                    if exe_path:
+                        for app in more_apps:
+                            if exe_path.lower() == app['path'].lower():
+                                self.current_running_apps.add(app['name'])
+                                break
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    continue
+            
+            # 创建按钮
+            self.files = self.get_files()
+            sorted_files = self.sort_files()
+            print(f"工具标签页: 创建 {len(sorted_files)} 个按钮")
+            for file in sorted_files:
+                self.create_button_for_item(file, layout, 0)
+            
+            # 确保添加和删除按钮在底部
+            # 先移除添加和删除按钮（如果存在）
+            if self.select_add_btn:
+                try:
+                    layout.removeWidget(self.select_add_btn)
                 except Exception:
                     pass
-                return QIcon()
+            if self.select_del_btn:
+                try:
+                    layout.removeWidget(self.select_del_btn)
+                except Exception:
+                    pass
+            
+            # 然后重新添加到布局底部
+            if self.select_add_btn:
+                layout.addWidget(self.select_add_btn)
+            if self.select_del_btn:
+                layout.addWidget(self.select_del_btn)
+            
+            # 更新按钮列表
+            self.tab_buttons[tab_index] = []
+            for i in range(layout.count()):
+                item = layout.itemAt(i)
+                if item and item.widget() and isinstance(item.widget(), QtWidgets.QPushButton):
+                    self.tab_buttons[tab_index].append(item.widget())
+        
+        elif tab_index == 1:  # 桌面标签页
+            desktop_files = self.get_desktop_files()
+            print(f"桌面标签页: 创建 {len(desktop_files)} 个按钮")
+            for file in desktop_files:
+                self.create_button_for_item(file, layout, 1)
+            
+            # 更新按钮列表
+            self.tab_buttons[tab_index] = []
+            for i in range(layout.count()):
+                item = layout.itemAt(i)
+                if item and item.widget() and isinstance(item.widget(), QtWidgets.QPushButton):
+                    self.tab_buttons[tab_index].append(item.widget())
+        
+        elif tab_index == 2:  # 全部应用标签页
+            # 显示加载动画
+            from PyQt5.QtWidgets import QLabel, QVBoxLayout, QWidget
+            from PyQt5.QtCore import Qt, QTimer
+            from PyQt5.QtGui import QMovie
+            
+            # 清空当前布局
+            for i in reversed(range(layout.count())):
+                item = layout.itemAt(i)
+                if item and item.widget():
+                    widget = item.widget()
+                    widget.setParent(None)
+                elif item and isinstance(item, QtWidgets.QSpacerItem):
+                    layout.removeItem(item)
+            
+            # 创建加载动画组件
+            loading_widget = QWidget()
+            loading_layout = QVBoxLayout(loading_widget)
+            loading_layout.setAlignment(Qt.AlignCenter)
+            
+            # 添加加载图标
+            loading_movie = QMovie(":/loading.gif")  # 假设我们有一个加载图标
+            if not loading_movie.isValid():
+                # 如果没有加载图标，使用文本
+                loading_label = QLabel("加载中...")
+                loading_label.setStyleSheet("color: white; font-size: 16px;")
+                loading_layout.addWidget(loading_label)
+            else:
+                loading_label = QLabel()
+                loading_label.setMovie(loading_movie)
+                loading_movie.start()
+                loading_layout.addWidget(loading_label)
+            
+            layout.addWidget(loading_widget)
+            
+            # 强制更新界面
+            QApplication.processEvents()
+            
+            # 只加载顶层项目，不加载子文件夹内容
+            start_menu_items = self.get_start_menu_items()
+            print(f"全部应用标签页: 找到 {len(start_menu_items)} 个顶层项目，开始创建按钮")
+            
+            # 移除加载动画
+            loading_widget.setParent(None)
+            
+            # 创建按钮
+            for i, item in enumerate(start_menu_items):
+                btn = self.create_button_for_item(item, layout, 2)
+                if btn and i < 10:
+                    print(f"  创建按钮: {item['name']} ({item['type']})")
+            
+            # 更新按钮列表
+            self.tab_buttons[tab_index] = []
+            for i in range(layout.count()):
+                item = layout.itemAt(i)
+                if item and item.widget() and isinstance(item.widget(), QtWidgets.QPushButton):
+                    self.tab_buttons[tab_index].append(item.widget())
+            
+            print(f"全部应用标签页: 完成，按钮列表长度: {len(self.tab_buttons.get(2, []))}")
+        
+        # 添加弹性空间
+        layout.addStretch()
+        
+        # 更新高亮
+        self.current_index = 0
+        self.update_highlight()
+    
+    def get_desktop_files(self):
+        """获取桌面文件列表"""
+        files = []
+        try:
+            desktop_path = os.path.join(os.path.expanduser('~'), 'Desktop')
+            if not os.path.exists(desktop_path):
+                # 尝试公共桌面
+                desktop_path = os.path.join(os.environ.get('PUBLIC', ''), 'Desktop')
+            
+            if os.path.exists(desktop_path):
+                all_files = os.listdir(desktop_path)
+                for file in all_files:
+                    file_path = os.path.join(desktop_path, file)
+                    if os.path.isfile(file_path):
+                        # 只处理 .lnk 和 .exe 文件
+                        if file.lower().endswith(('.lnk', '.exe')):
+                            files.append({
+                                "name": os.path.splitext(file)[0],
+                                "path": file_path,
+                                "type": "desktop"
+                            })
+        except Exception as e:
+            print(f"获取桌面文件失败: {e}")
+        return files
+    
+    def get_start_menu_pinned_apps(self):
+        """获取固定到开始菜单的应用"""
+        files = []
+        seen_names = set()  # 用于去重
+        try:
+            # 用户开始菜单固定应用路径
+            start_menu_paths = [
+                os.path.join(os.environ.get('APPDATA', ''), 'Microsoft', 'Windows', 'Start Menu', 'Programs'),
+                os.path.join(os.environ.get('PROGRAMDATA', ''), 'Microsoft', 'Windows', 'Start Menu', 'Programs')
+            ]
+            
+            for start_menu_path in start_menu_paths:
+                if os.path.exists(start_menu_path):
+                    # 只获取根目录下的 .lnk 文件（固定应用通常在根目录）
+                    for file in os.listdir(start_menu_path):
+                        file_path = os.path.join(start_menu_path, file)
+                        if os.path.isfile(file_path) and file.lower().endswith('.lnk'):
+                            name = os.path.splitext(file)[0]
+                            if name not in seen_names:
+                                seen_names.add(name)
+                                files.append({
+                                    "name": name,
+                                    "path": file_path,
+                                    "type": "start_menu"
+                                })
+        except Exception as e:
+            print(f"获取开始菜单固定应用失败: {e}")
+        return files
+    
+    def get_start_menu_items(self):
+        """获取开始菜单的顶层项目（文件和文件夹）"""
+        items = []
+        seen_names = set()  # 用于去重
+        try:
+            start_menu_paths = [
+                os.path.join(os.environ.get('APPDATA', ''), 'Microsoft', 'Windows', 'Start Menu', 'Programs'),
+                os.path.join(os.environ.get('PROGRAMDATA', ''), 'Microsoft', 'Windows', 'Start Menu', 'Programs')
+            ]
+            
+            for start_menu_path in start_menu_paths:
+                if os.path.exists(start_menu_path):
+                    for item in os.listdir(start_menu_path):
+                        item_path = os.path.join(start_menu_path, item)
+                        if os.path.isfile(item_path) and item.lower().endswith('.lnk'):
+                            name = os.path.splitext(item)[0]
+                            if name not in seen_names:
+                                seen_names.add(name)
+                                items.append({
+                                    "name": name,
+                                    "path": item_path,
+                                    "type": "start_menu_file"
+                                })
+                        elif os.path.isdir(item_path):
+                            name = item
+                            if name not in seen_names:
+                                seen_names.add(name)
+                                items.append({
+                                    "name": name,
+                                    "path": item_path,
+                                    "type": "start_menu_folder"
+                                })
+        except Exception as e:
+            print(f"获取开始菜单项目失败: {e}")
+        return items
+    
+    def get_folder_contents(self, folder_path):
+        """获取文件夹中的内容"""
+        items = []
+        try:
+            for item in os.listdir(folder_path):
+                item_path = os.path.join(folder_path, item)
+                if os.path.isfile(item_path) and item.lower().endswith('.lnk'):
+                    items.append({
+                        "name": os.path.splitext(item)[0],
+                        "path": item_path,
+                        "type": "start_menu_file"
+                    })
+                elif os.path.isdir(item_path):
+                    items.append({
+                        "name": item,
+                        "path": item_path,
+                        "type": "start_menu_folder"
+                    })
+        except Exception as e:
+            print(f"获取文件夹内容失败: {e}")
+        return items
+    
 
-            icon = _get_icon_for_file(file.get("path", ""), size=int(24 * self.parent().scale_factor))
-            btn = QPushButton(file["name"])
+    
+    def get_files(self):
+        """获取目录中的文件（工具标签页）"""
+        files = []
+        # 获取当前目录的文件
+        try:
+            all_files = os.listdir('./morefloder/')
+            # 过滤掉文件夹，保留文件
+            filess = [f for f in all_files if os.path.isfile(os.path.join('./morefloder/', f))]
+            for file in filess:
+                files.append({
+                    "name": os.path.splitext(file)[0],
+                    "path": file,
+                    "type": "tool"
+                })
+        except Exception as e:
+            print(f"获取工具文件失败: {e}")
+        return files
+    
+    def _create_text_placeholder_icon(self, text, size_px): 
+        """根据文本生成占位图标"""
+        ch = text.strip()[0] if text and text.strip() else '?' 
+        pix = QPixmap(QSize(size_px, size_px)) 
+        pix.fill(Qt.transparent) 
+        painter = QPainter(pix) 
+        painter.setRenderHint(QPainter.Antialiasing) 
+        # 背景圆角矩形 
+        bg_color = QColor(80, 80, 80) 
+        painter.setBrush(bg_color) 
+        painter.setPen(Qt.NoPen) 
+        radius = int(size_px * 0.2) 
+        painter.drawRoundedRect(0, 0, size_px, size_px, radius, radius) 
+        # 绘制文字 
+        font = QFont("Microsoft YaHei", max(10, int(size_px * 0.5))) 
+        painter.setFont(font) 
+        painter.setPen(QColor(255, 255, 255)) 
+        fm = QtGui.QFontMetrics(font) 
+        w = fm.horizontalAdvance(ch) 
+        h = fm.height() 
+        painter.drawText((size_px - w) // 2, (size_px + h) // 2 - fm.descent(), ch) 
+        painter.end() 
+        return QIcon(pix)
+    
+    def _get_icon_for_file(self, file_path, size=24):
+        """获取文件图标（通用方法）"""
+        try:
+            abs_path = os.path.abspath(file_path) if not os.path.isabs(file_path) else file_path
+            # 如果是快捷方式，解析目标
+            if abs_path.lower().endswith('.lnk'):
+                try:
+                    shell = win32com.client.Dispatch('WScript.Shell')
+                    shortcut = shell.CreateShortCut(abs_path)
+                    target = shortcut.Targetpath
+                    if target and os.path.exists(target):
+                        abs_path = target
+                except Exception:
+                    pass
+            # 如果目标存在且可能为可执行文件，尝试用 icoextract 提取
+            if os.path.exists(abs_path):
+                try:
+                    from icoextract import IconExtractor
+                    extractor = IconExtractor(abs_path)
+                    bio = extractor.get_icon(num=0)
+                    data = bio.getvalue()
+                    pix = QPixmap()
+                    if pix.loadFromData(data):
+                        pix = pix.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                        return QIcon(pix)
+                except Exception:
+                    pass
+                # 回退：尝试作为图片加载（例如 .ico/.png/.jpg）
+                try:
+                    pix = QPixmap(abs_path)
+                    if not pix.isNull():
+                        pix = pix.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                        return QIcon(pix)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        
+        # 生成占位图标
+        file_name = os.path.basename(file_path)
+        return self._create_text_placeholder_icon(file_name, size)
+    
+    def truncate_text(self, text, max_length=37):
+        """截断文本，超过长度显示省略号"""
+        if len(text) > max_length:
+            return text[:max_length-3] + "..."
+        return text
+    
+    def create_button_for_item(self, item, layout, tab_index):
+        """为项目创建按钮（通用方法）"""
+        file_path = item.get("path", "")
+        if item.get("type") == "tool":
+            # 工具标签页的文件路径是相对路径
+            file_path = os.path.join('./morefloder/', file_path)
+        
+        # 截断文本，避免按钮拉伸
+        truncated_name = self.truncate_text(item["name"])
+        
+        # 为文件夹添加特殊标记
+        if item.get("type") == "start_menu_folder":
+            btn = QPushButton(f"📁 {truncated_name}")
+        else:
+            btn = QPushButton(truncated_name)
+            # 只有非文件夹才获取图标
+            icon = self._get_icon_for_file(file_path, size=int(24 * self.parent().scale_factor))
             if not icon.isNull():
                 btn.setIcon(icon)
                 try:
                     btn.setIconSize(QSize(int(24 * self.parent().scale_factor), int(24 * self.parent().scale_factor)))
                 except Exception:
                     pass
-            btn.setStyleSheet(f"""
-                QPushButton {{
-                    background-color: transparent;
-                    color: white;
-                    text-align: left;
-                    padding: {int(10 * self.parent().scale_factor)}px;
-                    border: none;
-                    font-size: {int(16 * self.parent().scale_factor)}px;
-                }}
-                QPushButton:hover {{
-                    background-color: rgba(255, 255, 255, 0.1);
-                }}
-            """)
-            if file["name"] in settings.get("more_favorites", []):
-                btn.setText(f"⭐ {file['name']}")
-            if file["name"] in self.current_running_apps:
-                btn.setText(f"🟢 {file['name']}")
-            if file["name"] in settings.get("more_favorites", []) and file["name"] in self.current_running_apps:
-                btn.setText(f"⭐🟢 {file['name']}")
-            self.buttons.append(btn)
-            self.layout.addWidget(btn)
-            btn.clicked.connect(lambda checked, f=file: self.parent().execute_more_item(f, enable_mouse_sim=False))
-
-        if settitype:
-            # 重新添加按钮到布局
-            if self.select_add_btn:
-                self.layout.addWidget(self.select_add_btn)
-            if self.select_del_btn:
-                self.layout.addWidget(self.select_del_btn)
+        
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent;
+                color: white;
+                text-align: left;
+                padding: {int(10 * self.parent().scale_factor)}px;
+                border: none;
+                font-size: {int(16 * self.parent().scale_factor)}px;
+                max-width: {int(350 * self.parent().scale_factor)}px;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(255, 255, 255, 0.1);
+            }}
+        """)
+        
+        # 检查是否在运行中（仅工具标签页）
+        if item.get("type") == "tool":
+            truncated_name = self.truncate_text(item["name"])
+            if item["name"] in settings.get("more_favorites", []):
+                btn.setText(f"⭐ {truncated_name}")
+            if item["name"] in self.current_running_apps:
+                btn.setText(f"🟢 {truncated_name}")
+            if item["name"] in settings.get("more_favorites", []) and item["name"] in self.current_running_apps:
+                btn.setText(f"⭐🟢 {truncated_name}")
+        
+        # 为文件夹添加特殊的点击事件处理
+        if item.get("type") == "start_menu_folder":
+            btn.clicked.connect(lambda checked, f=item: self.handle_folder_click(f))
+        else:
+            btn.clicked.connect(lambda checked, f=item: self.parent().execute_more_item(f))
+        layout.addWidget(btn)
+        
+        # 确保按钮可见
+        btn.setVisible(True)
+        btn.show()
+        
+        if tab_index not in self.tab_buttons:
+            self.tab_buttons[tab_index] = []
+        self.tab_buttons[tab_index].append(btn)
+        self.buttons.append(btn)
+        return btn
+    
+    def handle_folder_click(self, folder_item):
+        """处理文件夹点击事件"""
+        folder_path = folder_item.get("path", "")
+        if not folder_path:
             return
+        
+        # 获取文件夹内容
+        folder_contents = self.get_folder_contents(folder_path)
+        print(f"加载文件夹 {folder_item['name']} 的内容，找到 {len(folder_contents)} 个项目")
+        
+        # 获取当前标签页的布局
+        layout = self.tab_layouts.get(2)  # 全部应用标签页的索引是2
+        if not layout:
+            return
+        
+        # 清空布局中的所有按钮
+        for i in reversed(range(layout.count())):
+            item = layout.itemAt(i)
+            if item and item.widget():
+                widget = item.widget()
+                widget.setParent(None)
+                if widget in self.buttons:
+                    self.buttons.remove(widget)
+        
+        # 移除弹性空间（如果有）
+        for i in reversed(range(layout.count())):
+            item = layout.itemAt(i)
+            if item and isinstance(item, QtWidgets.QSpacerItem):
+                layout.removeItem(item)
+        
+        # 添加返回按钮
+        back_btn = QPushButton(f"⬅️ 返回|📁 {folder_item['name']}")
+        back_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent;
+                color: white;
+                text-align: left;
+                padding: {int(10 * self.parent().scale_factor)}px;
+                border: none;
+                font-size: {int(16 * self.parent().scale_factor)}px;
+                max-width: {int(350 * self.parent().scale_factor)}px;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(255, 255, 255, 0.1);
+            }}
+        """)
+        back_btn.clicked.connect(lambda: self.load_tab_buttons(2))
+        layout.addWidget(back_btn)
+        
+        # 添加分隔线
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShadow(QFrame.Sunken)
+        separator.setStyleSheet("QFrame { color: #444444; }")
+        layout.addWidget(separator)
 
-        # 这里将按钮作为实例属性定义
+        # 添加文件夹内容
+        for i, item in enumerate(folder_contents):
+            self.create_button_for_item(item, layout, 2)
+        
+        # 添加弹性空间
+        layout.addStretch()
+        
+        # 更新按钮列表
+        self.tab_buttons[2] = []
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            if item and item.widget() and isinstance(item.widget(), QtWidgets.QPushButton):
+                self.tab_buttons[2].append(item.widget())
+        
+        # 更新高亮
+        self.current_index = 0
+        self.update_highlight()
+    
+    def create_tool_tab(self):
+        """创建工具标签页"""
+        # 创建滚动区域
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setStyleSheet("QScrollArea { border: none; background-color: transparent; }")
+        QScroller.grabGesture(scroll_area.viewport(), QScroller.LeftMouseButtonGesture)
+        
+        tool_widget = QWidget()
+        tool_layout = QVBoxLayout(tool_widget)
+        tool_layout.setSpacing(int(5 * self.parent().scale_factor))
+        tool_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # 添加添加和删除按钮
         self.select_add_btn = QPushButton("➕ 添加项目")
         self.select_add_btn.setStyleSheet(f"""
             QPushButton {{
@@ -8868,8 +9796,8 @@ class FloatingWindow(QWidget):
             }}
         """)
         self.select_add_btn.clicked.connect(self.select_add)
-        self.layout.addWidget(self.select_add_btn)
-
+        tool_layout.addWidget(self.select_add_btn)
+        
         self.select_del_btn = QPushButton("❌ 删除项目")
         self.select_del_btn.setStyleSheet(f"""
             QPushButton {{
@@ -8886,7 +9814,77 @@ class FloatingWindow(QWidget):
             }}
         """)
         self.select_del_btn.clicked.connect(self.select_del)
-        self.layout.addWidget(self.select_del_btn)
+        tool_layout.addWidget(self.select_del_btn)
+        
+        # 添加弹性空间
+        tool_layout.addStretch()
+        
+        scroll_area.setWidget(tool_widget)
+        self.tab_widget.addTab(scroll_area, "工具")
+        
+        # 存储标签页的widget和layout，用于后续加载按钮
+        self.tab_widgets[0] = tool_widget
+        self.tab_layouts[0] = tool_layout
+        self.tabs_loaded[0] = False
+    
+    def create_desktop_tab(self):
+        """创建桌面标签页"""
+        # 创建滚动区域
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setStyleSheet("QScrollArea { border: none; background-color: transparent; }")
+        QScroller.grabGesture(scroll_area.viewport(), QScroller.LeftMouseButtonGesture)
+        
+        desktop_widget = QWidget()
+        desktop_layout = QVBoxLayout(desktop_widget)
+        desktop_layout.setSpacing(int(5 * self.parent().scale_factor))
+        desktop_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # 添加弹性空间
+        desktop_layout.addStretch()
+        
+        scroll_area.setWidget(desktop_widget)
+        self.tab_widget.addTab(scroll_area, "桌面")
+        
+        # 存储标签页的widget和layout，用于后续加载按钮
+        self.tab_widgets[1] = desktop_widget
+        self.tab_layouts[1] = desktop_layout
+        self.tabs_loaded[1] = False
+    
+    def create_all_apps_tab(self):
+        """创建全部应用标签页（开始菜单所有应用）"""
+        # 创建滚动区域
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setStyleSheet("QScrollArea { border: none; background-color: transparent; }")
+        QScroller.grabGesture(scroll_area.viewport(), QScroller.LeftMouseButtonGesture)
+        
+        all_apps_widget = QWidget()
+        all_apps_layout = QVBoxLayout(all_apps_widget)
+        all_apps_layout.setSpacing(int(5 * self.parent().scale_factor))
+        all_apps_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # 添加弹性空间
+        all_apps_layout.addStretch()
+        
+        scroll_area.setWidget(all_apps_widget)
+        self.tab_widget.addTab(scroll_area, "全部应用")
+        
+        # 存储标签页的widget和layout，用于后续加载按钮
+        self.tab_widgets[2] = all_apps_widget
+        self.tab_layouts[2] = all_apps_layout
+        self.tabs_loaded[2] = False
+    
+    #create_buttons()可刷新按钮
+    def create_buttons(self, settitype=True): 
+        """创建按钮（仅用于工具标签页）"""
+        # 直接调用load_tab_buttons方法来加载工具标签页的按钮
+        self.load_tab_buttons(0)
+        
+        # 标记工具标签页为已加载
+        self.tabs_loaded[0] = True
 
     def select_add(self):
         self.show_add_item_window()
@@ -9054,10 +10052,19 @@ class FloatingWindow(QWidget):
         if button.property("clicked_once"):
             # 第二次点击，删除文件
             self.remove_file(file)
-            # 重新加载按钮
-            for button in self.buttons:
-                button.setParent(None)
-            self.buttons.clear()
+            # 重新加载按钮（仅工具标签页）
+            tool_widget = self.tab_widget.widget(0)
+            if tool_widget:
+                tool_layout = tool_widget.layout()
+                if tool_layout:
+                    # 清除工具标签页的按钮
+                    if 0 in self.tab_buttons:
+                        for btn in self.tab_buttons[0]:
+                            if btn != self.select_add_btn and btn != self.select_del_btn:
+                                btn.setParent(None)
+                                if btn in self.buttons:
+                                    self.buttons.remove(btn)
+                        self.tab_buttons[0] = []
             self.create_buttons()
             self.update_highlight()
             self.adjustSize()  # 调整窗口大小以适应内容
@@ -9133,10 +10140,19 @@ class FloatingWindow(QWidget):
         print(f"快捷方式已创建: {shortcut_path}")
         self.add_item_window.hide()
         load_morefloder_shortcuts()
-        # 重新加载按钮
-        for button in self.buttons:
-            button.setParent(None)
-        self.buttons.clear()
+        # 重新加载按钮（仅工具标签页）
+        tool_widget = self.tab_widget.widget(0)
+        if tool_widget:
+            tool_layout = tool_widget.layout()
+            if tool_layout:
+                # 清除工具标签页的按钮
+                if 0 in self.tab_buttons:
+                    for btn in self.tab_buttons[0]:
+                        if btn != self.select_add_btn and btn != self.select_del_btn:
+                            btn.setParent(None)
+                            if btn in self.buttons:
+                                self.buttons.remove(btn)
+                    self.tab_buttons[0] = []
         self.create_buttons()
         self.update_highlight()
         self.show()
@@ -9171,7 +10187,21 @@ class FloatingWindow(QWidget):
     
     def update_highlight(self):
         """更新高亮状态"""
-        for i, button in enumerate(self.buttons):
+        # 获取当前标签页的按钮列表
+        current_tab_buttons = self.tab_buttons.get(self.current_tab_index, [])
+        if not current_tab_buttons:
+            return
+        
+        # 确保索引在有效范围内
+        if self.current_index >= len(current_tab_buttons):
+            self.current_index = 0
+        elif self.current_index < 0:
+            self.current_index = len(current_tab_buttons) - 1
+        
+        # 根据是否处于字母表模式选择边框颜色
+        border_color = "#808080" if self.in_alphabet_mode else "#93ffff"
+        
+        for i, button in enumerate(current_tab_buttons):
             if i == self.current_index:
                 button.setStyleSheet(f"""
                     QPushButton {{
@@ -9179,7 +10209,7 @@ class FloatingWindow(QWidget):
                         color: white;
                         text-align: left;
                         padding: {int(10 * self.parent().scale_factor)}px;
-                        border: {int(2 * self.parent().scale_factor)}px solid #93ffff;
+                        border: {int(2 * self.parent().scale_factor)}px solid {border_color};
                         font-size: {int(16 * self.parent().scale_factor)}px;
                     }}
                 """)
@@ -9197,15 +10227,66 @@ class FloatingWindow(QWidget):
                         background-color: rgba(255, 255, 255, 0.1);
                     }}
                 """)
+        
+        # 调整滚动位置，确保当前高亮的按钮在窗口可见范围内
+        if current_tab_buttons and self.current_index < len(current_tab_buttons):
+            current_button = current_tab_buttons[self.current_index]
+            # 获取当前标签页的滚动区域
+            if 0 <= self.current_tab_index < self.tab_widget.count():
+                tab_widget = self.tab_widget.widget(self.current_tab_index)
+                if tab_widget and hasattr(tab_widget, 'verticalScrollBar'):
+                    scroll_bar = tab_widget.verticalScrollBar()
+                    if scroll_bar:
+                        # 获取按钮的几何信息
+                        button_geometry = current_button.geometry()
+                        # 计算按钮的绝对位置
+                        button_global_pos = current_button.mapToGlobal(button_geometry.topLeft())
+                        tab_global_pos = tab_widget.mapToGlobal(tab_widget.rect().topLeft())
+                        button_pos_in_tab = button_global_pos - tab_global_pos
+                        
+                        # 获取滚动区域的可见高度
+                        # viewport_height = tab_widget.viewport().height()
+                        viewport_height = 800 * self.parent().scale_factor
+                        
+                        # 计算按钮的顶部和底部位置
+                        button_top = button_pos_in_tab.y()
+                        button_bottom = button_pos_in_tab.y() + button_geometry.height()
+                        
+                        # 计算当前滚动位置
+                        current_scroll = scroll_bar.value()
+                        
+                        # 调整滚动位置，确保按钮在可见范围内
+                        if button_top < current_scroll:
+                            # 按钮在可见区域上方，向上滚动
+                            scroll_bar.setValue(button_top)
+                        elif button_bottom > current_scroll + viewport_height:
+                            # 按钮在可见区域下方，向下滚动
+                            scroll_bar.setValue(button_bottom - viewport_height)
     
     def toggle_favorite(self):
         """切换收藏状态"""
-        sorted_files = self.sort_files()
+        # 根据当前标签页获取文件列表
+        if self.current_tab_index == 0:  # 工具标签页
+            sorted_files = self.sort_files()
+        elif self.current_tab_index == 1:  # 桌面标签页
+            sorted_files = self.get_desktop_files()
+        elif self.current_tab_index == 2:  # 全部应用标签页
+            sorted_files = self.get_start_menu_items()
+        else:
+            return
+        
+        if self.current_index >= len(sorted_files):
+            return
+        
         current_file = sorted_files[self.current_index]
+        # 只有工具标签页才支持收藏和运行状态检查
+        if current_file.get("type") != "tool":
+            return
+        
         if current_file["name"] in self.current_running_apps:
             # 创建确认弹窗
             if not self.parent().is_mouse_simulation_running == True:
-                self.confirm_dialog = ConfirmDialog(f"是否关闭下列程序？\n{current_file['name']}", scale_factor=self.scale_factor)
+                self.confirm_dialog = ConfirmDialog(f"是否关闭下列程序？\n{current_file['name']}", scale_factor=self.parent().scale_factor)
                 result = self.confirm_dialog.exec_()  # 显示弹窗并获取结果
                 self.ignore_input_until = pygame.time.get_ticks() + 350  # 设置屏蔽时间为800毫秒
             else:
@@ -9246,20 +10327,45 @@ class FloatingWindow(QWidget):
             with open(settings_path, "w", encoding="utf-8") as f:
                 json.dump(settings, f, indent=4)
             
-        # 重新加载按钮
-        for button in self.buttons:
-            button.setParent(None)
-        self.buttons.clear()
+        # 重新加载按钮（仅工具标签页）
+        tool_widget = self.tab_widget.widget(0)
+        if tool_widget:
+            tool_layout = tool_widget.layout()
+            if tool_layout:
+                # 清除工具标签页的按钮
+                if 0 in self.tab_buttons:
+                    for btn in self.tab_buttons[0]:
+                        if btn != self.select_add_btn and btn != self.select_del_btn:
+                            btn.setParent(None)
+                            if btn in self.buttons:
+                                self.buttons.remove(btn)
+                    self.tab_buttons[0] = []
         self.create_buttons()
         self.update_highlight()
 
     def keyPressEvent(self, event):
         """处理键盘事件"""
+        current_tab_buttons = self.tab_buttons.get(self.current_tab_index, [])
+        if not current_tab_buttons:
+            return
+        
         if event.key() == Qt.Key_Up:
-            self.current_index = (self.current_index - 1) % len(self.buttons)
+            self.current_index = (self.current_index - 1) % len(current_tab_buttons)
             self.update_highlight()
         elif event.key() == Qt.Key_Down:
-            self.current_index = (self.current_index + 1) % len(self.buttons)
+            self.current_index = (self.current_index + 1) % len(current_tab_buttons)
+            self.update_highlight()
+        elif event.key() == Qt.Key_Left:
+            # 切换到上一个标签页
+            self.current_tab_index = (self.current_tab_index - 1) % self.tab_widget.count()
+            self.tab_widget.setCurrentIndex(self.current_tab_index)
+            self.current_index = 0
+            self.update_highlight()
+        elif event.key() == Qt.Key_Right:
+            # 切换到下一个标签页
+            self.current_tab_index = (self.current_tab_index + 1) % self.tab_widget.count()
+            self.tab_widget.setCurrentIndex(self.current_tab_index)
+            self.current_index = 0
             self.update_highlight()
 
 class ControllerMapping:
@@ -9354,6 +10460,7 @@ class ControllerMapping:
             self.start = 6
             self.left_stick_in = 7  # 左摇杆按下
             self.right_stick_in = 8 # 右摇杆按下
+            self.has_hat = False  # PS4手柄的D-pad不使用hat，而是作为按钮输入
 
             
         # PS5 Controller
