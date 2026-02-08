@@ -11,7 +11,7 @@ from PIL import Image
 import win32gui,win32process,psutil,win32api,win32ui
 from PyQt5.QtWidgets import QApplication, QListWidgetItem, QMainWindow, QMessageBox, QScroller, QSystemTrayIcon, QMenu , QVBoxLayout, QDialog, QGridLayout, QWidget, QPushButton, QLabel, QDesktopWidget, QHBoxLayout, QFileDialog, QSlider, QLineEdit, QProgressBar, QScrollArea, QFrame, QTabWidget
 from PyQt5.QtGui import QPainter, QPen, QBrush, QFont, QPixmap, QIcon, QColor, QLinearGradient, QKeySequence
-from PyQt5.QtCore import QDateTime, QSize, Qt, QThread, pyqtSignal, QTimer, QPoint, QProcess, QPropertyAnimation, QRect, QObject, QEasingCurve
+from PyQt5.QtCore import QDateTime, QSize, Qt, QThread, pyqtSignal, QTimer, QPoint, QProcess, QPropertyAnimation, QRect, QObject, QEasingCurve, QParallelAnimationGroup
 import subprocess, time, os,win32con, ctypes, re, win32com.client, ctypes, time, pyautogui
 from ctypes import wintypes
 #& C:/Users/86150/AppData/Local/Programs/Python/Python38/python.exe -m PyInstaller --add-data "fav.ico;." --add-data '1.png;.' --add-data 'pssuspend64.exe;.' -w DesktopGame.py -i '.\fav.ico' --uac-admin --noconfirm
@@ -7982,11 +7982,13 @@ class GameSelector(QWidget):
         button_pos = self.more_button.mapToGlobal(self.more_button.rect().bottomLeft())
         self.floating_window.move(button_pos.x(), button_pos.y() + 10)
         
-        self.floating_window.show()
         # 初始加载工具标签页的按钮
         self.floating_window.load_tab_buttons(0)
         self.floating_window.tabs_loaded[0] = True
         self.floating_window.update_highlight()
+        
+        # 显示窗口（带打开动画）
+        self.floating_window.show()
 
     def execute_more_item(self, file=None):
         """执行更多选项中的项目"""
@@ -8830,13 +8832,91 @@ class FloatingWindow(QWidget):
         # 连接标签页切换信号
         self.tab_widget.currentChanged.connect(self.on_tab_changed)
         
-        # 设置窗口大小和位置
+        # 设置窗口大小
         self.setFixedSize(int(400 * parent.scale_factor), int(500 * parent.scale_factor))
-        # 计算居中位置
-        screen = QApplication.primaryScreen().geometry()
-        x = (screen.width() - self.width()) // 2
-        y = (screen.height() - self.height()) // 2
-        self.move(x, y)
+        
+        # 添加动画相关属性
+        self._show_anim_group = None  # 显示动画组
+        self._hide_anim_group = None  # 隐藏动画组
+        self._final_position = None   # 最终位置缓存
+        self.setWindowOpacity(0)      # 初始透明度为0
+    
+    def show(self):
+        """显示窗口，带打开动画效果"""
+        # 如果正在播放隐藏动画，停止它
+        if self._hide_anim_group:
+            self._hide_anim_group.stop()
+        
+        # 设置初始透明度
+        self.setWindowOpacity(0)
+        
+        # 缓存最终位置
+        self._final_position = self.pos()
+        initial_pos = QPoint(self._final_position.x(), self._final_position.y() - self.height())
+        
+        # 显示窗口但保持透明
+        super().show()
+        
+        # 创建动画组
+        self._show_anim_group = QParallelAnimationGroup()
+        
+        # 位置动画：从顶部滑入
+        pos_anim = QPropertyAnimation(self, b"pos")
+        pos_anim.setDuration(200)
+        pos_anim.setStartValue(initial_pos)
+        pos_anim.setEndValue(self._final_position)
+        pos_anim.setEasingCurve(QEasingCurve.OutCubic)
+        
+        # 透明度动画：逐渐显示
+        opacity_anim = QPropertyAnimation(self, b"windowOpacity")
+        opacity_anim.setDuration(500)
+        opacity_anim.setStartValue(0.0)
+        opacity_anim.setEndValue(1.0)
+        opacity_anim.setEasingCurve(QEasingCurve.OutCubic)
+        
+        # 添加动画到组
+        self._show_anim_group.addAnimation(pos_anim)
+        self._show_anim_group.addAnimation(opacity_anim)
+        
+        # 启动动画
+        self._show_anim_group.start()
+    
+    def hide(self):
+        """隐藏窗口，带关闭动画效果"""
+        # 如果正在播放显示动画，停止它
+        if self._show_anim_group:
+            self._show_anim_group.stop()
+        
+        # 获取当前位置
+        current_pos = self.pos()
+        final_pos = QPoint(current_pos.x(), current_pos.y() - self.height())
+        
+        # 创建动画组
+        self._hide_anim_group = QParallelAnimationGroup()
+        
+        # 位置动画：向顶部滑出
+        pos_anim = QPropertyAnimation(self, b"pos")
+        pos_anim.setDuration(200)
+        pos_anim.setStartValue(current_pos)
+        pos_anim.setEndValue(final_pos)
+        pos_anim.setEasingCurve(QEasingCurve.InCubic)
+        
+        # 透明度动画：逐渐隐藏
+        opacity_anim = QPropertyAnimation(self, b"windowOpacity")
+        opacity_anim.setDuration(200)
+        opacity_anim.setStartValue(1.0)
+        opacity_anim.setEndValue(0.0)
+        opacity_anim.setEasingCurve(QEasingCurve.InCubic)
+        
+        # 添加动画到组
+        self._hide_anim_group.addAnimation(pos_anim)
+        self._hide_anim_group.addAnimation(opacity_anim)
+        
+        # 动画完成后隐藏窗口
+        self._hide_anim_group.finished.connect(lambda: super(FloatingWindow, self).hide())
+        
+        # 启动动画
+        self._hide_anim_group.start()
     
     def handle_gamepad_input(self, action, firstinput):
         """处理手柄输入"""
@@ -9311,7 +9391,6 @@ class FloatingWindow(QWidget):
             # 创建按钮
             self.files = self.get_files()
             sorted_files = self.sort_files()
-            print(f"工具标签页: 创建 {len(sorted_files)} 个按钮")
             for file in sorted_files:
                 self.create_button_for_item(file, layout, 0)
             
@@ -9343,7 +9422,6 @@ class FloatingWindow(QWidget):
         
         elif tab_index == 1:  # 桌面标签页
             desktop_files = self.get_desktop_files()
-            print(f"桌面标签页: 创建 {len(desktop_files)} 个按钮")
             for file in desktop_files:
                 self.create_button_for_item(file, layout, 1)
             
@@ -9394,7 +9472,6 @@ class FloatingWindow(QWidget):
             
             # 只加载顶层项目，不加载子文件夹内容
             start_menu_items = self.get_start_menu_items()
-            print(f"全部应用标签页: 找到 {len(start_menu_items)} 个顶层项目，开始创建按钮")
             
             # 移除加载动画
             loading_widget.setParent(None)
@@ -9402,8 +9479,6 @@ class FloatingWindow(QWidget):
             # 创建按钮
             for i, item in enumerate(start_menu_items):
                 btn = self.create_button_for_item(item, layout, 2)
-                if btn and i < 10:
-                    print(f"  创建按钮: {item['name']} ({item['type']})")
             
             # 更新按钮列表
             self.tab_buttons[tab_index] = []
@@ -9411,8 +9486,6 @@ class FloatingWindow(QWidget):
                 item = layout.itemAt(i)
                 if item and item.widget() and isinstance(item.widget(), QtWidgets.QPushButton):
                     self.tab_buttons[tab_index].append(item.widget())
-            
-            print(f"全部应用标签页: 完成，按钮列表长度: {len(self.tab_buttons.get(2, []))}")
         
         # 添加弹性空间
         layout.addStretch()
@@ -9509,6 +9582,10 @@ class FloatingWindow(QWidget):
                                 })
         except Exception as e:
             print(f"获取开始菜单项目失败: {e}")
+        
+        # 按名称字母顺序排序
+        items.sort(key=lambda x: x['name'].lower())
+        
         return items
     
     def get_folder_contents(self, folder_path):
