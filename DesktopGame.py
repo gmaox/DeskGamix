@@ -3815,7 +3815,7 @@ class GameSelector(QWidget):
             controller_name = controller_data['controller'].get_name()
             self.update_controller_status(controller_name)
         # 右侧文字
-        self.right_label = QLabel("A / 进入游戏        B / 最小化        Y / 关闭游戏        X / 鼠标模拟            📦️DeskGamix v0.95.5")
+        self.right_label = QLabel("A / 进入游戏        Y / 关闭游戏        X / 鼠标模拟        ≡ / 游戏菜单            📦️DeskGamix v0.95.5")
         self.right_label.setStyleSheet(f"""
             QLabel {{
                 font-family: "Microsoft YaHei"; 
@@ -4022,7 +4022,8 @@ class GameSelector(QWidget):
             tray_menu.addSeparator()
             restart_action = tray_menu.addAction("重启程序")
             restart_action.triggered.connect(self.restart_program)
-            restore_action = tray_menu.addAction("导入新游戏（未完成）")
+            restore_action = tray_menu.addAction("导入新游戏")
+            restore_action.triggered.connect(self.refresh_games)
             exit_action = tray_menu.addAction("退出")
             exit_action.triggered.connect(self.exitdef)
             tray_menu.setStyleSheet("""
@@ -6523,9 +6524,8 @@ class GameSelector(QWidget):
                 btn.window_info = None
                 btn.setVisible(True)
         
-        # 如果有超过3个后台应用，添加额外按钮容器
-        if len(self.background_windows) > 4:
-            self.create_extra_background_buttons()
+        # 无论后台应用数量多少，都更新额外按钮
+        self.create_extra_background_buttons()
     
     def on_background_button_clicked(self, button_index):
         """处理后台任务按钮点击事件"""
@@ -6551,16 +6551,15 @@ class GameSelector(QWidget):
         if not hasattr(self, 'texta_layout') or not self.texta_layout or not hasattr(self, 'left_label') or not self.left_label:
             return
         
-        # 如果少于等于3个应用，不需要额外按钮
+        # 如果少于等于4个应用，不需要额外按钮，确保移除所有额外按钮与相关引用
         if len(self.background_windows) <= 4:
-            # 移除所有额外按钮
-            # 首先检查当前布局中是否已经有额外按钮
+            # 移除布局中除 left_label/right_label 外的 widget
             current_extra_buttons = []
             for i in range(self.texta_layout.count()):
                 widget = self.texta_layout.itemAt(i).widget()
                 if widget and widget != self.left_label and widget != self.right_label:
                     current_extra_buttons.append(widget)
-            
+
             # 移除所有当前的额外按钮
             for widget in current_extra_buttons:
                 try:
@@ -6568,20 +6567,38 @@ class GameSelector(QWidget):
                     widget.deleteLater()
                 except Exception as e:
                     print(f"Error removing extra buttons: {e}")
-            
+
+            # 额外保险：如果存在单独保存的 extra_background_button，显式移除并清理引用
+            try:
+                if hasattr(self, 'extra_background_button') and self.extra_background_button:
+                    try:
+                        self.texta_layout.removeWidget(self.extra_background_button)
+                    except Exception:
+                        pass
+                    try:
+                        self.extra_background_button.deleteLater()
+                    except Exception:
+                        pass
+                    self.extra_background_button = None
+            except Exception as e:
+                print(f"Error clearing extra_background_button ref: {e}")
+
             # 更新布局
-            self.texta_layout.update()
-            if self.texta_layout.parentWidget():
-                self.texta_layout.parentWidget().update()
+            try:
+                self.texta_layout.update()
+                if self.texta_layout.parentWidget():
+                    self.texta_layout.parentWidget().update()
+            except Exception:
+                pass
             return
         
-        # 移除旧的额外按钮
+        # 移除旧的额外按钮（包括保存在实例变量中的按钮），确保干净地清理引用
         current_extra_buttons = []
         for i in range(self.texta_layout.count()):
             widget = self.texta_layout.itemAt(i).widget()
             if widget and widget != self.left_label and widget != self.right_label:
                 current_extra_buttons.append(widget)
-        
+
         # 移除所有当前的额外按钮
         for widget in current_extra_buttons:
             try:
@@ -6589,6 +6606,21 @@ class GameSelector(QWidget):
                 widget.deleteLater()
             except Exception as e:
                 print(f"Error removing old extra buttons: {e}")
+
+        # 额外保险：如果存在单独保存的 extra_background_button，显式移除并清理引用
+        try:
+            if hasattr(self, 'extra_background_button') and self.extra_background_button:
+                try:
+                    self.texta_layout.removeWidget(self.extra_background_button)
+                except Exception:
+                    pass
+                try:
+                    self.extra_background_button.deleteLater()
+                except Exception:
+                    pass
+                self.extra_background_button = None
+        except Exception as e:
+            print(f"Error clearing extra_background_button ref: {e}")
         
         # 为超过3个的应用添加一个大按钮
         if len(self.background_windows) > 4:
@@ -7478,19 +7510,59 @@ class GameSelector(QWidget):
             self.floating_window.handle_gamepad_input(action, firstinput)
             return
 
-        # 新增焦点切换逻辑
+        # 新增焦点切换逻辑（基于位置：切换时选取最近的按钮）
         if action == 'DOWN' and self.current_section == 0 and self.more_section == 0:
-            self.current_section = 1  # 切换到控制按钮区域
-            if self.current_index < 3:
-                self.current_index = int(self.current_index * 2)
-            else:
-                self.current_index = 6
-            #self.current_index = 3
+            # 切换到控制按钮区域：根据当前选中游戏按钮的屏幕位置，选择最近的控制按钮
+            self.current_section = 1
+            try:
+                if self.buttons and 0 <= self.current_index < len(self.buttons):
+                    game_btn = self.buttons[self.current_index]
+                    gp = game_btn.mapToGlobal(game_btn.rect().center())
+                    best_idx = 0
+                    best_dist = None
+                    for i, cb in enumerate(self.control_buttons):
+                        try:
+                            cp = cb.mapToGlobal(cb.rect().center())
+                            dx = gp.x() - cp.x()
+                            dy = gp.y() - cp.y()
+                            dist = dx * dx + dy * dy
+                            if best_dist is None or dist < best_dist:
+                                best_dist = dist
+                                best_idx = i
+                        except Exception:
+                            continue
+                    self.current_index = best_idx
+                else:
+                    self.current_index = 0
+            except Exception:
+                self.current_index = 0
             self.update_highlight()
             print("当前区域：控制按钮区域")
         elif action == 'UP' and self.current_section == 1 and self.more_section == 0:
-            self.current_section = 0  # 返回游戏选择区域
-            self.current_index = int(self.current_index/2)
+            # 返回游戏选择区域：根据当前控制按钮位置，选择最近的游戏按钮
+            self.current_section = 0
+            try:
+                if hasattr(self, 'control_buttons') and 0 <= self.current_index < len(self.control_buttons) and self.buttons:
+                    cb = self.control_buttons[self.current_index]
+                    cp = cb.mapToGlobal(cb.rect().center())
+                    best_idx = 0
+                    best_dist = None
+                    for i, gb in enumerate(self.buttons):
+                        try:
+                            gp = gb.mapToGlobal(gb.rect().center())
+                            dx = gp.x() - cp.x()
+                            dy = gp.y() - cp.y()
+                            dist = dx * dx + dy * dy
+                            if best_dist is None or dist < best_dist:
+                                best_dist = dist
+                                best_idx = i
+                        except Exception:
+                            continue
+                    self.current_index = best_idx
+                else:
+                    self.current_index = 0
+            except Exception:
+                self.current_index = 0
             self.update_highlight()
             print("当前区域：游戏选择区域")
             if getattr(self, 'show_background_apps', False):  # 仅在处于后台应用模式时恢复
@@ -7575,7 +7647,10 @@ class GameSelector(QWidget):
                     self.toggle_favorite()  # 收藏/取消收藏游戏
                     self.ignore_input_until = pygame.time.get_ticks() + 300 
                 elif action == 'X':  # X键开悬浮窗
-                    self.launch_game(self.current_index)  # 启动游戏
+                    if self.sort_games()[self.current_index]["name"] in self.player:
+                        self.launch_game(self.current_index)  # 启动游戏
+                    else:
+                        self.hide_window()
                     QTimer.singleShot(210, self.mouse_simulation)
                 elif action == 'START':  # START键打开游戏详情
                     self.open_selected_game_screenshot()
@@ -9163,28 +9238,29 @@ class FloatingWindow(QWidget):
                                         }}
                                     """)
                 else:
-                    # 是行首，退出字母表选择模式
-                    self.in_alphabet_mode = False
-                    self.update_highlight()  # 更新高亮为蓝色
-                    # 恢复所有字母按钮的样式
-                    for btn in self.alphabet_buttons.values():
-                        btn.setStyleSheet(f"""
-                            QPushButton {{
-                                background-color: transparent;
-                                color: white;
-                                font-size: {int(20 * self.parent().scale_factor)}px;
-                                min-width: {int(48 * self.parent().scale_factor)}px;
-                                min-height: {int(64 * self.parent().scale_factor)}px;
-                                border: none;
-                                border-radius: {int(4 * self.parent().scale_factor)}px;
-                            }}
-                            QPushButton:hover {{
-                                background-color: rgba(255, 255, 255, 0.2);
-                            }}
-                            QPushButton:pressed {{
-                                background-color: rgba(255, 255, 255, 0.3);
-                            }}
-                        """)
+                    if firstinput:
+                        # 是行首，退出字母表选择模式
+                        self.in_alphabet_mode = False
+                        self.update_highlight()  # 更新高亮为蓝色
+                        # 恢复所有字母按钮的样式
+                        for btn in self.alphabet_buttons.values():
+                            btn.setStyleSheet(f"""
+                                QPushButton {{
+                                    background-color: transparent;
+                                    color: white;
+                                    font-size: {int(20 * self.parent().scale_factor)}px;
+                                    min-width: {int(48 * self.parent().scale_factor)}px;
+                                    min-height: {int(64 * self.parent().scale_factor)}px;
+                                    border: none;
+                                    border-radius: {int(4 * self.parent().scale_factor)}px;
+                                }}
+                                QPushButton:hover {{
+                                    background-color: rgba(255, 255, 255, 0.2);
+                                }}
+                                QPushButton:pressed {{
+                                    background-color: rgba(255, 255, 255, 0.3);
+                                }}
+                            """)
             elif action == 'RIGHT':
                 # 向右移动（增加索引）
                 if (self.current_alphabet_index + 1) % 4 > 0:  # 不是行尾
