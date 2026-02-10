@@ -4082,7 +4082,17 @@ class GameSelector(QWidget):
         self._kb_last_zone = {'left': 'dead', 'right': 'dead'}
         self._kb_inner_ignore_until = {'left': 0, 'right': 0}
         self._kb_last_x_pressed = [False, False]
+        self._kb_last_a_pressed = [False, False]
+        self._kb_last_b_pressed = [False, False]
         self._kb_last_y_pressed = [False, False]
+        # 每个摇杆的最后一次发送按键时间（用于去抖，避免 time.sleep 导致阻塞和重复）
+        self._kb_last_key_time = [0.0, 0.0]
+        # 记录上次 hat / dpad 状态，和按键是否仍为按下（用于 keyDown/keyUp）
+        self._kb_last_hat = [(0, 0), (0, 0)]
+        self._kb_last_dpad = [
+            {'up': False, 'down': False, 'left': False, 'right': False},
+            {'up': False, 'down': False, 'left': False, 'right': False}
+        ]
         self._kb_last_fkey_move_time = 0
         self._kb_ignore_start_until = 0
         
@@ -4287,8 +4297,7 @@ class GameSelector(QWidget):
     def _on_hotkey_triggered(self, hotkey_id):
         """全局热键触发回调（由 native event filter 调用）。"""
         try:
-            # 简单地显示主窗口
-            self.show_window()
+            self.guide_run()
         except Exception:
             pass
 
@@ -4934,7 +4943,10 @@ class GameSelector(QWidget):
         self._kb_last_zone = {'left': 'dead', 'right': 'dead'}
         self._kb_inner_ignore_until = {'left': 0, 'right': 0}
         self._kb_last_x_pressed = [False, False]
+        self._kb_last_a_pressed = [False, False]
+        self._kb_last_b_pressed = [False, False]
         self._kb_last_y_pressed = [False, False]
+        self._kb_last_key_time = [0.0, 0.0]
         self._kb_last_fkey_move_time = 0
         # 保存窗口原始位置和位移状态
         self._kb_original_position = (x, y)
@@ -4950,6 +4962,27 @@ class GameSelector(QWidget):
         self.keyboard_overlay.show()
 
     def close_keyboard_overlay(self):
+        # 在关闭时确保释放所有仍然按下的键，避免粘滞
+        try:
+            for jid in range(len(self._kb_last_a_pressed)):
+                if self._kb_last_a_pressed[jid]:
+                    pyautogui.keyUp('space')
+                    self._kb_last_a_pressed[jid] = False
+                if self._kb_last_b_pressed[jid]:
+                    pyautogui.keyUp('backspace')
+                    self._kb_last_b_pressed[jid] = False
+                d = self._kb_last_dpad[jid] if jid < len(self._kb_last_dpad) else None
+                if d:
+                    if d.get('up'):
+                        pyautogui.keyUp('up'); d['up'] = False
+                    if d.get('down'):
+                        pyautogui.keyUp('down'); d['down'] = False
+                    if d.get('left'):
+                        pyautogui.keyUp('left'); d['left'] = False
+                    if d.get('right'):
+                        pyautogui.keyUp('right'); d['right'] = False
+        except Exception:
+            pass
         if self.keyboard_overlay_thread:
             self.keyboard_overlay_thread.stop()
             self.keyboard_overlay_thread.wait()
@@ -5017,36 +5050,84 @@ class GameSelector(QWidget):
                 rs_pressed = joystick.get_button(mapping.right_stick_in)
                 guide_pressed = joystick.get_button(mapping.guide)
 
-                # D-Pad（hat 或 按钮）
-                vdvdv = 0.2
+                # D-Pad（hat 或 按钮）以及 A/B: 在按下时发送 keyDown，抬起时发送 keyUp（edge detection）
+                now = time.time()
+
+                # 确保状态列表足够长
+                try:
+                    _ = self._kb_last_a_pressed[joystick_id]
+                except Exception:
+                    # 扩展所有相关状态列表
+                    extend_to = joystick_id + 1
+                    while len(self._kb_last_a_pressed) < extend_to:
+                        self._kb_last_a_pressed.append(False)
+                    while len(self._kb_last_b_pressed) < extend_to:
+                        self._kb_last_b_pressed.append(False)
+                    while len(self._kb_last_x_pressed) < extend_to:
+                        self._kb_last_x_pressed.append(False)
+                    while len(self._kb_last_y_pressed) < extend_to:
+                        self._kb_last_y_pressed.append(False)
+                    while len(self._kb_last_key_time) < extend_to:
+                        self._kb_last_key_time.append(0.0)
+                    while len(self._kb_last_hat) < extend_to:
+                        self._kb_last_hat.append((0, 0))
+                    while len(self._kb_last_dpad) < extend_to:
+                        self._kb_last_dpad.append({'up': False, 'down': False, 'left': False, 'right': False})
+
+                # 处理 hat / dpad 为 keyDown/keyUp
                 if hasattr(mapping, 'has_hat') and mapping.has_hat and joystick.get_numhats() > 0:
                     hat = joystick.get_hat(0)
-                    if hat == (0, 1):
-                        pyautogui.press('up'); time.sleep(vdvdv)
-                    elif hat == (0, -1):
-                        pyautogui.press('down'); time.sleep(vdvdv)
-                    elif hat == (-1, 0):
-                        pyautogui.press('left'); time.sleep(vdvdv)
-                    elif hat == (1, 0):
-                        pyautogui.press('right'); time.sleep(vdvdv)
+                    up = hat == (0, 1)
+                    down = hat == (0, -1)
+                    left = hat == (-1, 0)
+                    right = hat == (1, 0)
                 else:
-                    if joystick.get_button(mapping.dpad_up):
-                        pyautogui.press('up'); time.sleep(vdvdv)
-                    if joystick.get_button(mapping.dpad_down):
-                        pyautogui.press('down'); time.sleep(vdvdv)
-                    if joystick.get_button(mapping.dpad_left):
-                        pyautogui.press('left'); time.sleep(vdvdv)
-                    if joystick.get_button(mapping.dpad_right):
-                        pyautogui.press('right'); time.sleep(vdvdv)
+                    up = bool(joystick.get_button(mapping.dpad_up))
+                    down = bool(joystick.get_button(mapping.dpad_down))
+                    left = bool(joystick.get_button(mapping.dpad_left))
+                    right = bool(joystick.get_button(mapping.dpad_right))
 
-                # A/B/X/Y
-                if a_pressed:
-                    pyautogui.press('space'); time.sleep(vdvdv)
-                if b_pressed:
-                    pyautogui.press('backspace'); time.sleep(vdvdv)
+                dpad_state = self._kb_last_dpad[joystick_id]
+                # up
+                if up and not dpad_state['up']:
+                    pyautogui.keyDown('up'); dpad_state['up'] = True
+                elif not up and dpad_state['up']:
+                    pyautogui.keyUp('up'); dpad_state['up'] = False
+                # down
+                if down and not dpad_state['down']:
+                    pyautogui.keyDown('down'); dpad_state['down'] = True
+                elif not down and dpad_state['down']:
+                    pyautogui.keyUp('down'); dpad_state['down'] = False
+                # left
+                if left and not dpad_state['left']:
+                    pyautogui.keyDown('left'); dpad_state['left'] = True
+                elif not left and dpad_state['left']:
+                    pyautogui.keyUp('left'); dpad_state['left'] = False
+                # right
+                if right and not dpad_state['right']:
+                    pyautogui.keyDown('right'); dpad_state['right'] = True
+                elif not right and dpad_state['right']:
+                    pyautogui.keyUp('right'); dpad_state['right'] = False
+
+                # A 按键：按下 -> keyDown，抬起 -> keyUp
+                if a_pressed and not self._kb_last_a_pressed[joystick_id]:
+                    pyautogui.keyDown('space')
+                if not a_pressed and self._kb_last_a_pressed[joystick_id]:
+                    pyautogui.keyUp('space')
+                self._kb_last_a_pressed[joystick_id] = a_pressed
+
+                # B 按键
+                if b_pressed and not self._kb_last_b_pressed[joystick_id]:
+                    pyautogui.keyDown('backspace')
+                if not b_pressed and self._kb_last_b_pressed[joystick_id]:
+                    pyautogui.keyUp('backspace')
+                self._kb_last_b_pressed[joystick_id] = b_pressed
+
+                # X/Y 保持上升沿触发现有功能（不发送 keyDown/up）
                 if x_pressed and not self._kb_last_x_pressed[joystick_id]:
                     self.keyboard_widget.toggle_sticky_mode()
                 self._kb_last_x_pressed[joystick_id] = x_pressed
+
                 if y_pressed and not self._kb_last_y_pressed[joystick_id]:
                     self.keyboard_widget.toggle_f_keys_mode()
                 self._kb_last_y_pressed[joystick_id] = y_pressed
@@ -7092,7 +7173,7 @@ class GameSelector(QWidget):
                             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                                 continue
                         if not already_running:
-                            subprocess.Popen(tool_path, shell=True)
+                            os.startfile(tool_path)
         if game_cmd:
             #self.showMinimized()
             # subprocess.Popen(game_cmd, shell=True)
@@ -7205,6 +7286,54 @@ class GameSelector(QWidget):
             # 捕获异常，返回假
             print(f"错误: {e}")
             return False
+    def guide_run(self):
+        """置顶开启主页面"""
+        try:
+            # 将所有界面标记归零（没必要似乎
+            #self.current_index = 0
+            #self.current_section = 0
+            #self.more_section = 0
+            #if current_time < ((self.ignore_input_until)+2000):
+            #    return
+            #self.ignore_input_until = pygame.time.get_ticks() + 500 
+            #if STARTUP:subprocess.run(["taskkill", "/f", "/im", "explorer.exe"])#STARTUP = False
+            if self.killexplorer == True:
+                self.wintaskbarshow()
+            #if STARTUP:
+            #    self.exitdef(False)
+            #    # 无参数重启
+            #    subprocess.Popen([sys.executable])
+            #self.showFullScreen()
+            ## 记录当前窗口的 Z 顺序
+            #z_order = []
+            #def enum_windows_callback(hwnd, lParam):
+            #    z_order.append(hwnd)
+            #    return True
+            #win32gui.EnumWindows(enum_windows_callback, None)
+            self.is_current_window_fullscreen()
+            hwnd = GSHWND
+            # 尝试将窗口带到前台
+            self.show_window()
+            result = ctypes.windll.user32.SetForegroundWindow(hwnd)
+            # 设置右下角坐标
+            screen_width, screen_height = pyautogui.size()
+            right_bottom_x = screen_width - 1  # 最右边
+            right_bottom_y = screen_height - 1  # 最底部
+            pyautogui.moveTo(right_bottom_x, right_bottom_y)
+            QTimer.singleShot(200, lambda: (
+                print("窗口已成功带到前台") if result else (
+                    print("未能将窗口带到前台，正在尝试设置为最上层"),
+                    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE),
+                    hide_taskbar() if self.killexplorer == False else None,
+                    time.sleep(0.2),
+                    pyautogui.rightClick(right_bottom_x, right_bottom_y),
+                    show_taskbar() if self.killexplorer == False else None,
+                    SetWindowPos(hwnd, -2, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE),
+                    self.update_highlight()
+                )
+            ))
+        except Exception as e:
+            print(f"Error: {e}")
     def handle_gamepad_input(self, action):
         """处理手柄输入"""
         global STARTUP  # 声明 STARTUP 为全局变量
@@ -7444,53 +7573,88 @@ class GameSelector(QWidget):
             return
         
         if not self.gsfocus():  # 检测当前窗口是否为游戏选择界面
+            # 按键长按超过800ms时不触发，直到抬起才return
             if action == 'GUIDE':
-                try:
-                    # 将所有界面标记归零（没必要似乎
-                    #self.current_index = 0
-                    #self.current_section = 0
-                    #self.more_section = 0
-                    #if current_time < ((self.ignore_input_until)+2000):
-                    #    return
-                    #self.ignore_input_until = pygame.time.get_ticks() + 500 
-                    #if STARTUP:subprocess.run(["taskkill", "/f", "/im", "explorer.exe"])#STARTUP = False
-                    if self.killexplorer == True:
-                        self.wintaskbarshow()
-                    #if STARTUP:
-                    #    self.exitdef(False)
-                    #    # 无参数重启
-                    #    subprocess.Popen([sys.executable])
-                    #self.showFullScreen()
-                    ## 记录当前窗口的 Z 顺序
-                    #z_order = []
-                    #def enum_windows_callback(hwnd, lParam):
-                    #    z_order.append(hwnd)
-                    #    return True
-                    #win32gui.EnumWindows(enum_windows_callback, None)
-                    self.is_current_window_fullscreen()
-                    hwnd = GSHWND
-                    # 尝试将窗口带到前台
-                    self.show_window()
-                    result = ctypes.windll.user32.SetForegroundWindow(hwnd)
-                    # 设置右下角坐标
-                    screen_width, screen_height = pyautogui.size()
-                    right_bottom_x = screen_width - 1  # 最右边
-                    right_bottom_y = screen_height - 1  # 最底部
-                    pyautogui.moveTo(right_bottom_x, right_bottom_y)
-                    QTimer.singleShot(200, lambda: (
-                        print("窗口已成功带到前台") if result else (
-                            print("未能将窗口带到前台，正在尝试设置为最上层"),
-                            SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE),
-                            hide_taskbar() if self.killexplorer == False else None,
-                            time.sleep(0.2),
-                            pyautogui.rightClick(right_bottom_x, right_bottom_y),
-                            show_taskbar() if self.killexplorer == False else None,
-                            SetWindowPos(hwnd, -2, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE),
-                            self.update_highlight()
-                        )
-                    ))
-                except Exception as e:
-                    print(f"Error: {e}")
+                # 确保状态变量存在
+                if not hasattr(self, '_guide_press_time'):
+                    self._guide_press_time = 0
+                if not hasattr(self, '_guide_last_state'):
+                    self._guide_last_state = False
+                current_ticks = pygame.time.get_ticks()
+
+                # 检查当前所有手柄的GUIDE键状态
+                guide_pressed = False
+                for controller_data in self.controller_thread.controllers.values():
+                    controller = controller_data['controller']
+                    mapping = controller_data['mapping']
+                    if controller.get_button(mapping.guide):
+                        guide_pressed = True
+                        break
+
+                if guide_pressed:
+                    # 刚开始按下，记录按下时间
+                    if not self._guide_last_state:
+                        self._guide_press_time = current_ticks
+                        self._guide_last_state = True
+                        # 清除长按标记
+                        self._guide_long_pressed = False
+                        # 如果没有正在轮询释放状态，创建一个轮询器以捕获可能缺失的释放事件
+                        if not hasattr(self, '_guide_poll_timer') or self._guide_poll_timer is None:
+                            def _poll_guide_release():
+                                now = pygame.time.get_ticks()
+                                # 检查当前所有手柄的GUIDE键状态
+                                still_pressed = False
+                                for controller_data in self.controller_thread.controllers.values():
+                                    controller = controller_data['controller']
+                                    mapping = controller_data['mapping']
+                                    if controller.get_button(mapping.guide):
+                                        still_pressed = True
+                                        break
+                                if still_pressed:
+                                    # 标记为长按（若超过阈值）并继续等待释放
+                                    if now - (self._guide_press_time or now) > 800:
+                                        self._guide_long_pressed = True
+                                    return
+                                # 已释放，处理为短按或忽略长按
+                                if self._guide_last_state:
+                                    press_duration = now - (self._guide_press_time or now)
+                                    self._guide_last_state = False
+                                    self._guide_press_time = 0
+                                    if getattr(self, '_guide_long_pressed', False):
+                                        self._guide_long_pressed = False
+                                    else:
+                                        if press_duration <= 800:
+                                            self.guide_run()
+                                # 停止并清理定时器
+                                try:
+                                    self._guide_poll_timer.stop()
+                                except Exception:
+                                    pass
+                                self._guide_poll_timer = None
+
+                            self._guide_poll_timer = QTimer(self)
+                            self._guide_poll_timer.timeout.connect(_poll_guide_release)
+                            self._guide_poll_timer.start(50)
+                    # 如果按下超过800ms，标记为长按并等待释放（不触发）
+                    if current_ticks - self._guide_press_time > 800:
+                        self._guide_long_pressed = True
+                        return
+                    # 在按下但未超时的期间，不在此触发，等待释放时判断短/长按
+                else:
+                    # 按键刚刚释放
+                    if self._guide_last_state:
+                        press_duration = current_ticks - (self._guide_press_time or current_ticks)
+                        self._guide_last_state = False
+                        self._guide_press_time = 0
+                        # 如果之前标记为长按，则忽略本次释放事件
+                        if getattr(self, '_guide_long_pressed', False):
+                            self._guide_long_pressed = False
+                            return
+                        # 短按：在释放时触发一次
+                        if press_duration <= 800:
+                            self.guide_run()
+                        return
+                # 其它情况（仍在按下或无变化）不在此触发
             self.ignore_input_until = current_time + 500
             return
         
@@ -7583,10 +7747,25 @@ class GameSelector(QWidget):
                 self.hide_window()
                 pyautogui.hotkey('win', 'd')
                 return
-            elif action == 'LB':  # LB减音量
-                self.decrease_volume()
-            elif action == 'RB':  # RB加音量
-                self.increase_volume()
+            elif action in ('LB', 'RB'):
+                for controller_data in self.controller_thread.controllers.values():
+                    controller = controller_data['controller']
+                    mapping = controller_data['mapping']
+                    lb_pressed = controller.get_button(mapping.left_bumper)
+                    rb_pressed = controller.get_button(mapping.right_bumper)
+                    if lb_pressed and rb_pressed:
+                        self.toggle_mute()
+                        self.ignore_input_until = pygame.time.get_ticks() + 500 
+                        return
+                    # 仅 LB 或仅 RB：单独调整音量后返回
+                    if action == 'LB':
+                        self.decrease_volume()
+                        self.ignore_input_until = pygame.time.get_ticks() + 200
+                        return
+                    elif action == 'RB':
+                        self.increase_volume()
+                        self.ignore_input_until = pygame.time.get_ticks() + 200 
+                        return
             if self.current_section == 1:  # 控制按钮区域
                 if action.lower() == "right":
                     # 限制导航范围：在后台应用模式下只允许导航到可见按钮
@@ -8210,7 +8389,7 @@ class GameSelector(QWidget):
             # 执行文件
             print(f"执行文件: {current_file['path']}")
             self.hide_window()
-            subprocess.Popen(current_file["path"], shell=True)
+            os.startfile(current_file["path"])
         self.floating_window.current_index = 0
         self.floating_window.update_highlight()
         self.floating_window.hide()
@@ -8566,50 +8745,6 @@ class GameControllerThread(QThread):
         self.last_hat_time = 0
         self.hat_delay = 0.05
         self.last_hat_value = (0, 0)
-        # sleep/wake 后 pygame 可能处于坏状态，做一次有限频率的自动恢复
-        self._last_reinit_time = 0.0
-        self._reinit_cooldown = 1.5  # seconds
-        self._consecutive_failures = 0
-
-    def _safe_index(self, arr, idx):
-        """安全读取列表索引，越界/异常返回 False（用于按钮状态）。"""
-        try:
-            if arr is None:
-                return False
-            if idx is None:
-                return False
-            if idx < 0:
-                return False
-            if idx >= len(arr):
-                return False
-            return bool(arr[idx])
-        except Exception:
-            return False
-
-    def _maybe_reinit_pygame_on_error(self, err: Exception):
-        """检测到 pygame/SDL 在睡眠唤醒后的异常时，做一次节流的恢复。"""
-        now = time.time()
-        if now - getattr(self, "_last_reinit_time", 0.0) < getattr(self, "_reinit_cooldown", 1.5):
-            return
-
-        msg = str(err)
-        # pygame/SDL 在 Win 睡眠唤醒后常见的错误形态
-        should_reinit = (
-            isinstance(err, SystemError)
-            or "returned a result with an error set" in msg
-            or "video system not initialized" in msg.lower()
-            or "joystick system not initialized" in msg.lower()
-            or "not initialized" in msg.lower()
-        )
-        if not should_reinit:
-            return
-
-        self._last_reinit_time = now
-        try:
-            pygame.event.clear()
-        except Exception:
-            pass
-        self.run()
 
     def stop(self):
         """停止线程"""
@@ -8679,14 +8814,7 @@ class GameControllerThread(QThread):
                 pygame.event.pump()  # 确保事件队列被更新
 
                 # 处理事件
-                try:
-                    events = pygame.event.get()
-                except Exception as e:
-                    # 睡眠/唤醒后这里最容易炸（SystemError: <built-in function get> returned a result with an error set）
-                    self._maybe_reinit_pygame_on_error(e)
-                    raise
-
-                for event in events:
+                for event in pygame.event.get():
                     # 处理手柄连接事件
                     if event.type == pygame.JOYDEVICEADDED:
                         try:
@@ -8799,50 +8927,39 @@ class GameControllerThread(QThread):
                             pass
 
                     # 检查动作按钮
-                    if self._safe_index(buttons, mapping.button_a):  # A/Cross/○
+                    if buttons[mapping.button_a]:  # A/Cross/○
                         self.gamepad_signal.emit('A')
-                    if self._safe_index(buttons, mapping.button_b):  # B/Circle/×
+                    if buttons[mapping.button_b]:  # B/Circle/×
                         self.gamepad_signal.emit('B')
-                    if self._safe_index(buttons, mapping.button_x):  # X/Square/□
+                    if buttons[mapping.button_x]:  # X/Square/□
                         self.gamepad_signal.emit('X')
-                    if self._safe_index(buttons, mapping.button_y):  # Y/Triangle/△
+                    if buttons[mapping.button_y]:  # Y/Triangle/△
                         self.gamepad_signal.emit('Y')
-                    if self._safe_index(buttons, mapping.guide):
+                    if buttons[mapping.guide]:
                         self.gamepad_signal.emit('GUIDE')
-                    if self._safe_index(buttons, mapping.back):  # Back
+                    if buttons[mapping.back]:  # Back
                         self.gamepad_signal.emit('BACK')
-                    if self._safe_index(buttons, mapping.start):  # Start
+                    if buttons[mapping.start]:  # Start
                         self.gamepad_signal.emit('START')
-                    if self._safe_index(buttons, mapping.left_bumper):  # LB
+                    if buttons[mapping.left_bumper]:  # LB
                         self.gamepad_signal.emit('LB')
-                    if self._safe_index(buttons, mapping.right_bumper):  # RB
+                    if buttons[mapping.right_bumper]:  # RB
                         self.gamepad_signal.emit('RB')
                     #if buttons[mapping.left_trigger]:  # LT
                     #    self.gamepad_signal.emit('LT')
                     #if buttons[mapping.right_trigger]:  # RT
                     #    self.gamepad_signal.emit('RT')
-                    if self._safe_index(buttons, mapping.left_stick_in):  # LS
+                    if buttons[mapping.left_stick_in]:  # LS
                         self.gamepad_signal.emit('LS')
-                    if self._safe_index(buttons, mapping.right_stick_in):  # RS
+                    if buttons[mapping.right_stick_in]:  # RS
                         self.gamepad_signal.emit('RS')
 
                 time.sleep(0.01)
             except Exception as e:
-                error_msg = f"Error in event loop: {e}"
-                print(error_msg)
-                # 发出错误信号
-                self.controller_error_signal.emit(error_msg)
-                # 尝试在错误后做一次恢复（节流），避免唤醒后卡死在报错循环里
-                try:
-                    self._maybe_reinit_pygame_on_error(e)
-                except Exception:
-                    pass
-                # 小睡一下，避免错误时 CPU 飙升
-                try:
-                    time.sleep(0.2)
-                except Exception:
-                    pass
-
+                self.controller_error_signal.emit('手柄读取出错')
+                print(f"Error in event loop: {e}")
+                time.sleep(5)  # 出错时稍微等待
+                self.run()  # 重新进入循环
 class FileDialogThread(QThread):
     file_selected = pyqtSignal(str)  # 信号，用于传递选中的文件路径
 
@@ -9668,31 +9785,32 @@ class FloatingWindow(QWidget):
         self.update_highlight()
     
     def get_desktop_files(self):
-        """获取桌面文件列表"""
+        """获取用户桌面和公共桌面文件列表"""
         files = []
         try:
-            desktop_path = os.path.join(os.path.expanduser('~'), 'Desktop')
-            if not os.path.exists(desktop_path):
-                # 尝试公共桌面
-                desktop_path = os.path.join(os.environ.get('PUBLIC', ''), 'Desktop')
-            
-            if os.path.exists(desktop_path):
+            # 用户桌面路径
+            user_desktop = os.path.join(os.path.expanduser('~'), 'Desktop')
+            # 公共桌面路径
+            public_desktop = os.path.join(os.environ.get('PUBLIC', ''), 'Desktop')
+            desktop_paths = []
+            if os.path.exists(user_desktop):
+                desktop_paths.append(user_desktop)
+            if os.path.exists(public_desktop):
+                desktop_paths.append(public_desktop)
+            # 去重
+            desktop_paths = list(dict.fromkeys(desktop_paths))
+            for desktop_path in desktop_paths:
                 all_files = os.listdir(desktop_path)
                 for file in all_files:
                     file_path = os.path.join(desktop_path, file)
                     if os.path.isfile(file_path):
-                        # 排除回收站文件、ini文件和以~!开头的隐藏文件
                         file_lower = file.lower()
-                        # 回收站文件通常名为"回收站"或"Recycle Bin"
                         if file_lower == "回收站" or file_lower == "recycle bin":
                             continue
-                        # 排除ini文件
                         if file_lower.endswith('.ini'):
                             continue
-                        # 排除以~!开头的隐藏文件
                         if file.startswith('~$'):
                             continue
-                        # 显示其他所有桌面文件
                         files.append({
                             "name": os.path.splitext(file)[0],
                             "path": file_path,
