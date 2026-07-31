@@ -8,16 +8,15 @@ import urllib.request
 import configparser
 from PyQt5 import QtWidgets
 from PyQt5 import QtGui
-import pygame, math
 from PIL import Image, ImageFilter
-import win32gui,win32process,psutil,win32api,win32ui,win32security
+import win32gui,win32process,psutil,win32api,win32ui,win32security,math
 from PyQt5.QtWidgets import QApplication, QListWidgetItem, QMainWindow, QMessageBox, QScroller, QSystemTrayIcon, QMenu , QVBoxLayout, QDialog, QGridLayout, QWidget, QPushButton, QLabel, QDesktopWidget, QHBoxLayout, QFileDialog, QSlider, QLineEdit, QProgressBar, QScrollArea, QFrame, QTabWidget, QStackedWidget, QTextEdit, QListWidget
 from PyQt5.QtGui import QPainter, QPen, QBrush, QFont, QPixmap, QIcon, QColor, QLinearGradient, QKeySequence
 from PyQt5.QtCore import QDateTime, QSize, Qt, QThread, pyqtSignal, QTimer, QPoint, QProcess, QPropertyAnimation, QRect, QObject, QEasingCurve, QParallelAnimationGroup, QTranslator
 import subprocess, time, os,win32con, ctypes, re, win32com.client, ctypes, time, pyautogui
 from ctypes import wintypes
 
-APP_VERSION = "0.96.1"
+APP_VERSION = "0.97.1"
 
 #& C:/Users/86150/AppData/Local/Programs/Python/Python38/python.exe -m PyInstaller --add-data "fav.ico;." --add-data '1.png;.' --add-data 'pssuspend64.exe;.' -w Simplenite.py -i '.\fav.ico' --uac-admin --noconfirm
 # 定义 Windows API 函数
@@ -33,6 +32,311 @@ SetWindowPos.restype = wintypes.BOOL
 SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
 SetForegroundWindow.restype = wintypes.BOOL
 SetForegroundWindow.argtypes = [wintypes.HWND]
+
+
+# ==================== SDL2 手柄后端（ctypes 直连，替代 pygame） ====================
+# 通过 ctypes 直接调用 SDL2 运行库，提供手柄输入与设备热插拔事件支持。
+# 需将 SDL2.dll 放在程序目录或系统 PATH 中，或通过环境变量 SDL2_DLL_PATH 指定。
+
+class _SDLError(Exception):
+    """SDL2 操作异常，替代 sdl_gamepad.error"""
+
+# SDL2 常量
+SDL_INIT_JOYSTICK = 0x00000200
+SDL_ENABLE = 1
+SDL_HAT_CENTERED = 0x00
+SDL_HAT_UP = 0x01
+SDL_HAT_RIGHT = 0x02
+SDL_HAT_DOWN = 0x04
+SDL_HAT_LEFT = 0x08
+SDL_JOYDEVICEADDED = 0x605
+SDL_JOYDEVICEREMOVED = 0x606
+
+_sdl2 = None
+_sdl2_initialized = False
+_joystick_cache = {}  # instance_id -> _SDLJoystick（避免重复打开同一设备导致句柄泄漏）
+
+
+def _sdl_app_dir():
+    """获取可执行文件/脚本所在目录，用于查找 SDL2.dll。"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _load_sdl2():
+    global _sdl2
+    if _sdl2 is not None:
+        return _sdl2
+    candidates = []
+    env_path = os.environ.get("SDL2_DLL_PATH")
+    if env_path:
+        candidates.append(env_path)
+    candidates.append(os.path.join(_sdl_app_dir(), "./_internal/SDL2.dll"))
+    last_err = None
+    for path in candidates:
+        try:
+            if os.path.isfile(path):
+                _sdl2 = ctypes.WinDLL(path)
+                return _sdl2
+        except OSError as e:
+            last_err = e
+    try:
+        _sdl2 = ctypes.WinDLL("SDL2")  # 让系统按 PATH 搜索
+        return _sdl2
+    except OSError as e:
+        last_err = e
+    raise _SDLError("未找到 SDL2.dll。请将 SDL2.dll 放到程序目录或系统 PATH，"
+                    "或设置环境变量 SDL2_DLL_PATH。最后错误: %s" % last_err)
+
+
+def _setup_sdl2_api(sdl):
+    sdl.SDL_Init.restype = ctypes.c_int
+    sdl.SDL_Init.argtypes = [ctypes.c_uint32]
+    sdl.SDL_Quit.restype = None
+    sdl.SDL_Quit.argtypes = []
+    sdl.SDL_GetError.restype = ctypes.c_char_p
+    sdl.SDL_GetError.argtypes = []
+    sdl.SDL_NumJoysticks.restype = ctypes.c_int
+    sdl.SDL_NumJoysticks.argtypes = []
+    sdl.SDL_JoystickOpen.restype = ctypes.c_void_p
+    sdl.SDL_JoystickOpen.argtypes = [ctypes.c_int]
+    sdl.SDL_JoystickClose.restype = None
+    sdl.SDL_JoystickClose.argtypes = [ctypes.c_void_p]
+    sdl.SDL_JoystickName.restype = ctypes.c_char_p
+    sdl.SDL_JoystickName.argtypes = [ctypes.c_void_p]
+    sdl.SDL_JoystickNameForIndex.restype = ctypes.c_char_p
+    sdl.SDL_JoystickNameForIndex.argtypes = [ctypes.c_int]
+    sdl.SDL_JoystickGetAxis.restype = ctypes.c_int16
+    sdl.SDL_JoystickGetAxis.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    sdl.SDL_JoystickGetButton.restype = ctypes.c_uint8
+    sdl.SDL_JoystickGetButton.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    sdl.SDL_JoystickGetHat.restype = ctypes.c_uint8
+    sdl.SDL_JoystickGetHat.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    sdl.SDL_JoystickNumAxes.restype = ctypes.c_int
+    sdl.SDL_JoystickNumAxes.argtypes = [ctypes.c_void_p]
+    sdl.SDL_JoystickNumButtons.restype = ctypes.c_int
+    sdl.SDL_JoystickNumButtons.argtypes = [ctypes.c_void_p]
+    sdl.SDL_JoystickNumHats.restype = ctypes.c_int
+    sdl.SDL_JoystickNumHats.argtypes = [ctypes.c_void_p]
+    sdl.SDL_JoystickInstanceID.restype = ctypes.c_int32
+    sdl.SDL_JoystickInstanceID.argtypes = [ctypes.c_void_p]
+    if hasattr(sdl, "SDL_JoystickGetDeviceInstanceID"):
+        sdl.SDL_JoystickGetDeviceInstanceID.restype = ctypes.c_int32
+        sdl.SDL_JoystickGetDeviceInstanceID.argtypes = [ctypes.c_int]
+    sdl.SDL_JoystickEventState.restype = ctypes.c_int
+    sdl.SDL_JoystickEventState.argtypes = [ctypes.c_int]
+    sdl.SDL_JoystickUpdate.restype = None
+    sdl.SDL_JoystickUpdate.argtypes = []
+    sdl.SDL_PumpEvents.restype = None
+    sdl.SDL_PumpEvents.argtypes = []
+    sdl.SDL_PollEvent.restype = ctypes.c_int
+    sdl.SDL_PollEvent.argtypes = [ctypes.c_void_p]
+
+
+def _ensure_sdl_init():
+    global _sdl2_initialized
+    if _sdl2_initialized:
+        return
+    sdl = _load_sdl2()
+    _setup_sdl2_api(sdl)
+    if sdl.SDL_Init(SDL_INIT_JOYSTICK) != 0:
+        err = sdl.SDL_GetError()
+        err = err.decode("utf-8", "replace") if isinstance(err, (bytes, bytearray)) else str(err)
+        raise _SDLError("SDL2 初始化失败: %s" % err)
+    sdl.SDL_JoystickEventState(SDL_ENABLE)
+    _sdl2_initialized = True
+
+
+def _sdl_err_str(sdl):
+    err = sdl.SDL_GetError()
+    return err.decode("utf-8", "replace") if isinstance(err, (bytes, bytearray)) else str(err)
+
+
+# 替代 _get_ticks()
+def _get_ticks():
+    """返回单调时钟毫秒数，替代 _get_ticks()"""
+    return int(time.monotonic() * 1000)
+
+
+# 替代 _Clock()
+class _Clock:
+    """简易帧率限制器，替代 _Clock()"""
+    def __init__(self):
+        self._last = time.monotonic()
+
+    def tick(self, fps):
+        now = time.monotonic()
+        elapsed = now - self._last
+        if fps > 0:
+            sleep_for = (1.0 / fps) - elapsed
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+        self._last = time.monotonic()
+        return int(elapsed * 1000)
+
+
+class _SDLJoystick:
+    """封装 SDL_Joystick 句柄，提供与 sdl_gamepad.joystick.Joystick 一致的方法。"""
+    def __init__(self, handle, instance_id, name):
+        self._handle = handle
+        self._instance_id = instance_id
+        self._name = name
+
+    def init(self):
+        pass  # SDL_JoystickOpen 时已初始化
+
+    def close(self):
+        if self._handle is not None:
+            try:
+                _load_sdl2().SDL_JoystickClose(self._handle)
+            except Exception:
+                pass
+            self._handle = None
+
+    def get_name(self):
+        return self._name
+
+    def get_instance_id(self):
+        return self._instance_id
+
+    def get_axis(self, axis):
+        if self._handle is None:
+            return 0.0
+        val = _load_sdl2().SDL_JoystickGetAxis(self._handle, axis)
+        v = val / 32768.0
+        if v < -1.0:
+            return -1.0
+        if v > 1.0:
+            return 1.0
+        return v
+
+    def get_button(self, button):
+        if self._handle is None:
+            return 0
+        return int(_load_sdl2().SDL_JoystickGetButton(self._handle, button))
+
+    def get_hat(self, hat):
+        if self._handle is None:
+            return (0, 0)
+        h = int(_load_sdl2().SDL_JoystickGetHat(self._handle, hat))
+        x = -1 if (h & SDL_HAT_LEFT) else (1 if (h & SDL_HAT_RIGHT) else 0)
+        y = 1 if (h & SDL_HAT_UP) else (-1 if (h & SDL_HAT_DOWN) else 0)
+        return (x, y)
+
+    def get_numaxes(self):
+        if self._handle is None:
+            return 0
+        return int(_load_sdl2().SDL_JoystickNumAxes(self._handle))
+
+    def get_numbuttons(self):
+        if self._handle is None:
+            return 0
+        return int(_load_sdl2().SDL_JoystickNumButtons(self._handle))
+
+    def get_numhats(self):
+        if self._handle is None:
+            return 0
+        return int(_load_sdl2().SDL_JoystickNumHats(self._handle))
+
+
+class _JoystickNS:
+    @staticmethod
+    def get_count():
+        _ensure_sdl_init()
+        return int(_load_sdl2().SDL_NumJoysticks())
+
+    @staticmethod
+    def Joystick(device_index):
+        _ensure_sdl_init()
+        sdl = _load_sdl2()
+        # 通过设备索引查询 instance_id，命中缓存则复用，避免重复打开导致句柄泄漏
+        if hasattr(sdl, "SDL_JoystickGetDeviceInstanceID"):
+            try:
+                inst = int(sdl.SDL_JoystickGetDeviceInstanceID(device_index))
+                if inst >= 0 and inst in _joystick_cache:
+                    return _joystick_cache[inst]
+            except Exception:
+                pass
+        handle = sdl.SDL_JoystickOpen(device_index)
+        if not handle:
+            raise _SDLError("无法打开手柄 %d: %s" % (device_index, _sdl_err_str(sdl)))
+        name = sdl.SDL_JoystickName(handle)
+        if isinstance(name, (bytes, bytearray)):
+            name = name.decode("utf-8", "replace")
+        instance_id = int(sdl.SDL_JoystickInstanceID(handle))
+        wrapper = _SDLJoystick(handle, instance_id, name or "")
+        _joystick_cache[instance_id] = wrapper
+        return wrapper
+
+
+class _SDLEvent(ctypes.Structure):
+    """SDL_Event 缓冲区，仅需读取 type 与 jdevice.which 字段。"""
+    _fields_ = [
+        ("type", ctypes.c_uint32),
+        ("timestamp", ctypes.c_uint32),
+        ("which", ctypes.c_int32),
+        ("_pad", ctypes.c_uint8 * 500),
+    ]
+
+
+class _SDLEventObj:
+    __slots__ = ("type", "device_index", "instance_id")
+
+    def __init__(self, type_):
+        self.type = type_
+        self.device_index = None
+        self.instance_id = None
+
+
+class _EventNS:
+    @staticmethod
+    def pump():
+        _ensure_sdl_init()
+        sdl = _load_sdl2()
+        sdl.SDL_PumpEvents()
+        sdl.SDL_JoystickUpdate()
+
+    @staticmethod
+    def get():
+        _ensure_sdl_init()
+        sdl = _load_sdl2()
+        events = []
+        evt = _SDLEvent()
+        while sdl.SDL_PollEvent(ctypes.byref(evt)):
+            if evt.type == SDL_JOYDEVICEADDED:
+                e = _SDLEventObj(SDL_JOYDEVICEADDED)
+                e.device_index = int(evt.which)
+                events.append(e)
+            elif evt.type == SDL_JOYDEVICEREMOVED:
+                inst = int(evt.which)
+                e = _SDLEventObj(SDL_JOYDEVICEREMOVED)
+                e.instance_id = inst
+                events.append(e)
+                # 清理缓存：关闭并移除已断开的手柄
+                stale = _joystick_cache.pop(inst, None)
+                if stale is not None:
+                    stale.close()
+            # 轴/按钮运动事件忽略，状态通过 get_axis/get_button 轮询
+        return events
+
+
+class _SDLGamepadAPI:
+    """SDL2 手柄 API，提供与原 pygame 手柄/事件调用兼容的接口。"""
+    error = _SDLError
+    JOYDEVICEADDED = SDL_JOYDEVICEADDED
+    JOYDEVICEREMOVED = SDL_JOYDEVICEREMOVED
+
+    def __init__(self):
+        self.joystick = _JoystickNS()
+        self.event = _EventNS()
+
+    def init(self):
+        _ensure_sdl_init()
+
+
+sdl_gamepad = _SDLGamepadAPI()
+# ==================== SDL2 手柄后端结束 ====================
 
 
 pyautogui.FAILSAFE = False    # 禁用角落快速退出
@@ -1426,12 +1730,12 @@ class ScreenshotWindow(QDialog):
             # 创建确认弹窗
             self.confirm_dialog = ConfirmDialog(self.tr("确认从游戏列表移除该游戏吗？\n（不会删除游戏数据）"), scale_factor=self.scale_factor)
             result = self.confirm_dialog.exec_()  # 显示弹窗并获取结果
-            self.ignore_input_until = pygame.time.get_ticks() + 350  
+            self.ignore_input_until = _get_ticks() + 350   
             if not result == QDialog.Accepted:  # 如果按钮没被点击
                 return
             self.confirm_dialog = ConfirmDialog(self.tr("确认从游戏列表移除该游戏吗？\n（二次确认）"), scale_factor=self.scale_factor)
             result = self.confirm_dialog.exec_()  # 显示弹窗并获取结果
-            self.ignore_input_until = pygame.time.get_ticks() + 350  
+            self.ignore_input_until = _get_ticks() + 350   
             if not result == QDialog.Accepted:  # 如果按钮没被点击
                 return
             self.qsaa_thread = SunshineAppManagerThread(args=["--delete", str(self.game_name_label.text())])
@@ -1936,7 +2240,7 @@ class ScreenshotWindow(QDialog):
 
     def handle_gamepad_input(self, action):
         """处理手柄输入，支持左侧按钮和截图框切换"""
-        current_time = pygame.time.get_ticks()
+        current_time = _get_ticks()
         if current_time < self.ignore_input_until:
             return
         if current_time - self.last_input_time < self.input_delay:
@@ -2006,7 +2310,7 @@ class ScreenshotWindow(QDialog):
                 self.update_left_panel_button_styles()
             elif action in ('A',):
                 self.left_panel_buttons[self.current_button_index].click()
-                self.ignore_input_until = pygame.time.get_ticks() + 350  
+                self.ignore_input_until = _get_ticks() + 350   
             elif action in ('LEFT',):
                 if self.current_button_index == 0:
                     return
@@ -2715,7 +3019,7 @@ class ConfirmDialog(QDialog):
             self.fade_in()
         except Exception:
             pass
-        self.ignore_input_until = pygame.time.get_ticks() + 350  # 打开窗口后1秒内忽略输入
+        self.ignore_input_until = _get_ticks() + 350   # 打开窗口后1秒内忽略输入
 
     def closeEvent(self, event):
         """确保对话框关闭时，关联的覆盖层也被销毁"""
@@ -2829,7 +3133,7 @@ class ConfirmDialog(QDialog):
 
     def keyPressEvent(self, event):
         """处理键盘事件"""
-        current_time = pygame.time.get_ticks()  # 获取当前时间（毫秒）
+        current_time = _get_ticks()  # 获取当前时间（毫秒）
         # 如果在忽略输入的时间段内，则不处理
         if current_time < self.ignore_input_until:
             return
@@ -2850,7 +3154,7 @@ class ConfirmDialog(QDialog):
 
     def handle_gamepad_input(self, action):
         """处理手柄输入"""
-        current_time = pygame.time.get_ticks()  # 获取当前时间（毫秒）
+        current_time = _get_ticks()  # 获取当前时间（毫秒）
         # 如果在忽略输入的时间段内，则不处理
         if current_time < self.ignore_input_until:
             return
@@ -5253,7 +5557,7 @@ class GameSelector(QWidget):
                             print(f"保存游玩时间失败: {e}")
                         return  # 只记录一个游戏
     def open_selected_game_screenshot(self):
-        current_time = pygame.time.get_ticks()
+        current_time = _get_ticks()
         self.ignore_input_until = current_time + 500
         if not hasattr(self, 'screenshot_window'):
             self.screenshot_window = ScreenshotWindow(self)
@@ -5274,7 +5578,7 @@ class GameSelector(QWidget):
         if game_name:
             self.screenshot_window.start_filter_mode(game_name=game_name)
     def show_img_window(self):
-        current_time = pygame.time.get_ticks()
+        current_time = _get_ticks()
         self.ignore_input_until = current_time + 500
         if not hasattr(self, 'screenshot_window'):
             self.screenshot_window = ScreenshotWindow(self)
@@ -5422,7 +5726,7 @@ class GameSelector(QWidget):
                 app_title = info.get('title') or info.get('exe_name')
                 self.confirm_dialog = ConfirmDialog(self.tr("是否关闭下列窗口？\n%1").replace('%1', app_title), scale_factor=self.scale_factor)
                 result = self.confirm_dialog.exec_()
-                self.ignore_input_until = pygame.time.get_ticks()
+                self.ignore_input_until = _get_ticks()
                 if result != QDialog.Accepted:
                     return
                 try:
@@ -6021,12 +6325,12 @@ class GameSelector(QWidget):
         # 设置标志为 True，表示正在运行
         self.is_mouse_simulation_running = True
 
-        if pygame.joystick.get_count() == 0:
+        if sdl_gamepad.joystick.get_count() == 0:
             self.show_window()
             return
         joysticks = []
-        for i in range(pygame.joystick.get_count()):
-            joystick = pygame.joystick.Joystick(i)
+        for i in range(sdl_gamepad.joystick.get_count()):
+            joystick = sdl_gamepad.joystick.Joystick(i)
             joystick.init()
             joysticks.append(joystick)
     
@@ -6042,7 +6346,7 @@ class GameSelector(QWidget):
         sensitivity = SENS_MEDIUM
         sensitivity1 = SENS_LOW
         DEADZONE = 0.1    # 摇杆死区阈值，防止轻微漂移
-        clock = pygame.time.Clock()
+        clock = _Clock()
         #mapping = ControllerMapping(joystick)
         # 初始化滚动状态变量
         scrolling_up = False
@@ -6067,16 +6371,16 @@ class GameSelector(QWidget):
         try:
             while running:
                 # 动态检测新手柄加入或移除
-                for event in pygame.event.get():
-                    if event.type == pygame.JOYDEVICEADDED:
-                        joystick = pygame.joystick.Joystick(event.device_index)
+                for event in sdl_gamepad.event.get():
+                    if event.type == sdl_gamepad.JOYDEVICEADDED:
+                        joystick = sdl_gamepad.joystick.Joystick(event.device_index)
                         joystick.init()
                         # 检查是否已在列表中
                         if joystick not in joysticks:
                             joysticks.append(joystick)
                             joystick_states[joystick.get_instance_id()] = {"scrolling_up": False, "scrolling_down": False}
                             print(f"手柄已连接: {joystick.get_name()}")
-                    elif event.type == pygame.JOYDEVICEREMOVED:
+                    elif event.type == sdl_gamepad.JOYDEVICEREMOVED:
                         # 移除断开手柄及其状态
                         for joystick in joysticks[:]:
                             if joystick.get_instance_id() == event.instance_id:
@@ -6085,14 +6389,14 @@ class GameSelector(QWidget):
                                 joystick_states.pop(event.instance_id, None)
                                 break
                 # 检查当前所有手柄，自动补充新插入的手柄
-                for i in range(pygame.joystick.get_count()):
-                    joystick = pygame.joystick.Joystick(i)
+                for i in range(sdl_gamepad.joystick.get_count()):
+                    joystick = sdl_gamepad.joystick.Joystick(i)
                     if joystick not in joysticks:
                         joystick.init()
                         joysticks.append(joystick)
                         joystick_states[joystick.get_instance_id()] = {"scrolling_up": False, "scrolling_down": False}
                         print(f"检测到新手柄: {joystick.get_name()}")
-                pygame.event.pump()
+                sdl_gamepad.event.pump()
                 mouse_x, mouse_y = pyautogui.position()
                 # 仅当鼠标位置发生变化时更新窗口位置
                 if (mouse_x, mouse_y) != (last_mouse_x, last_mouse_y):
@@ -6100,7 +6404,7 @@ class GameSelector(QWidget):
                     window.label.move(mouse_x, mouse_y)
                     last_mouse_x, last_mouse_y = mouse_x, mouse_y
                 # 遍历所有手柄，处理输入
-                joycount = pygame.joystick.get_count()
+                joycount = sdl_gamepad.joystick.get_count()
                 for joystick in joysticks:
                     mapping = ControllerMapping(joystick) #切换对应的手柄映射
                     # GUIDE 按钮退出
@@ -8036,7 +8340,7 @@ class GameSelector(QWidget):
         image_path = game.get("image-path", "")
         if not os.path.isabs(image_path):
             image_path = f"{APP_INSTALL_PATH}\\config\\covers\\{image_path}"
-        self.ignore_input_until = pygame.time.get_ticks() + 600
+        self.ignore_input_until = _get_ticks() + 600
 
         # 如果该游戏标记为需要选择进程，直接弹出后台窗口选择器
         if hasattr(self, 'need_select_process') and game_name in self.need_select_process:
@@ -8145,7 +8449,7 @@ class GameSelector(QWidget):
             # 创建确认弹窗
             self.confirm_dialog = ConfirmDialog(self.tr("已经打开了一个游戏，还要再打开一个吗？"), scale_factor=self.scale_factor)
             result = self.confirm_dialog.exec_()  # 显示弹窗并获取结果
-            self.ignore_input_until = pygame.time.get_ticks() + 350  # 设置屏蔽时间为800毫秒
+            self.ignore_input_until = _get_ticks() + 350   # 设置屏蔽时间为800毫秒
             if not result == QDialog.Accepted:  # 如果按钮没被点击
                 return
             else:
@@ -8164,7 +8468,7 @@ class GameSelector(QWidget):
             json.dump(settings, f, indent=4)
 
         self.reload_interface()
-        self.ignore_input_until = pygame.time.get_ticks() + 1000
+        self.ignore_input_until = _get_ticks() + 1000
         # 新增：如果该游戏在 on_mapping_clicked 里，自动开启鼠标映射
         if "on_mapping_clicked" in settings and game_name in settings["on_mapping_clicked"]:
             self.mouse_simulation()
@@ -8291,7 +8595,7 @@ class GameSelector(QWidget):
             #self.more_section = 0
             #if current_time < ((self.ignore_input_until)+2000):
             #    return
-            #self.ignore_input_until = pygame.time.get_ticks() + 500 
+            #self.ignore_input_until = _get_ticks() + 500 
             #if STARTUP:subprocess.run(["taskkill", "/f", "/im", "explorer.exe"])#STARTUP = False
             if self.killexplorer == True:
                 self.wintaskbarshow()
@@ -8343,7 +8647,7 @@ class GameSelector(QWidget):
         # 标记是否为方向输入（允许绕过全局防抖/屏蔽）
         is_direction = action in ('UP', 'DOWN', 'LEFT', 'RIGHT') if action else False
         # 跟踪焦点状态
-        current_time = pygame.time.get_ticks()
+        current_time = _get_ticks()
 
         # 如果文件选择对话框打开，优先转发手柄输入
         # 检查两个位置：floating_window.file_dialog_manager 和 self.file_dialog_manager
@@ -8361,7 +8665,7 @@ class GameSelector(QWidget):
                 manager = mgr2
             if manager and hasattr(manager, 'dialog') and manager.dialog and manager.dialog.isVisible():
                 manager.handle_gamepad_input(action)
-                self.ignore_input_until = pygame.time.get_ticks() + 300
+                self.ignore_input_until = _get_ticks() + 300
                 return
         except RuntimeError:
             pass
@@ -8384,7 +8688,7 @@ class GameSelector(QWidget):
                 ls_pressed = controller.get_button(mapping.left_stick_in)
                 rs_pressed = controller.get_button(mapping.right_stick_in)
                 if ls_pressed and rs_pressed:
-                    self.ignore_input_until = pygame.time.get_ticks() + 3000 
+                    self.ignore_input_until = _get_ticks() + 3000 
                     print("LS和RS同时按下！正在截图...")
                     screenshot = pyautogui.screenshot()
                 
@@ -8587,7 +8891,7 @@ class GameSelector(QWidget):
         try:
             if hasattr(self, 'screenshot_window') and hasattr(self.screenshot_window, 'confirm_dialog') and self.screenshot_window.confirm_dialog and self.screenshot_window.confirm_dialog.isVisible():
                 self.screenshot_window.handle_gamepad_input(action)
-                self.ignore_input_until = pygame.time.get_ticks() + 300 
+                self.ignore_input_until = _get_ticks() + 300 
                 return
         except RuntimeError:
             if hasattr(self, 'screenshot_window'):
@@ -8597,7 +8901,7 @@ class GameSelector(QWidget):
         try:
             if getattr(self, 'floating_window', None) and hasattr(self.floating_window, 'confirm_dialog') and self.floating_window.confirm_dialog and self.floating_window.confirm_dialog.isVisible():
                 self.floating_window.handle_gamepad_input(action, firstinput)
-                self.ignore_input_until = pygame.time.get_ticks() + 300 
+                self.ignore_input_until = _get_ticks() + 300 
                 return
         except RuntimeError:
             if getattr(self, 'floating_window', None):
@@ -8607,7 +8911,7 @@ class GameSelector(QWidget):
         try:
             if getattr(self, 'settings_window', None) and hasattr(self.settings_window, 'confirm_dialog') and self.settings_window.confirm_dialog and self.settings_window.confirm_dialog.isVisible():
                 self.settings_window.handle_gamepad_input(action)
-                self.ignore_input_until = pygame.time.get_ticks() + 300 
+                self.ignore_input_until = _get_ticks() + 300 
                 return
         except RuntimeError:
             if getattr(self, 'settings_window', None):
@@ -8617,7 +8921,7 @@ class GameSelector(QWidget):
         try:
             if hasattr(self, 'file_dialog_manager') and self.file_dialog_manager and hasattr(self.file_dialog_manager, 'dialog') and self.file_dialog_manager.dialog and self.file_dialog_manager.dialog.isVisible():
                 self.file_dialog_manager.handle_gamepad_input(action)
-                self.ignore_input_until = pygame.time.get_ticks() + 300
+                self.ignore_input_until = _get_ticks() + 300
                 return
         except RuntimeError:
             if hasattr(self, 'file_dialog_manager'):
@@ -8628,7 +8932,7 @@ class GameSelector(QWidget):
             if hasattr(self, 'active_dialog') and self.active_dialog and self.active_dialog.isVisible():
                 if hasattr(self.active_dialog, 'handle_gamepad_input'):
                     self.active_dialog.handle_gamepad_input(action)
-                    self.ignore_input_until = pygame.time.get_ticks() + 300
+                    self.ignore_input_until = _get_ticks() + 300
                     return
         except RuntimeError:
             self.active_dialog = None
@@ -8641,7 +8945,7 @@ class GameSelector(QWidget):
                     self._guide_press_time = 0
                 if not hasattr(self, '_guide_last_state'):
                     self._guide_last_state = False
-                current_ticks = pygame.time.get_ticks()
+                current_ticks = _get_ticks()
 
                 # 检查当前所有手柄的GUIDE键状态
                 guide_pressed = False
@@ -8662,7 +8966,7 @@ class GameSelector(QWidget):
                         # 如果没有正在轮询释放状态，创建一个轮询器以捕获可能缺失的释放事件
                         if not hasattr(self, '_guide_poll_timer') or self._guide_poll_timer is None:
                             def _poll_guide_release():
-                                now = pygame.time.get_ticks()
+                                now = _get_ticks()
                                 # 检查当前所有手柄的GUIDE键状态
                                 still_pressed = False
                                 for controller_data in self.controller_thread.controllers.values():
@@ -8826,7 +9130,7 @@ class GameSelector(QWidget):
             if action == 'GUIDE':  # 回桌面
                 if current_time < ((self.ignore_input_until)+500):
                     return
-                self.ignore_input_until = pygame.time.get_ticks() + 500 
+                self.ignore_input_until = _get_ticks() + 500 
                 #self.exitdef()  # 退出程序
                 self.hide_window()
                 pyautogui.hotkey('win', 'd')
@@ -8839,16 +9143,16 @@ class GameSelector(QWidget):
                     rb_pressed = controller.get_button(mapping.right_bumper)
                     if lb_pressed and rb_pressed:
                         self.toggle_mute()
-                        self.ignore_input_until = pygame.time.get_ticks() + 500 
+                        self.ignore_input_until = _get_ticks() + 500 
                         return
                     # 仅 LB 或仅 RB：单独调整音量后返回
                     if action == 'LB':
                         self.decrease_volume()
-                        self.ignore_input_until = pygame.time.get_ticks() + 200
+                        self.ignore_input_until = _get_ticks() + 200
                         return
                     elif action == 'RB':
                         self.increase_volume()
-                        self.ignore_input_until = pygame.time.get_ticks() + 200 
+                        self.ignore_input_until = _get_ticks() + 200 
                         return
             if self.current_section == 1:  # 控制按钮区域
                 if action.lower() == "right":
@@ -8910,7 +9214,7 @@ class GameSelector(QWidget):
                     self.hide_window()
                 elif action == 'Y':
                     self.toggle_favorite()  # 收藏/取消收藏游戏
-                    self.ignore_input_until = pygame.time.get_ticks() + 300 
+                    self.ignore_input_until = _get_ticks() + 300 
                 elif action == 'X':  # X键开悬浮窗
                     if self.sort_games()[self.current_index]["name"] in self.player:
                         self.launch_game(self.current_index)  # 启动游戏
@@ -8984,7 +9288,7 @@ class GameSelector(QWidget):
             # 创建确认弹窗
             self.confirm_dialog = ConfirmDialog(self.tr("是否关闭下列程序？\n%1").replace('%1', game_name), scale_factor=self.scale_factor)
             result = self.confirm_dialog.exec_()  # 显示弹窗并获取结果
-            self.ignore_input_until = pygame.time.get_ticks()
+            self.ignore_input_until = _get_ticks()
             if not result == QDialog.Accepted:  # 如果按钮没被点击
                 return
             for app in valid_apps:
@@ -9509,7 +9813,7 @@ class GameSelector(QWidget):
         if not hasattr(self, 'settings_window') or self.settings_window is None:
             self.settings_window = SettingsWindow(self)
         self.settings_window.show()
-        self.ignore_input_until = pygame.time.get_ticks() + 300
+        self.ignore_input_until = _get_ticks() + 300
 
     def apply_debug_output_setting(self):
         if not hasattr(self, "debug_output_window") or self.debug_output_window is None:
@@ -9770,13 +10074,12 @@ class GameSelector(QWidget):
             self.running = True
             self.joysticks = []
         def run(self):
-            for i in range(pygame.joystick.get_count()):
-                joy = pygame.joystick.Joystick(i)
-                joy.init()
+            for i in range(sdl_gamepad.joystick.get_count()):
+                joy = sdl_gamepad.joystick.Joystick(i)
                 self.joysticks.append(joy)
                 print(f"手柄 {i} 已连接: {joy.get_name()}")
             while self.running:
-                pygame.event.pump()
+                sdl_gamepad.event.pump()
                 for i, joystick in enumerate(self.joysticks):
                     left_x = joystick.get_axis(0)
                     left_y = joystick.get_axis(1)
@@ -9859,7 +10162,7 @@ class GameControllerThread(QThread):
     def __init__(self, parent):
         super().__init__(parent)
         self.parent = parent
-        pygame.init()
+        sdl_gamepad.init()
         self.controllers = {}
         self._running = True  # 添加运行标志
         self.last_move_time = 0
@@ -9934,14 +10237,14 @@ class GameControllerThread(QThread):
         """监听手柄输入"""
         while self._running:  # 使用运行标志控制循环
             try:
-                pygame.event.pump()  # 确保事件队列被更新
+                sdl_gamepad.event.pump()  # 确保事件队列被更新
 
                 # 处理事件
-                for event in pygame.event.get():
+                for event in sdl_gamepad.event.get():
                     # 处理手柄连接事件
-                    if event.type == pygame.JOYDEVICEADDED:
+                    if event.type == sdl_gamepad.JOYDEVICEADDED:
                         try:
-                            controller = pygame.joystick.Joystick(event.device_index)
+                            controller = sdl_gamepad.joystick.Joystick(event.device_index)
                             controller.init()
                             mapping = ControllerMapping(controller)
                             self.controllers[controller.get_instance_id()] = {
@@ -9955,10 +10258,10 @@ class GameControllerThread(QThread):
                                 pass
                             print(f"Controller {controller.get_instance_id()} connected: {controller.get_name()}")
                             self.controller_connected_signal.emit(controller.get_name())
-                        except pygame.error as e:
+                        except sdl_gamepad.error as e:
                             print(f"Failed to initialize controller {event.device_index}: {e}")
                 
-                    elif event.type == pygame.JOYDEVICEREMOVED:
+                    elif event.type == sdl_gamepad.JOYDEVICEREMOVED:
                         if event.instance_id in self.controllers:
                             print(f"Controller {event.instance_id} disconnected")
                             del self.controllers[event.instance_id]
@@ -10459,7 +10762,7 @@ class CustomFilePickerDialog(QDialog):
     def handle_gamepad_input(self, action):
         """处理手柄输入"""
         try:
-            current_time = pygame.time.get_ticks()
+            current_time = _get_ticks()
             
             # 防抖检查
             if current_time < self.ignore_input_until:
@@ -10562,7 +10865,7 @@ class CustomFilePickerDialog(QDialog):
     def showEvent(self, event):
         """窗口显示时"""
         super().showEvent(event)
-        self.ignore_input_until = pygame.time.get_ticks() + 300
+        self.ignore_input_until = _get_ticks() + 300
         self.file_list_widget.setFocus()
     
     def accept(self):
@@ -11234,11 +11537,11 @@ class FloatingWindow(QWidget):
             self.toggle_favorite()
         
         # 更新最后输入时间
-        self.last_input_time = pygame.time.get_ticks()
+        self.last_input_time = _get_ticks()
         
     def can_process_input(self):
         """检查是否可以处理输入"""
-        current_time = pygame.time.get_ticks()
+        current_time = _get_ticks()
         if current_time - self.last_input_time < self.input_delay:
             return False
         self.last_input_time = current_time
@@ -12005,7 +12308,7 @@ class FloatingWindow(QWidget):
         # 使用与按钮创建相同的排序逻辑
         self.files = self.get_files()
         self.delete_files = self.sort_files()
-        self.last_input_time = pygame.time.get_ticks()
+        self.last_input_time = _get_ticks()
         self.update_highlight()
 
     def exit_delete_mode(self):
@@ -12237,7 +12540,7 @@ class FloatingWindow(QWidget):
             if not self.parent().is_mouse_simulation_running == True:
                 self.confirm_dialog = ConfirmDialog(self.tr("是否关闭下列程序？\n%1").replace('%1', current_file['name']), scale_factor=self.parent().scale_factor * 1.4)
                 result = self.confirm_dialog.exec_()  # 显示弹窗并获取结果
-                self.ignore_input_until = pygame.time.get_ticks() + 350  # 设置屏蔽时间为800毫秒
+                self.ignore_input_until = _get_ticks() + 350   # 设置屏蔽时间为800毫秒
             else:
                 result = False
             # 关闭窗口
