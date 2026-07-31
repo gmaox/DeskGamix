@@ -5008,6 +5008,10 @@ class GameSelector(QWidget):
             except Exception:
                 pass
             self._startup_anim.start()
+            # 控制按钮 + 游戏按钮上移飞入动画，与窗口淡入并行
+            # 启动阶段 geometry 未就绪：先确保布局激活（_start_fly_in_animations 内部已处理），
+            # 再用 QTimer.singleShot(0,...) 在下一轮事件循环启动，避免 __init__ 期间的布局计算不完整
+            QTimer.singleShot(0, lambda: self._start_fly_in_animations(ensure_layout_ready=True))
             
         # ==============================
     
@@ -5604,13 +5608,148 @@ class GameSelector(QWidget):
             except Exception:
                 pass
         self.time_label.setText(text)
+    def _start_fly_in_animations(self, ensure_layout_ready=True):
+        """控制按钮 + 游戏按钮上移飞入 + 从小到大 + 淡入 + 错峰波浪动画。
+
+        ensure_layout_ready: 启动前强制激活布局。__init__ 阶段按钮 geometry 尚未
+        准备好时需传 True；show_window 阶段已布局完成可省略激活步骤，但传 True 更安全。
+        """
+        offset = int(60 * getattr(self, 'scale_factor', 1.0))
+
+        # 启动前确保布局已经计算好每个按钮的 geometry，
+        # 避免 __init__ 阶段按钮还没布局导致 geometry() 为 (0,0,0,0)
+        if ensure_layout_ready:
+            try:
+                for w in (getattr(self, 'scroll_area', None), getattr(self, 'scroll_widget', None), self):
+                    if w:
+                        w.layout() and w.layout().activate()
+                if hasattr(self, 'grid_layout'):
+                    self.grid_layout.activate()
+                QApplication.sendPostedEvents()
+                QApplication.processEvents()
+            except Exception:
+                pass
+
+        self.update_highlight()
+
+        # 停止上一次遗留的飞入动画，避免重复触发时互相冲突
+        for a in getattr(self, '_control_fly_in_anims', []) + getattr(self, '_game_fly_in_anims', []):
+            try:
+                a.stop()
+            except Exception:
+                pass
+
+        # 控制按钮：上移飞入 + 淡入
+        try:
+            self._control_fly_in_anims = []
+            for btn in getattr(self, 'control_buttons', []):
+                if not btn.isVisible():
+                    continue
+                orig_pos = btn.pos()
+                btn.move(orig_pos.x(), orig_pos.y() + offset)
+                eff = QtWidgets.QGraphicsOpacityEffect(btn)
+                eff.setOpacity(0.0)
+                btn.setGraphicsEffect(eff)
+                anim = QPropertyAnimation(btn, b"pos", self)
+                anim.setStartValue(QPoint(orig_pos.x(), orig_pos.y() + offset))
+                anim.setEndValue(orig_pos)
+                anim.setDuration(200)
+                anim.setEasingCurve(QEasingCurve.OutCubic)
+                fade = QPropertyAnimation(eff, b"opacity", self)
+                fade.setStartValue(0.0)
+                fade.setEndValue(1.0)
+                fade.setDuration(200)
+                fade.setEasingCurve(QEasingCurve.InOutCubic)
+                anim.start()
+                fade.start()
+                self._control_fly_in_anims.append(anim)
+                self._control_fly_in_anims.append(fade)
+        except Exception:
+            pass
+
+        # 游戏按钮：上移飞入 + 从小到大 + 淡入 + 错峰波浪
+        try:
+            self._game_fly_in_anims = []
+            self.grid_layout.setEnabled(False)
+
+            targets = []
+            for btn in getattr(self, 'buttons', []):
+                if not hasattr(btn, 'geometry') or not hasattr(btn, 'setGeometry'):
+                    continue
+                g = btn.geometry()
+                if g.width() <= 0 or g.height() <= 0:
+                    continue
+                targets.append((btn, g))
+
+            total = len(targets)
+            remaining = [total]
+
+            def _restore_all():
+                try:
+                    for b, g in targets:
+                        b.setFixedSize(g.width(), g.height())
+                    self.grid_layout.setEnabled(True)
+                except Exception:
+                    pass
+
+            def _on_one_finished(b, ow, oh):
+                try:
+                    b.setFixedSize(ow, oh)
+                except Exception:
+                    pass
+                remaining[0] -= 1
+                if remaining[0] <= 0:
+                    try:
+                        self.grid_layout.setEnabled(True)
+                    except Exception:
+                        pass
+
+            for i, (btn, orig_geo) in enumerate(targets):
+                ox, oy = orig_geo.x(), orig_geo.y()
+                ow, oh = orig_geo.width(), orig_geo.height()
+                sw = max(1, int(ow * 0.1))
+                sh = max(1, int(oh * 0.1))
+                start_rect = QRect(ox + (ow - sw) // 2, oy + offset, sw, sh)
+                end_rect = QRect(ox, oy, ow, oh)
+                btn.setMinimumSize(0, 0)
+                btn.setMaximumSize(16777215, 16777215)
+                btn.setGeometry(start_rect)
+                eff = QtWidgets.QGraphicsOpacityEffect(btn)
+                eff.setOpacity(0.0)
+                btn.setGraphicsEffect(eff)
+                anim = QPropertyAnimation(btn, b"geometry", self)
+                anim.setStartValue(start_rect)
+                anim.setEndValue(end_rect)
+                anim.setDuration(200)
+                anim.setEasingCurve(QEasingCurve.OutCubic)
+                fade = QPropertyAnimation(eff, b"opacity", self)
+                fade.setStartValue(0.0)
+                fade.setEndValue(1.0)
+                fade.setDuration(200)
+                fade.setEasingCurve(QEasingCurve.InOutCubic)
+                anim.finished.connect(lambda b=btn, w=ow, h=oh: _on_one_finished(b, w, h))
+                delay = min(i * 35, 280)
+                QTimer.singleShot(delay, lambda a=anim, f=fade: (a.start(), f.start()))
+                self._game_fly_in_anims.append(anim)
+                self._game_fly_in_anims.append(fade)
+
+            if total == 0:
+                self.grid_layout.setEnabled(True)
+            else:
+                QTimer.singleShot(900, _restore_all)
+        except Exception:
+            try:
+                self.grid_layout.setEnabled(True)
+            except Exception:
+                pass
+
     def show_window(self):
         """显示窗口"""
         # 先设置透明度为0，避免闪烁
         self.setWindowOpacity(0.0) # 透明度为0
-        ctypes.windll.user32.ShowWindow(GSHWND, 9) # 9=SW_RESTORE            
+        ctypes.windll.user32.ShowWindow(GSHWND, 9) # 9=SW_RESTORE
         ctypes.windll.user32.SetForegroundWindow(GSHWND)
-        
+
         # 创建淡入动画
         self._show_anim = QPropertyAnimation(self, b"windowOpacity", self)
         self._show_anim.setStartValue(0.0) # 透明度为0
@@ -5622,7 +5761,9 @@ class GameSelector(QWidget):
         except Exception:
             pass
         self._show_anim.start()
-        self.update_highlight()
+
+        # 启动控制按钮 + 游戏按钮上移飞入动画（与窗口淡入并行）
+        self._start_fly_in_animations(ensure_layout_ready=True)
 
     def exitbutton(self):
         """退出按钮"""
