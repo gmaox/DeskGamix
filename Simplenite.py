@@ -6397,6 +6397,9 @@ class GameSelector(QWidget):
                         joystick_states[joystick.get_instance_id()] = {"scrolling_up": False, "scrolling_down": False}
                         print(f"检测到新手柄: {joystick.get_name()}")
                 sdl_gamepad.event.pump()
+                # 让 Qt 事件循环得以处理，否则 while 循环会卡死 GUI
+                # （窗口移动/显示/隐藏等操作都需要 Qt 事件循环驱动）
+                QApplication.processEvents()
                 mouse_x, mouse_y = pyautogui.position()
                 # 仅当鼠标位置发生变化时更新窗口位置
                 if (mouse_x, mouse_y) != (last_mouse_x, last_mouse_y):
