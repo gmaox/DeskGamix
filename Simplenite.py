@@ -362,7 +362,7 @@ def get_app_install_path():
                 continue
     except Exception as e:
         print(f"Error: {e}")
-    print(QObject.tr("未检测到安装目录！"))
+    print("未检测到安装目录！")
     # 开发环境：返回当前 py 文件所在目录
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
