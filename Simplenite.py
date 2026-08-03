@@ -395,16 +395,36 @@ settings = {
     "show_battery": False,
     "use_peer_level_launch": False,
     "debug_output_window": False,
+    "disable_startup_fly_in_animation": False,
     "ignored_apps": ["Desktop", "Steam Big Picture", "Xbox Game"]
 }
+_is_first_launch = not os.path.exists(settings_path)
 try:
-    if os.path.exists(settings_path):
+    if not _is_first_launch:
         with open(settings_path, "r", encoding="utf-8") as f:
             settings = json.load(f)
     if "ignored_apps" not in settings:
         settings["ignored_apps"] = ["Desktop", "Steam Big Picture", "Xbox Game"]
 except Exception as e:
     print(f"Error loading settings: {e}")
+
+# 首次启动：保存默认设置文件，并尝试将本机壁纸设为背景
+if _is_first_launch:
+    try:
+        with open(settings_path, "w", encoding="utf-8") as f:
+            json.dump(settings, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+    try:
+        _wallpaper_buf = ctypes.create_unicode_buffer(260)
+        ctypes.windll.user32.SystemParametersInfoW(0x0073, 260, _wallpaper_buf, 0)
+        _wallpaper_path = _wallpaper_buf.value
+        if _wallpaper_path and os.path.exists(_wallpaper_path):
+            _bg_dir = os.path.join(".", "screenshot")
+            os.makedirs(_bg_dir, exist_ok=True)
+            shutil.copy(_wallpaper_path, os.path.join(_bg_dir, "background.png"))
+    except Exception:
+        pass
 
 # ========== config.ini 多语言配置（与 SunshineAppManager 共用） ==========
 config_ini = configparser.ConfigParser()
@@ -5620,7 +5640,9 @@ class GameSelector(QWidget):
         在按钮创建时调用。_start_fly_in_animations 启动时会重新创建 effect
         并播放 0→1 渐显动画接管，因此此处仅负责让按钮在窗口淡入期间不可见。
         """
-        if getattr(self, '_pending_fly_in', False) and hasattr(btn, 'setGraphicsEffect'):
+        if (getattr(self, '_pending_fly_in', False)
+                and not settings.get("disable_startup_fly_in_animation", False)
+                and hasattr(btn, 'setGraphicsEffect')):
             try:
                 eff = QtWidgets.QGraphicsOpacityEffect(btn)
                 eff.setOpacity(0.0)
@@ -5634,6 +5656,29 @@ class GameSelector(QWidget):
         ensure_layout_ready: 启动前强制激活布局。__init__ 阶段按钮 geometry 尚未
         准备好时需传 True；show_window 阶段已布局完成可省略激活步骤，但传 True 更安全。
         """
+        # 若开发者选项禁用启动飞入动画，则在任意调用点均跳过动画
+        if settings.get("disable_startup_fly_in_animation", False):
+            # 取消预隐藏标志并清理可能已设置的 opacity effect，确保按钮可见
+            try:
+                self._pending_fly_in = False
+                for btn in getattr(self, 'control_buttons', []) or []:
+                    try:
+                        eff = btn.graphicsEffect()
+                        if isinstance(eff, QtWidgets.QGraphicsOpacityEffect):
+                            btn.setGraphicsEffect(None)
+                    except Exception:
+                        pass
+                for btn in getattr(self, 'buttons', []) or []:
+                    try:
+                        eff = btn.graphicsEffect()
+                        if isinstance(eff, QtWidgets.QGraphicsOpacityEffect):
+                            btn.setGraphicsEffect(None)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            return
+
         # 清除启动预隐藏标志：飞入动画将接管按钮透明度，后续创建的按钮不再预隐藏
         self._pending_fly_in = False
 
@@ -10117,12 +10162,13 @@ class GameSelector(QWidget):
                     self.buttons.append(button)
 
                 # 添加"更多"按钮
-                more_button = QPushButton("🟦🟦\n🟦🟦")
-                more_button.setFont(QFont("Microsoft YaHei", 40))
-                more_button.setFixedSize(int(140 * self.scale_factor2), int(140 * self.scale_factor2))
-                more_button.clicked.connect(self.switch_to_all_software)  # 绑定"更多"按钮的功能
-                self.grid_layout.addWidget(more_button, 0, len(sorted_games[:self.buttonsindexset]))  # 添加到最后一列
-                self.buttons.append(more_button)
+                if len(sorted_games) > self.buttonsindexset:
+                    more_button = QPushButton("🟦🟦\n🟦🟦")
+                    more_button.setFont(QFont("Microsoft YaHei", 40))
+                    more_button.setFixedSize(int(140 * self.scale_factor2), int(140 * self.scale_factor2))
+                    more_button.clicked.connect(self.switch_to_all_software)  # 绑定"更多"按钮的功能
+                    self.grid_layout.addWidget(more_button, 0, len(sorted_games[:self.buttonsindexset]))  # 添加到最后一列
+                    self.buttons.append(more_button)
             else:
                 # 优化：使用批量加载方式
                 self.load_all_games_optimized(sorted_games)
@@ -14380,6 +14426,30 @@ class SettingsWindow(QWidget):
         hint.setStyleSheet(f"color: #aaaaaa; font-size: {int(16 * scale)}px;")
         layout.addWidget(hint)
 
+        self.disable_startup_animation_button = QPushButton(
+            self.tr("禁用启动时游戏按钮飞入动画  %1").replace('%1', '开' if settings.get('disable_startup_fly_in_animation', False) else '关')
+        )
+        self.disable_startup_animation_button.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent;
+                color: #ffffff;
+                text-align: left;
+                padding: {int(16 * scale)}px 0;
+                border: none;
+                font-size: {int(26 * scale)}px;
+            }}
+            QPushButton:hover {{
+                background-color: #3d3d3d;
+            }}
+        """)
+        self.disable_startup_animation_button.clicked.connect(self.toggle_disable_startup_animation)
+        layout.addWidget(self.disable_startup_animation_button)
+
+        hint_disable = QLabel(self.tr("该选项可关闭启动时的游戏按钮飞入动画，避免布局未完成时出现位置错乱。"))
+        hint_disable.setWordWrap(True)
+        hint_disable.setStyleSheet(f"color: #aaaaaa; font-size: {int(16 * scale)}px;")
+        layout.addWidget(hint_disable)
+
         self.manage_ignored_apps_button = QPushButton(self.tr("管理忽略的应用"))
         self.manage_ignored_apps_button.setStyleSheet(f"""
             QPushButton {{
@@ -14407,6 +14477,7 @@ class SettingsWindow(QWidget):
         self.focusable_widgets_developer = [
             self.peer_launch_button,
             self.debug_window_button,
+            self.disable_startup_animation_button,
             self.manage_ignored_apps_button,
         ]
         return page
@@ -14973,6 +15044,14 @@ class SettingsWindow(QWidget):
             json.dump(settings, f, indent=4)
         if self.parent() and hasattr(self.parent(), "apply_debug_output_setting"):
             self.parent().apply_debug_output_setting()
+
+    def toggle_disable_startup_animation(self):
+        settings["disable_startup_fly_in_animation"] = not settings.get("disable_startup_fly_in_animation", False)
+        self.disable_startup_animation_button.setText(
+            f"禁用启动时游戏按钮飞入动画  {'开' if settings['disable_startup_fly_in_animation'] else '关'}"
+        )
+        with open(settings_path, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=4)
 
     def show_manage_ignored_apps_dialog(self):
         dialog = QDialog(self)
