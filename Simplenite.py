@@ -10,13 +10,13 @@ from PyQt5 import QtWidgets
 from PyQt5 import QtGui
 from PIL import Image, ImageFilter
 import win32gui,win32process,psutil,win32api,win32ui,win32security,math
-from PyQt5.QtWidgets import QApplication, QListWidgetItem, QMainWindow, QMessageBox, QScroller, QSystemTrayIcon, QMenu , QVBoxLayout, QDialog, QGridLayout, QWidget, QPushButton, QLabel, QDesktopWidget, QHBoxLayout, QFileDialog, QSlider, QLineEdit, QProgressBar, QScrollArea, QFrame, QTabWidget, QStackedWidget, QTextEdit, QListWidget
+from PyQt5.QtWidgets import QApplication, QListWidgetItem, QMainWindow, QMessageBox, QScroller, QSystemTrayIcon, QMenu , QVBoxLayout, QDialog, QGridLayout, QWidget, QPushButton, QLabel, QDesktopWidget, QHBoxLayout, QFileDialog, QSlider, QLineEdit, QProgressBar, QScrollArea, QFrame, QTabWidget, QStackedWidget, QTextEdit, QListWidget, QCheckBox
 from PyQt5.QtGui import QPainter, QPen, QBrush, QFont, QPixmap, QIcon, QColor, QLinearGradient, QKeySequence
 from PyQt5.QtCore import QDateTime, QSize, Qt, QThread, pyqtSignal, QTimer, QPoint, QProcess, QPropertyAnimation, QRect, QObject, QEasingCurve, QParallelAnimationGroup, QTranslator
 import subprocess, time, os,win32con, ctypes, re, win32com.client, ctypes, time, pyautogui
 from ctypes import wintypes
 
-APP_VERSION = "0.97.1"
+APP_VERSION = "0.97.2"
 
 #& C:/Users/86150/AppData/Local/Programs/Python/Python38/python.exe -m PyInstaller --add-data "fav.ico;." --add-data '1.png;.' --add-data 'pssuspend64.exe;.' -w Simplenite.py -i '.\fav.ico' --uac-admin --noconfirm
 # 定义 Windows API 函数
@@ -9098,6 +9098,33 @@ class GameSelector(QWidget):
             # 捕获异常，返回假
             print(f"错误: {e}")
             return False
+
+    # 手柄按钮动作名 → ControllerMapping 属性名
+    GAMEPAD_BUTTON_ATTRS = {
+        'A': 'button_a', 'B': 'button_b', 'X': 'button_x', 'Y': 'button_y',
+        'LB': 'left_bumper', 'RB': 'right_bumper',
+        'LS': 'left_stick_in', 'RS': 'right_stick_in',
+        'GUIDE': 'guide', 'BACK': 'back', 'START': 'start',
+    }
+
+    def get_pressed_gamepad_buttons(self):
+        """返回当前所有按下的手柄按钮动作名集合"""
+        pressed = set()
+        try:
+            for controller_data in self.controller_thread.controllers.values():
+                controller = controller_data['controller']
+                mapping = controller_data['mapping']
+                for action_name, attr_name in self.GAMEPAD_BUTTON_ATTRS.items():
+                    try:
+                        btn_idx = getattr(mapping, attr_name, None)
+                        if btn_idx is not None and controller.get_button(btn_idx):
+                            pressed.add(action_name)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        return pressed
+
     def guide_run(self):
         """置顶开启主页面"""
         try:
@@ -9107,7 +9134,7 @@ class GameSelector(QWidget):
             #self.more_section = 0
             #if current_time < ((self.ignore_input_until)+2000):
             #    return
-            #self.ignore_input_until = _get_ticks() + 500 
+            self.ignore_input_until = _get_ticks() + 300
             #if STARTUP:subprocess.run(["taskkill", "/f", "/im", "explorer.exe"])#STARTUP = False
             if self.killexplorer == True:
                 self.wintaskbarshow()
@@ -9532,9 +9559,66 @@ class GameSelector(QWidget):
                             self.guide_run()
                         return
                 # 其它情况（仍在按下或无变化）不在此触发
+            # 自定义手柄组合键打开主页面：gsfocus False（界面不可见）时触发 guide_run
+            # gsfocus True（游戏选择界面/软件界面内可见）时不执行
+            # 使用与 GUIDE 键类似的短按/长按防抖逻辑
+            gamepad_home_combo = settings.get("gamepad_home_combo", [])
+            if gamepad_home_combo and action in gamepad_home_combo:
+                if not hasattr(self, '_combo_press_time'):
+                    self._combo_press_time = 0
+                if not hasattr(self, '_combo_last_state'):
+                    self._combo_last_state = False
+                if not hasattr(self, '_combo_long_pressed'):
+                    self._combo_long_pressed = False
+                current_ticks = _get_ticks()
+                combo_now_pressed = all(b in self.get_pressed_gamepad_buttons() for b in gamepad_home_combo)
+
+                if combo_now_pressed:
+                    if not self._combo_last_state:
+                        self._combo_press_time = current_ticks
+                        self._combo_last_state = True
+                        self._combo_long_pressed = False
+                        # 轮询释放，捕获缺失的释放事件
+                        if not hasattr(self, '_combo_poll_timer') or self._combo_poll_timer is None:
+                            def _poll_combo_release():
+                                now = _get_ticks()
+                                still = all(b in self.get_pressed_gamepad_buttons() for b in gamepad_home_combo)
+                                if still:
+                                    if now - (self._combo_press_time or now) > 800:
+                                        self._combo_long_pressed = True
+                                    return
+                                if self._combo_last_state:
+                                    dur = now - (self._combo_press_time or now)
+                                    self._combo_last_state = False
+                                    self._combo_press_time = 0
+                                    if getattr(self, '_combo_long_pressed', False):
+                                        self._combo_long_pressed = False
+                                    else:
+                                        if dur <= 800:
+                                            self.guide_run()
+                                            self.ignore_input_until = _get_ticks() + 500
+                                try:
+                                    if self._combo_poll_timer:
+                                        self._combo_poll_timer.stop()
+                                        self._combo_poll_timer.deleteLater()
+                                        self._combo_poll_timer = None
+                                except Exception:
+                                    pass
+                            self._combo_poll_timer = QTimer(self)
+                            self._combo_poll_timer.timeout.connect(_poll_combo_release)
+                            self._combo_poll_timer.start(50)
+                else:
+                    if self._combo_last_state:
+                        dur = current_ticks - (self._combo_press_time or current_ticks)
+                        self._combo_last_state = False
+                        self._combo_press_time = 0
+                        if not getattr(self, '_combo_long_pressed', False) and dur <= 800:
+                            self.guide_run()
+                            self.ignore_input_until = _get_ticks() + 500
+                return
             self.ignore_input_until = current_time + 500
             return
-        
+
         # 若启动悬浮窗存在，关闭启动悬浮窗
         try:
             if getattr(self, 'launch_overlay', None):
@@ -9648,14 +9732,16 @@ class GameSelector(QWidget):
                 pyautogui.hotkey('win', 'd')
                 return
             elif action in ('LB', 'RB'):
+                # 组合键逻辑已在 gsfocus False 块内处理，此处（gsfocus True）直接调节音量
                 for controller_data in self.controller_thread.controllers.values():
                     controller = controller_data['controller']
                     mapping = controller_data['mapping']
-                    lb_pressed = controller.get_button(mapping.left_bumper)
-                    rb_pressed = controller.get_button(mapping.right_bumper)
+                    try:
+                        lb_pressed = controller.get_button(mapping.left_bumper)
+                        rb_pressed = controller.get_button(mapping.right_bumper)
+                    except Exception:
+                        continue
                     if lb_pressed and rb_pressed:
-                        self.toggle_mute()
-                        self.ignore_input_until = _get_ticks() + 500 
                         return
                     # 仅 LB 或仅 RB：单独调整音量后返回
                     if action == 'LB':
@@ -9664,7 +9750,7 @@ class GameSelector(QWidget):
                         return
                     elif action == 'RB':
                         self.increase_volume()
-                        self.ignore_input_until = _get_ticks() + 200 
+                        self.ignore_input_until = _get_ticks() + 200
                         return
             if self.current_section == 1:  # 控制按钮区域
                 if action.lower() == "right":
@@ -13629,7 +13715,13 @@ class SettingsWindow(QWidget):
         hotkey_layout.addStretch()
 
         self.home_page_hotkey = settings.get("home_page_hotkey", None)
-        hotkey_text = self.home_page_hotkey if self.home_page_hotkey else self.tr("未设置")
+        self.gamepad_home_combo = settings.get("gamepad_home_combo", [])
+        display_parts = []
+        if self.home_page_hotkey:
+            display_parts.append(self.home_page_hotkey)
+        if self.gamepad_home_combo:
+            display_parts.append("+".join(self.gamepad_home_combo))
+        hotkey_text = " / ".join(display_parts) if display_parts else self.tr("未设置")
         self.hotkey_label = QLabel(hotkey_text)
         self.hotkey_label.setStyleSheet(f"color: #00bfff; font-size: {int(28 * scale)}px;")
         hotkey_layout.addWidget(self.hotkey_label)
@@ -14625,9 +14717,9 @@ class SettingsWindow(QWidget):
                 border: {int(2 * self.parent().scale_factor)}px solid #444444;
             }}
         """)
-        hotkey_dialog.setFixedSize(int(500 * self.parent().scale_factor), int(200 * self.parent().scale_factor))
+        hotkey_dialog.setFixedSize(int(500 * self.parent().scale_factor), int(340 * self.parent().scale_factor))
         layout = QVBoxLayout(hotkey_dialog)
-        layout.setSpacing(int(20 * self.parent().scale_factor))
+        layout.setSpacing(int(15 * self.parent().scale_factor))
         layout.setContentsMargins(
             int(30 * self.parent().scale_factor),
             int(30 * self.parent().scale_factor),
@@ -14635,17 +14727,143 @@ class SettingsWindow(QWidget):
             int(30 * self.parent().scale_factor)
         )
 
-        # 添加提示标签
-        hint_label = QLabel(self.tr("请按下要设置的快捷键（任意键）"))
-        hint_label.setStyleSheet(f"color: white; font-size: {int(18 * self.parent().scale_factor)}px;")
-        hint_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(hint_label)
+        sf = self.parent().scale_factor
 
-        # 添加显示当前按键的标签
-        key_label = QLabel(self.tr("等待按键..."))
-        key_label.setStyleSheet(f"color: #93ffff; font-size: {int(24 * self.parent().scale_factor)}px; font-weight: bold;")
+        # === 键盘快捷键设置区 ===
+        kb_title = QLabel(self.tr("键盘快捷键"))
+        kb_title.setStyleSheet(f"color: white; font-size: {int(18 * sf)}px; font-weight: bold;")
+        kb_title.setAlignment(Qt.AlignLeft)
+        layout.addWidget(kb_title)
+
+        kb_row = QHBoxLayout()
+        kb_row.setSpacing(int(10 * sf))
+
+        current_key = settings.get("home_page_hotkey", None)
+        kb_text = current_key if current_key else self.tr("未设置")
+        key_label = QLabel(kb_text)
+        key_label.setStyleSheet(f"color: #00bfff; font-size: {int(18 * sf)}px;")
         key_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(key_label)
+        kb_row.addWidget(key_label)
+
+        kb_hint = QLabel(self.tr("（对话框内按下任意键以设置）"))
+        kb_hint.setStyleSheet(f"color: #aaaaaa; font-size: {int(14 * sf)}px;")
+        kb_hint.setAlignment(Qt.AlignCenter)
+        kb_row.addWidget(kb_hint)
+        layout.addLayout(kb_row)
+
+        # 分割线
+        combo_line = QFrame()
+        combo_line.setFrameShape(QFrame.HLine)
+        combo_line.setStyleSheet("color: #444444;")
+        layout.addWidget(combo_line)
+
+        # === 手柄组合键设置区 ===
+        combo_title = QLabel(self.tr("手柄组合键"))
+        combo_title.setStyleSheet(f"color: white; font-size: {int(18 * sf)}px; font-weight: bold;")
+        combo_title.setAlignment(Qt.AlignLeft)
+        layout.addWidget(combo_title)
+
+        combo_row = QHBoxLayout()
+        combo_row.setSpacing(int(10 * sf))
+
+        current_combo = settings.get("gamepad_home_combo", [])
+        combo_text = "+".join(current_combo) if current_combo else self.tr("未设置")
+        combo_label = QLabel(combo_text)
+        combo_label.setStyleSheet(f"color: #00bfff; font-size: {int(18 * sf)}px;")
+        combo_label.setAlignment(Qt.AlignCenter)
+        combo_row.addWidget(combo_label)
+
+        combo_button = QPushButton(self.tr("设置"))
+        combo_button.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #2E7D9B;
+                color: white;
+                padding: {int(8 * sf)}px {int(16 * sf)}px;
+                border: none;
+                font-size: {int(14 * sf)}px;
+                border-radius: {int(4 * sf)}px;
+            }}
+            QPushButton:hover {{ background-color: #45a049; }}
+        """)
+        combo_clear_button = QPushButton(self.tr("清除"))
+        combo_clear_button.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #f44336;
+                color: white;
+                padding: {int(8 * sf)}px {int(16 * sf)}px;
+                border: none;
+                font-size: {int(14 * sf)}px;
+                border-radius: {int(4 * sf)}px;
+            }}
+            QPushButton:hover {{ background-color: #da190b; }}
+        """)
+        combo_row.addWidget(combo_button)
+        combo_row.addWidget(combo_clear_button)
+        layout.addLayout(combo_row)
+
+        combo_hint = QLabel(self.tr("点击「设置」后按住手柄按钮组合，松开后捕获"))
+        combo_hint.setStyleSheet(f"color: #aaaaaa; font-size: {int(14 * sf)}px;")
+        combo_hint.setAlignment(Qt.AlignCenter)
+        layout.addWidget(combo_hint)
+
+        # 手柄组合键捕获逻辑
+        combo_capture_state = {'capturing': False, 'max_pressed': set(), 'wait_start': 0}
+        combo_capture_timer = QTimer(hotkey_dialog)
+        combo_capture_timer.setInterval(50)
+
+        def start_combo_capture():
+            combo_capture_state['capturing'] = True
+            combo_capture_state['max_pressed'] = set()
+            combo_capture_state['wait_start'] = 0
+            combo_label.setText(self.tr("按住组合键..."))
+            combo_button.setText(self.tr("捕获中..."))
+            combo_button.setEnabled(False)
+            combo_capture_timer.start()
+
+        def poll_combo():
+            if not combo_capture_state['capturing']:
+                return
+            parent_window = self.parent_window
+            if not hasattr(parent_window, 'controller_thread') or not parent_window.controller_thread:
+                return
+            pressed = parent_window.get_pressed_gamepad_buttons()
+            if pressed:
+                combo_capture_state['max_pressed'] = combo_capture_state['max_pressed'] | pressed
+                combo_label.setText(self.tr("按住中: %1").replace('%1', "+".join(sorted(pressed))))
+            else:
+                # 所有按钮松开
+                if combo_capture_state['max_pressed']:
+                    # 之前有按键按下，现在松开，捕获完成
+                    captured = sorted(combo_capture_state['max_pressed'])
+                    combo_label.setText("+".join(captured))
+                    combo_capture_state['captured'] = captured
+                    combo_capture_state['capturing'] = False
+                    combo_capture_timer.stop()
+                    combo_button.setText(self.tr("设置"))
+                    combo_button.setEnabled(True)
+                else:
+                    # 还没检测到按键，继续等待（不立即结束）
+                    if not combo_capture_state.get('wait_start', 0):
+                        combo_capture_state['wait_start'] = _get_ticks()
+                    elif _get_ticks() - combo_capture_state['wait_start'] > 5000:
+                        # 超过5秒未检测到按键，结束捕获
+                        combo_label.setText(self.tr("未检测到按键"))
+                        combo_capture_state['capturing'] = False
+                        combo_capture_timer.stop()
+                        combo_button.setText(self.tr("设置"))
+                        combo_button.setEnabled(True)
+
+        def clear_combo():
+            combo_capture_state['captured'] = []
+            combo_label.setText(self.tr("未设置"))
+            combo_capture_state['capturing'] = False
+            combo_capture_timer.stop()
+            combo_button.setText(self.tr("设置"))
+            combo_button.setEnabled(True)
+
+        combo_capture_timer.timeout.connect(poll_combo)
+        combo_button.clicked.connect(start_combo_capture)
+        combo_clear_button.clicked.connect(clear_combo)
 
         # 用于存储用户按下的键
         selected_key = None
@@ -14754,16 +14972,31 @@ class SettingsWindow(QWidget):
 
         def confirm():
             nonlocal selected_key
+            # 停止捕获定时器
+            if combo_capture_timer.isActive():
+                combo_capture_timer.stop()
+            # 保存手柄组合键
+            if 'captured' in combo_capture_state:
+                settings["gamepad_home_combo"] = combo_capture_state['captured']
+            # 清理旧的 lb_rb_open_home 设置
+            settings.pop("lb_rb_open_home", None)
             if selected_key:
                 # 保存快捷键设置
                 settings["home_page_hotkey"] = selected_key
-                with open(settings_path, "w", encoding="utf-8") as f:
-                    json.dump(settings, f, indent=4, ensure_ascii=False)
-                # 更新标签显示
-                self.hotkey_label.setText(self.tr("打开主页面快捷键: %1").replace('%1', selected_key))
-                # 更新QShortcut设置
-                self.parent().update_shortcut()
-                hotkey_dialog.accept()
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump(settings, f, indent=4, ensure_ascii=False)
+            # 同步更新上级页面标签显示：键盘快捷键 / 手柄组合键
+            combo_saved = settings.get("gamepad_home_combo", [])
+            display_parts = []
+            if selected_key:
+                display_parts.append(selected_key)
+            if combo_saved:
+                display_parts.append("+".join(combo_saved))
+            display_text = " / ".join(display_parts) if display_parts else self.tr("未设置")
+            self.hotkey_label.setText(display_text)
+            # 更新QShortcut设置
+            self.parent().update_shortcut()
+            hotkey_dialog.accept()
 
         confirm_button.clicked.connect(confirm)
         cancel_button.clicked.connect(hotkey_dialog.reject)
