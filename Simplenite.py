@@ -9943,16 +9943,33 @@ class GameSelector(QWidget):
         """更新主线程中的 play_app_name，检测游戏结束并触发自动备份"""
         old_set = set(getattr(self, 'player', []))
         new_set = set(new_play_app_name)
+        # 新启动的游戏：记录启动时间戳
+        started_games = new_set - old_set
+        if not hasattr(self, '_game_start_times'):
+            self._game_start_times = {}
+        import time as _t
+        for g in started_games:
+            self._game_start_times[g] = _t.time()
         # 找出刚关闭的游戏（在旧列表中但不在新列表中）
         closed_games = old_set - new_set
+        # 计算每个刚关闭游戏的本次会话时长（分钟）
+        session_minutes = {}
+        for g in closed_games:
+            start_ts = self._game_start_times.pop(g, None)
+            if start_ts is not None:
+                session_minutes[g] = (_t.time() - start_ts) / 60.0
+            else:
+                # 无启动记录（如程序刚启动时已有游戏在跑），用总累计时间兜底
+                session_minutes[g] = settings.get("play_time", {}).get(g, 0)
         self.player = new_play_app_name
         print(f"更新后的 play_app_name: {self.play_app_name}")
         # 检测游戏结束，触发自动备份
         if closed_games:
-            QTimer.singleShot(200, lambda: self._check_auto_backup(closed_games))
+            QTimer.singleShot(200, lambda: self._check_auto_backup(closed_games, session_minutes))
 
-    def _check_auto_backup(self, closed_games):
-        """检查自动备份条件并执行"""
+    def _check_auto_backup(self, closed_games, session_minutes=None):
+        """检查自动备份条件并执行。
+        session_minutes: {game_name: 本次会话分钟数}，用于判断是否达到最小游玩时长。"""
         ab = settings.get("auto_backup", {})
         if not ab.get("enabled", False):
             return
@@ -9969,7 +9986,8 @@ class GameSelector(QWidget):
         list_mode = ab.get("list_mode", "blacklist")
         blacklist = set(ab.get("blacklist", []))
         whitelist = set(ab.get("whitelist", []))
-        play_time = settings.get("play_time", {})
+        if session_minutes is None:
+            session_minutes = {}
 
         for game_name in closed_games:
             # 只在有备份路径的游戏上生效
@@ -9978,9 +9996,10 @@ class GameSelector(QWidget):
             game = next((g for g in games if g.get("name") == game_name), None)
             if not game or not game.get("path"):
                 continue
-            # 检查游玩时长
-            minutes = play_time.get(game_name, 0)
+            # 检查本次会话游玩时长（非总累计时间）
+            minutes = session_minutes.get(game_name, 0)
             if minutes < min_minutes:
+                # 未达最小游玩时长，不显示灵动岛，直接跳过
                 continue
             # 白名单/黑名单筛选
             if list_mode == "whitelist":
