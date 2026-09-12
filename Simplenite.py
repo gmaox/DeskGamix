@@ -491,9 +491,12 @@ def save_language_to_config(lang_code):
 load_language_from_config()
 # ========== config.ini 结束 ==========
 
+_wsh_shell = None
 def get_target_path(lnk_file):
-    shell = win32com.client.Dispatch("WScript.Shell")
-    shortcut = shell.CreateShortCut(lnk_file)
+    global _wsh_shell
+    if _wsh_shell is None:
+        _wsh_shell = win32com.client.Dispatch("WScript.Shell")
+    shortcut = _wsh_shell.CreateShortCut(lnk_file)
     return shortcut.TargetPath
 
 def load_apps():
@@ -1143,8 +1146,13 @@ class MonitorRunningAppsThread(QThread):
         self.play_app_name = play_app_name
         self.running = True
         self._last_visible_count = None
+        self._ui_visible = True  # UI 是否可见；不可见时降速并跳过后台窗口统计
 
-    def check_running_apps(self):
+    def set_ui_visible(self, visible):
+        """供主窗口在 show/hide 时切换轮询频率与工作集"""
+        self._ui_visible = bool(visible)
+
+    def check_running_apps(self, skip_windows=False):
         """检查当前运行的应用"""
         global valid_apps
         # 获取当前运行的所有进程
@@ -1175,6 +1183,10 @@ class MonitorRunningAppsThread(QThread):
                 self.play_app_name_signal.emit(self.play_app_name)  # 将 play_app_name 发送到主线程
             else:
                 play_reload = False
+
+        # 隐藏时跳过后台窗口枚举（仅 UI 需要，隐藏时无意义）
+        if skip_windows:
+            return
 
         # 额外：检查前台可见窗口数量是否变化，变化时通知主线程更新后台窗口列表
         try:
@@ -1210,8 +1222,13 @@ class MonitorRunningAppsThread(QThread):
     def run(self):
         """后台线程的运行方法"""
         while self.running:
-            self.check_running_apps()  # 检查运行的应用
-            time.sleep(1)  # 每秒检查一次进程
+            if self._ui_visible:
+                self.check_running_apps()  # 可见：完整检查（进程 + 后台窗口）
+                time.sleep(1)
+            else:
+                # 隐藏：仍检测运行游戏（驱动自动备份），但跳过后台窗口统计，5s 一次降低 psutil 开销
+                self.check_running_apps(skip_windows=True)
+                time.sleep(5)
 
     def stop(self):
         """停止线程"""
@@ -7893,6 +7910,14 @@ class GameSelector(QWidget):
         self.controller_thread = GameControllerThread(self)
         self.controller_thread.gamepad_signal.connect(self.handle_gamepad_input)
         self.controller_thread.start()
+        # STARTUP 静默启动时窗口已隐藏，立即降速后台轮询
+        if STARTUP:
+            self.monitor_thread.set_ui_visible(False)
+            self.controller_thread.set_ui_visible(False)
+            try:
+                self.time_timer.stop()  # 窗口隐藏，无需每秒刷新时钟
+            except Exception:
+                pass
 
         # 按键去抖的间隔时间（单位：毫秒）
         self.last_input_time = 0  # 最后一次处理输入的时间
@@ -9222,6 +9247,14 @@ class GameSelector(QWidget):
 
     def show_window(self):
         """显示窗口"""
+        # 恢复后台轮询全速：监控线程完整检查 + 手柄 100Hz + 时钟 1s
+        self.monitor_thread.set_ui_visible(True)
+        self.controller_thread.set_ui_visible(True)
+        try:
+            self.update_time()
+            self.time_timer.start(1000)
+        except Exception:
+            pass
         # 先设置透明度为0，避免闪烁
         self.setWindowOpacity(0.0) # 透明度为0
         ctypes.windll.user32.ShowWindow(GSHWND, 9) # 9=SW_RESTORE
@@ -9330,7 +9363,14 @@ class GameSelector(QWidget):
                 ctypes.windll.user32.ShowWindow(hwnd, 0)  # 0=SW_HIDE
             # 恢复透明度
             self.setWindowOpacity(1.0)
-            
+            # 窗口已隐藏：降速后台轮询 + 停止时钟刷新
+            self.monitor_thread.set_ui_visible(False)
+            self.controller_thread.set_ui_visible(False)
+            try:
+                self.time_timer.stop()
+            except Exception:
+                pass
+
         self._hide_anim.finished.connect(on_finished)
         self._hide_anim.start()
     def on_favorite_button_clicked(self):
@@ -14432,6 +14472,11 @@ class GameControllerThread(QThread):
         self.last_hat_time = 0
         self.hat_delay = 0.05
         self.last_hat_value = (0, 0)
+        self._ui_visible = True  # UI 是否可见；不可见时降低轮询频率
+
+    def set_ui_visible(self, visible):
+        """供主窗口在 show/hide 时切换轮询频率"""
+        self._ui_visible = bool(visible)
 
     def stop(self):
         """停止线程"""
@@ -14641,7 +14686,8 @@ class GameControllerThread(QThread):
                     if buttons[mapping.right_stick_in]:  # RS
                         self.gamepad_signal.emit('RS')
 
-                time.sleep(0.01)
+                # UI 不可见时降到 ~33Hz（仍足以检测 800ms 防抖的 LB+RB 组合键）；可见时保持 100Hz
+                time.sleep(0.03 if not self._ui_visible else 0.01)
             except Exception as e:
                 self.controller_error_signal.emit('手柄读取出错')
                 print(f"Error in event loop: {e}")
@@ -19482,13 +19528,6 @@ class SettingsWindow(QWidget):
 # 应用程序入口
 if __name__ == "__main__":
     global STARTUP  # 声明 STARTUP 为全局变量
-    # 获取程序所在目录
-    z_order = []
-    def enum_windows_callback(hwnd, lParam):
-        z_order.append(hwnd)
-        return True
-    win32gui.EnumWindows(enum_windows_callback, None)
-    
     # 打印当前工作目录
     print("当前工作目录:", os.getcwd())
     unique_args = list(dict.fromkeys(sys.argv))
@@ -19498,10 +19537,18 @@ if __name__ == "__main__":
         STARTUP = False
     # 避免重复运行
     current_pid = os.getpid()
-    for proc in psutil.process_iter(['pid', 'name', 'exe']):
-        if proc.info['exe'] == sys.executable and proc.info['pid'] != current_pid:
-            proc.terminate()
-            proc.wait()
+    our_exe = sys.executable
+    our_name = os.path.basename(our_exe).lower()
+    for proc in psutil.process_iter(['pid', 'name']):
+        try:
+            if proc.info['pid'] == current_pid:
+                continue
+            if proc.info['name'] and proc.info['name'].lower() == our_name:
+                if proc.exe() == our_exe:
+                    proc.terminate()
+                    proc.wait()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
     app = QApplication(sys.argv)
     selector = GameSelector()
     selector.show()
