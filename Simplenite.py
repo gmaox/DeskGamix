@@ -6,17 +6,26 @@ import threading
 import winreg
 import urllib.request
 import configparser
+import base64
+import zipfile
+import platform
+import webbrowser
+import tempfile
+import xml.etree.ElementTree as ET
+from datetime import datetime
+from urllib.parse import urljoin, unquote
+import requests
 from PyQt5 import QtWidgets
 from PyQt5 import QtGui
 from PIL import Image, ImageFilter
 import win32gui,win32process,psutil,win32api,win32ui,win32security,math
-from PyQt5.QtWidgets import QApplication, QListWidgetItem, QMainWindow, QMessageBox, QScroller, QSystemTrayIcon, QMenu , QVBoxLayout, QDialog, QGridLayout, QWidget, QPushButton, QLabel, QDesktopWidget, QHBoxLayout, QFileDialog, QSlider, QLineEdit, QProgressBar, QScrollArea, QFrame, QTabWidget, QStackedWidget, QTextEdit, QListWidget, QCheckBox
+from PyQt5.QtWidgets import QApplication, QListWidgetItem, QMainWindow, QMessageBox, QScroller, QSystemTrayIcon, QMenu , QVBoxLayout, QDialog, QGridLayout, QWidget, QPushButton, QLabel, QDesktopWidget, QHBoxLayout, QFileDialog, QSlider, QLineEdit, QProgressBar, QScrollArea, QFrame, QTabWidget, QStackedWidget, QTextEdit, QListWidget, QCheckBox, QSpinBox, QComboBox, QWidgetAction
 from PyQt5.QtGui import QPainter, QPen, QBrush, QFont, QPixmap, QIcon, QColor, QLinearGradient, QKeySequence
-from PyQt5.QtCore import QDateTime, QSize, Qt, QThread, pyqtSignal, QTimer, QPoint, QProcess, QPropertyAnimation, QRect, QObject, QEasingCurve, QParallelAnimationGroup, QTranslator
+from PyQt5.QtCore import QDateTime, QSize, Qt, QThread, pyqtSignal, pyqtSlot, QTimer, QPoint, QProcess, QPropertyAnimation, QRect, QObject, QEasingCurve, QParallelAnimationGroup, QTranslator
 import subprocess, time, os,win32con, ctypes, re, win32com.client, ctypes, time, pyautogui
 from ctypes import wintypes
 
-APP_VERSION = "0.97.2"
+APP_VERSION = "0.97.3"
 
 #& C:/Users/86150/AppData/Local/Programs/Python/Python38/python.exe -m PyInstaller --add-data "fav.ico;." --add-data '1.png;.' --add-data 'pssuspend64.exe;.' -w Simplenite.py -i '.\fav.ico' --uac-admin --noconfirm
 # 定义 Windows API 函数
@@ -396,7 +405,14 @@ settings = {
     "use_peer_level_launch": False,
     "debug_output_window": False,
     "disable_startup_fly_in_animation": False,
-    "ignored_apps": ["Desktop", "Steam Big Picture", "Xbox Game"]
+    "ignored_apps": ["Desktop", "Steam Big Picture", "Xbox Game"],
+    "auto_backup": {
+        "enabled": False,
+        "min_play_minutes": 5,
+        "list_mode": "blacklist",
+        "blacklist": [],
+        "whitelist": []
+    }
 }
 _is_first_launch = not os.path.exists(settings_path)
 try:
@@ -405,6 +421,15 @@ try:
             settings = json.load(f)
     if "ignored_apps" not in settings:
         settings["ignored_apps"] = ["Desktop", "Steam Big Picture", "Xbox Game"]
+    # 确保 auto_backup 配置存在且字段完整（兼容旧配置文件）
+    _ab_default = {"enabled": False, "min_play_minutes": 5, "list_mode": "blacklist", "blacklist": [], "whitelist": []}
+    _ab = settings.get("auto_backup", {})
+    if not isinstance(_ab, dict):
+        _ab = {}
+    for _k, _v in _ab_default.items():
+        if _k not in _ab:
+            _ab[_k] = _v
+    settings["auto_backup"] = _ab
 except Exception as e:
     print(f"Error loading settings: {e}")
 
@@ -1272,6 +1297,3148 @@ class ScreenshotLoaderThread(QThread):
         if self.running:  # 只有在没有停止的情况下才发送信号
             self.screenshot_loaded.emit(loaded_screenshots)
 
+# ==================== 云端存档（原 maobackup 整合） ====================
+# 将原 maobackup.exe 的 WebDAV 存档备份/还原功能整合进 Simplenite。
+# 配置仍存于 webdav_config.json（兼容历史数据），账号设置入口移至
+# SettingsWindow 的「云端存档」分类。原 Tk 界面已全部改为 PyQt5 风格。
+
+MAO_CONFIG_PATH = os.path.join(program_directory, "webdav_config.json")
+MAO_EXTRA_BACKUP_DIR = os.path.join(program_directory, "extra_backup")
+
+try:
+    import urllib3 as _mao_urllib3
+    if _mao_urllib3:
+        _mao_urllib3.disable_warnings(_mao_urllib3.exceptions.InsecureRequestWarning)
+except Exception:
+    pass
+
+# watchdog 可选依赖（仅「添加新游戏」监听使用），缺失时退化为仅手动选择
+try:
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler
+except Exception:
+    Observer = None
+
+    class FileSystemEventHandler:  # type: ignore
+        """watchdog 缺失时的桩，保证类定义不报错。"""
+        pass
+
+
+def mao_load_config():
+    """读取 webdav_config.json"""
+    try:
+        with open(MAO_CONFIG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def mao_save_config(cfg):
+    """保存 webdav_config.json"""
+    try:
+        with open(MAO_CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"保存云端存档配置失败: {e}")
+        return False
+
+
+def mao_get_env_map():
+    return {
+        "%CommonProgramFiles%": os.environ.get("CommonProgramFiles", r"C:\Program Files\Common Files"),
+        "%COMMONPROGRAMFILES(x86)%": os.environ.get("CommonProgramFiles(x86)", r"C:\Program Files (x86)\Common Files"),
+        "%HOMEPATH%": os.environ.get("HOMEPATH", ""),
+        "%USERPROFILE%": os.environ.get("USERPROFILE", ""),
+        "%APPDATA%": os.environ.get("APPDATA", ""),
+        "%ALLUSERSPROFILE%": os.environ.get("ALLUSERSPROFILE", ""),
+        "%TEMP%": os.environ.get("TEMP", ""),
+        "%LOCALAPPDATA%": os.environ.get("LOCALAPPDATA", ""),
+        "%PROGRAMDATA%": os.environ.get("PROGRAMDATA", ""),
+        "%PUBLIC%": os.environ.get("PUBLIC", r"C:\Users\Public"),
+    }
+
+
+def mao_replace_with_env_vars_global(p):
+    env_map = mao_get_env_map()
+    for var, val in sorted(env_map.items(), key=lambda x: -len(str(x[1]))):
+        if val and p.startswith(val):
+            return p.replace(val, var, 1)
+    return p
+
+
+def mao_sanitize_var_name(name):
+    return name
+
+
+class WebDAVClient:
+    """基于 requests 的 WebDAV 客户端（移植自 maobackup，替换 opendal）"""
+
+    # 全局 requests Session 复用连接池，避免每次新建 TCP/TLS 握手；Session 线程不安全但本工具 WebDAV 操作都走主线程或单个 worker。
+    _shared_session = None
+    _WEBDAV_TIMEOUT = (6.05, 20)  # (connect_timeout, read_timeout) 秒
+
+    def __init__(self, hostname, username, password):
+        self.hostname = hostname.rstrip("/")
+        self.username = username
+        self.password = password
+        # 共享 Session：使用同账号时复用；账号变更时重新建
+        cache = WebDAVClient._shared_session
+        if cache is None or cache.auth != (username, password):
+            sess = requests.Session()
+            sess.auth = (username, password)
+            sess.verify = False
+            sess.proxies = {"http": None, "https": None}
+            # 请求连接池上限 + Keep-Alive
+            try:
+                adapter = requests.adapters.HTTPAdapter(
+                    pool_connections=4,
+                    pool_maxsize=16,
+                    pool_block=False,
+                )
+                sess.mount("http://", adapter)
+                sess.mount("https://", adapter)
+            except Exception:
+                pass
+            sess.headers.update({"Connection": "keep-alive"})
+            # 全局 Supress InsecureRequestWarning 重复警告
+            try:
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            except Exception:
+                pass
+            WebDAVClient._shared_session = sess
+            self.session = sess
+        else:
+            self.session = cache
+
+    def list(self, path):
+        """列出目录内容，返回类似 opendal 的 Entry 对象列表。自动创建不存在的目录。
+        Entry 字段：
+          path           : 相对 WebDAV 根的 href 路径
+          is_dir         : bool
+          last_modified  : datetime or None（从 PROPFIND 直接解析，无需再 stat）
+          content_length : int or None
+        """
+        url = urljoin(self.hostname + "/", path)
+        propfind_xml = '''<?xml version="1.0" encoding="utf-8"?>
+<D:propfind xmlns:D="DAV:">
+    <D:prop>
+        <D:resourcetype/>
+        <D:getlastmodified/>
+        <D:getcontentlength/>
+    </D:prop>
+</D:propfind>'''
+
+        def try_propfind():
+            response = self.session.request("PROPFIND", url,
+                headers={"Depth": "1", "Content-Type": "application/xml"},
+                data=propfind_xml.encode('utf-8'),
+                timeout=WebDAVClient._WEBDAV_TIMEOUT)
+            response.raise_for_status()
+            return response
+        try:
+            try:
+                response = try_propfind()
+            except requests.exceptions.HTTPError as e:
+                if hasattr(e.response, 'status_code') and e.response.status_code == 409:
+                    parent = os.path.dirname(path.rstrip('/'))
+                    if parent and parent != path:
+                        self._ensure_dir(parent)
+                    mkcol_resp = self.session.request("MKCOL", url,
+                        timeout=WebDAVClient._WEBDAV_TIMEOUT)
+                    if mkcol_resp.status_code not in (201, 405):
+                        raise Exception(f"MKCOL失败: {mkcol_resp.status_code}")
+                    response = try_propfind()
+                else:
+                    raise
+            root = ET.fromstring(response.content)
+            entries = []
+            for response_elem in root.findall(".//{DAV:}response"):
+                href_elem = response_elem.find(".//{DAV:}href")
+                if href_elem is None:
+                    continue
+                href = href_elem.text
+                if href.startswith(self.hostname):
+                    href = href[len(self.hostname):]
+                if href.startswith("/"):
+                    href = href[1:]
+                href = unquote(href)
+                is_dir = False
+                last_modified = None
+                content_length = None
+                propstat = response_elem.find(".//{DAV:}propstat")
+                if propstat is not None:
+                    prop = propstat.find(".//{DAV:}prop")
+                    if prop is not None:
+                        resourcetype = prop.find(".//{DAV:}resourcetype")
+                        if resourcetype is not None:
+                            collection = resourcetype.find(".//{DAV:}collection")
+                            is_dir = collection is not None
+                        lm_elem = prop.find(".//{DAV:}getlastmodified")
+                        if lm_elem is not None and lm_elem.text:
+                            try:
+                                from email.utils import parsedate_to_datetime
+                                last_modified = parsedate_to_datetime(lm_elem.text)
+                            except Exception:
+                                last_modified = None
+                        cl_elem = prop.find(".//{DAV:}getcontentlength")
+                        if cl_elem is not None and cl_elem.text:
+                            try:
+                                content_length = int(cl_elem.text)
+                            except Exception:
+                                content_length = None
+                entry = type('Entry', (), {
+                    'path': href,
+                    'is_dir': is_dir,
+                    'last_modified': last_modified,
+                    'content_length': content_length,
+                })()
+                entries.append(entry)
+            return entries
+        except Exception as e:
+            print(f"WebDAV list失败: {e}")
+            return []
+
+    def _ensure_dir(self, path):
+        """递归创建目录（仅用于 list 自动修复）"""
+        url = urljoin(self.hostname + "/", path)
+        parent = os.path.dirname(path.rstrip('/'))
+        if parent and parent != path:
+            self._ensure_dir(parent)
+        mkcol_resp = self.session.request("MKCOL", url,
+            timeout=WebDAVClient._WEBDAV_TIMEOUT)
+        if mkcol_resp.status_code not in (201, 405):
+            raise Exception(f"MKCOL失败: {mkcol_resp.status_code}")
+
+    def stat(self, path):
+        """获取文件信息，返回类似 opendal 的 Stat 对象（含 last_modified / content_length）"""
+        url = urljoin(self.hostname + "/", path)
+        propfind_xml = '''<?xml version="1.0" encoding="utf-8"?>
+<D:propfind xmlns:D="DAV:">
+    <D:prop>
+        <D:resourcetype/>
+        <D:getlastmodified/>
+        <D:getcontentlength/>
+    </D:prop>
+</D:propfind>'''
+        try:
+            response = self.session.request("PROPFIND", url,
+                headers={"Depth": "0", "Content-Type": "application/xml"},
+                data=propfind_xml.encode('utf-8'),
+                timeout=WebDAVClient._WEBDAV_TIMEOUT)
+            response.raise_for_status()
+            root = ET.fromstring(response.content)
+            last_modified = None
+            content_length = None
+            for response_elem in root.findall(".//{DAV:}response"):
+                propstat = response_elem.find(".//{DAV:}propstat")
+                if propstat is not None:
+                    prop = propstat.find(".//{DAV:}prop")
+                    if prop is not None:
+                        lastmodified_elem = prop.find(".//{DAV:}getlastmodified")
+                        if lastmodified_elem is not None and lastmodified_elem.text:
+                            try:
+                                from email.utils import parsedate_to_datetime
+                                last_modified = parsedate_to_datetime(lastmodified_elem.text)
+                            except Exception:
+                                pass
+                        cl_elem = prop.find(".//{DAV:}getcontentlength")
+                        if cl_elem is not None and cl_elem.text:
+                            try:
+                                content_length = int(cl_elem.text)
+                            except Exception:
+                                pass
+            stat_obj = type('Stat', (), {
+                'last_modified': last_modified,
+                'content_length': content_length,
+            })()
+            return stat_obj
+        except Exception as e:
+            print(f"WebDAV stat失败: {e}")
+            return None
+
+    def write(self, path, data):
+        """上传文件"""
+        url = urljoin(self.hostname + "/", path)
+        try:
+            response = self.session.put(url, data=data,
+                timeout=WebDAVClient._WEBDAV_TIMEOUT)
+            response.raise_for_status()
+            return True
+        except requests.exceptions.HTTPError as e:
+            if hasattr(e.response, 'status_code') and e.response.status_code == 409:
+                parent = os.path.dirname(path.rstrip('/'))
+                if parent and parent != path:
+                    self._ensure_dir(parent)
+                try:
+                    response = self.session.put(url, data=data,
+                        timeout=WebDAVClient._WEBDAV_TIMEOUT)
+                    response.raise_for_status()
+                    return True
+                except Exception as e:
+                    print(f"WebDAV write失败（重试后）：{e}")
+                    return False
+            else:
+                print(f"WebDAV write失败: {e}")
+                return False
+        except Exception as e:
+            print(f"WebDAV write失败: {e}")
+            return False
+
+    def read(self, path):
+        """下载文件"""
+        url = urljoin(self.hostname + "/", path)
+        try:
+            # 下载文件给更长 read_timeout（大文件）
+            read_timeout = (WebDAVClient._WEBDAV_TIMEOUT[0], 120)
+            response = self.session.get(url, timeout=read_timeout)
+            response.raise_for_status()
+            return response.content
+        except Exception as e:
+            print(f"WebDAV read失败: {e}")
+            return None
+
+
+def mao_get_opendal_operator():
+    """根据 webdav_config.json 创建 WebDAV 客户端"""
+    try:
+        cfg = mao_load_config()
+        hostname = cfg.get("hostname")
+        if not hostname:
+            return None
+        username = base64.b64decode(cfg.get("username", "")).decode()
+        password = base64.b64decode(cfg.get("password", "")).decode()
+        return WebDAVClient(hostname, username, password)
+    except Exception as e:
+        print(f"WebDAV 客户端初始化失败: {e}")
+        return None
+
+
+def mao_download_webdav_file(remote_path, local_path, log=print):
+    client = mao_get_opendal_operator()
+    if not client:
+        log("错误: WebDAV 未配置")
+        return False
+    try:
+        data = client.read(remote_path)
+        if data is not None:
+            with open(local_path, "wb") as f:
+                f.write(data)
+            return True
+        log("下载失败：无法读取文件")
+        return False
+    except Exception as e:
+        log(f"下载失败: {e}")
+        return False
+
+
+def mao_prompt_user_select_folder_for_var(varname, suggested_folder=None, parent=None, scale_factor=1.0):
+    """为自定义变量选择本地目录（PyQt5 版）。返回目录路径或 None。"""
+    sel = {"dir": None}
+    # 改为 parent=None + 始终置顶，确保路径提示不会被父窗口或其他 Dialog 遮挡
+    dlg = QDialog(None)
+    dlg.setWindowTitle("为自定义变量选择路径")
+    dlg.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog | Qt.WindowStaysOnTopHint)
+    # 不用 rgba 透明（与 Frameless 无 WA_TranslucentBackground 组合下会出现角部灰色残留），
+    # 改为 ConfirmDialog 同款不透明 + 显式 border 绘制圆角，观感稳定
+    dlg.setStyleSheet("QDialog { background-color: #2E2E2E; border-radius: 12px; border: 2px solid #444444; }")
+    dlg.setFixedSize(int(560 * scale_factor), int(320 * scale_factor))
+    layout = QVBoxLayout(dlg)
+    layout.setContentsMargins(20, 20, 20, 20)
+    layout.setSpacing(12)
+    info = QLabel(f"自定义变量 {varname} 用于跨设备保存路径占位，请选择对应本地目录来创建该变量。")
+    info.setWordWrap(True)
+    info.setStyleSheet("color: #ddd; font-size: 16px;")
+    layout.addWidget(info)
+    if suggested_folder:
+        sugg = QLabel(f"远端备份候选存档目录：{suggested_folder}")
+        sugg.setWordWrap(True)
+        sugg.setStyleSheet("color: #00bfff; font-size: 16px;")
+        layout.addWidget(sugg)
+    btn_row = QHBoxLayout()
+    btn_row.setSpacing(8)
+    proc_btn = QPushButton("从运行进程选择")
+    manual_btn = QPushButton("手动选择目录")
+    cancel_btn = QPushButton("取消")
+    for b in (proc_btn, manual_btn, cancel_btn):
+        b.setStyleSheet("background-color: #444444; color: white; font-size: 16px; padding: 8px; border: none; border-radius: 8px;")
+    btn_row.addWidget(proc_btn)
+    btn_row.addWidget(manual_btn)
+    btn_row.addStretch()
+    btn_row.addWidget(cancel_btn)
+    layout.addLayout(btn_row)
+
+    def do_manual():
+        d = QFileDialog.getExistingDirectory(dlg, f"为 {varname} 选择目录")
+        if d:
+            sel["dir"] = d
+            dlg.accept()
+
+    def do_proc():
+        proc_list = []
+        hwnd_pid = {}
+        try:
+            def enum_cb(hwnd, _):
+                try:
+                    if win32gui.IsWindowVisible(hwnd) and win32gui.GetWindowText(hwnd):
+                        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                        hwnd_pid[pid] = hwnd
+                except Exception:
+                    pass
+                return True
+            win32gui.EnumWindows(enum_cb, None)
+            for proc in psutil.process_iter(['pid', 'name', 'exe']):
+                try:
+                    if (proc.info['pid'] in hwnd_pid and proc.info.get('exe') and proc.info.get('name')
+                            and proc.info['name'].lower() not in ("explorer.exe", "desktopgame.exe", "textinputhost.exe", "quickstreamappadd.exe")):
+                        proc_list.append(proc)
+                except Exception:
+                    continue
+        except Exception as e:
+            QMessageBox.warning(dlg, "错误", f"枚举进程失败: {e}")
+            return
+        proc_dlg = QDialog(dlg)
+        proc_dlg.setWindowTitle("从运行进程选择")
+        proc_dlg.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
+        proc_dlg.setStyleSheet("QDialog { background-color: rgba(46,46,46,0.98); border-radius: 12px; border: 2px solid #444444; }")
+        proc_dlg.resize(int(560 * scale_factor), int(420 * scale_factor))
+        pl = QVBoxLayout(proc_dlg)
+        pl.setContentsMargins(16, 16, 16, 16)
+        lw = QListWidget(proc_dlg)
+        lw.setStyleSheet("QListWidget { color: white; background-color: #2b2b2b; border-radius: 8px; } QListWidget::item { padding: 8px; } QListWidget::item:selected { background-color: #93ffff; color: #222; }")
+        if not proc_list:
+            lw.addItem("没有检测到可用进程")
+        else:
+            for proc in proc_list:
+                lw.addItem(f"{proc.info.get('name', '未知')}  ({proc.info.get('exe', '')})")
+        pl.addWidget(lw)
+        plw_row = QHBoxLayout()
+        ok_b = QPushButton("选择文件")
+        back_b = QPushButton("返回")
+        for b in (ok_b, back_b):
+            b.setStyleSheet("background-color: #444444; color: white; font-size: 14px; padding: 6px; border: none; border-radius: 6px;")
+        plw_row.addWidget(ok_b)
+        plw_row.addStretch()
+        plw_row.addWidget(back_b)
+        pl.addLayout(plw_row)
+
+        def pick_file():
+            idx = lw.currentRow()
+            if 0 <= idx < len(proc_list):
+                exe = proc_list[idx].info.get('exe', '')
+                start_dir = os.path.dirname(exe) if exe and os.path.exists(exe) else ''
+                fn = QFileDialog.getOpenFileName(proc_dlg, "手动选择要添加的游戏文件", start_dir, "可执行文件 (*.exe *.lnk)")[0]
+                if fn:
+                    sel["dir"] = os.path.dirname(fn)
+                    proc_dlg.accept()
+                    dlg.accept()
+        ok_b.clicked.connect(pick_file)
+        back_b.clicked.connect(proc_dlg.reject)
+        proc_dlg.exec_()
+
+    proc_btn.clicked.connect(do_proc)
+    manual_btn.clicked.connect(do_manual)
+    cancel_btn.clicked.connect(dlg.reject)
+    dlg.exec_()
+    return sel["dir"]
+
+
+def mao_resolve_custom_path(path_with_vars, prompt_if_missing=True, suggested_folder=None, parent=None, scale_factor=1.0, prompt_func=None):
+    expanded = os.path.expandvars(path_with_vars)
+    if '%' not in expanded:
+        return expanded
+    cfg = mao_load_config()
+    custom = cfg.get('custom_vars', {})
+    for k, v in custom.items():
+        if k in path_with_vars:
+            return path_with_vars.replace(k, v)
+    if prompt_if_missing:
+        m = re.search(r"(%[^%]+%)", path_with_vars)
+        varname = m.group(1) if m else None
+        if varname:
+            if prompt_func is not None:
+                sel_dir = prompt_func(varname, suggested_folder=suggested_folder)
+            else:
+                sel_dir = mao_prompt_user_select_folder_for_var(varname, suggested_folder=suggested_folder, parent=parent, scale_factor=scale_factor)
+            if sel_dir:
+                cfg = mao_load_config()
+                custom = cfg.get('custom_vars', {})
+                custom[varname] = sel_dir
+                cfg['custom_vars'] = custom
+                mao_save_config(cfg)
+                return path_with_vars.replace(varname, sel_dir)
+            return None
+    return expanded
+
+
+def _mao_walk_remote(client, path, files):
+    """递归收集远程 zip 文件相对路径（相对 maobackup/）"""
+    if not path.endswith('/'):
+        path = path + '/'
+    parts = path.strip('/').split('/')
+    if len(parts) >= 2 and parts[-1] == parts[-2]:
+        return
+    for entry in client.list(path):
+        if not entry.path or entry.path in ('.', './'):
+            continue
+        entry_name = entry.path.rstrip('/').split('/')[-1]
+        if not entry_name:
+            continue
+        next_path = path + entry_name
+        if entry.is_dir:
+            _mao_walk_remote(client, next_path, files)
+        elif next_path.endswith('.zip'):
+            rel_path = next_path[len('maobackup/'):]
+            files.append(rel_path)
+
+
+def _mao_mtime_to_ts(m):
+    if m is None:
+        return 0
+    try:
+        return m.timestamp()
+    except Exception:
+        try:
+            return time.mktime(m.timetuple())
+        except Exception:
+            return 0
+
+
+# WebDAV 列表缓存：{cache_key: (expire_at_monotonic, value)}
+# cache_key: ('dirs',) -> value=([], dirs)   cache_key: ('files', game_name) -> value=(files, [])
+_REMOTE_LIST_CACHE = {}
+_REMOTE_LIST_DIRS_TTL = 30.0   # 远程游戏列表（dirs）缓存秒数
+_REMOTE_LIST_FILES_TTL = 15.0  # 单个游戏的备份文件列表缓存秒数
+_REMOTE_LIST_LOCK = None  # 延迟初始化 threading.Lock
+
+
+def _remote_cache_get(key):
+    global _REMOTE_LIST_LOCK
+    if _REMOTE_LIST_LOCK is None:
+        import threading as _th
+        _REMOTE_LIST_LOCK = _th.Lock()
+    with _REMOTE_LIST_LOCK:
+        rec = _REMOTE_LIST_CACHE.get(key)
+    if not rec:
+        return None
+    exp, val = rec
+    try:
+        import time as _tm
+        if _tm.monotonic() >= exp:
+            return None
+    except Exception:
+        return None
+    return val
+
+
+def _remote_cache_set(key, value, ttl):
+    global _REMOTE_LIST_LOCK
+    if _REMOTE_LIST_LOCK is None:
+        import threading as _th
+        _REMOTE_LIST_LOCK = _th.Lock()
+    import time as _tm
+    with _REMOTE_LIST_LOCK:
+        _REMOTE_LIST_CACHE[key] = (_tm.monotonic() + ttl, value)
+
+
+def _remote_cache_clear(game_name=None):
+    """手动失效缓存。game_name=None 清空全部，否则只清该游戏的文件缓存。"""
+    global _REMOTE_LIST_LOCK
+    if _REMOTE_LIST_LOCK is None:
+        import threading as _th
+        _REMOTE_LIST_LOCK = _th.Lock()
+    with _REMOTE_LIST_LOCK:
+        if game_name is None:
+            _REMOTE_LIST_CACHE.clear()
+            return
+        _REMOTE_LIST_CACHE.pop(('files', game_name), None)
+
+
+def mao_list_remote_backups(game_name=None, log=print, use_cache=True):
+    """返回 (files, dirs)：game_name 给定时 files 为该游戏下 zip 相对路径(降序)；
+    否则 dirs 为 [(游戏名, mtime)] 降序列表。WebDAV 未配置时返回 (None, None)。
+    use_cache=False 强制跳过缓存（用于刚刚上传/下载后刷新）。"""
+    cache_key = ('files', game_name) if game_name else ('dirs',)
+    if use_cache:
+        cached = _remote_cache_get(cache_key)
+        if cached is not None:
+            return cached
+    client = mao_get_opendal_operator()
+    if not client:
+        return (None, None)
+    files = []
+    dirs = []
+    if game_name:
+        _mao_walk_remote(client, f"maobackup/{game_name}/", files)
+        files.sort(reverse=True)
+        value = (files, [])
+        _remote_cache_set(cache_key, value, _REMOTE_LIST_FILES_TTL)
+        return value
+    try:
+        entries = client.list("maobackup/")
+        for entry in entries:
+            if not entry.path or entry.path in ('.', './'):
+                continue
+            entry_name = entry.path.rstrip('/').split('/')[-1]
+            if not entry_name or entry_name == "maobackup":
+                continue
+            if entry.is_dir:
+                mtime = getattr(entry, 'last_modified', None)
+                if mtime is None:
+                    try:
+                        stat_info = client.stat("maobackup/" + entry_name)
+                        mtime = stat_info.last_modified if stat_info else None
+                    except Exception:
+                        mtime = None
+                dirs.append((entry_name, mtime))
+    except Exception as e:
+        log(f"获取远程游戏列表失败: {e}")
+    dirs.sort(key=lambda x: _mao_mtime_to_ts(x[1]), reverse=True)
+    value = ([], dirs)
+    _remote_cache_set(cache_key, value, _REMOTE_LIST_DIRS_TTL)
+    return value
+
+
+def mao_list_extra_backups():
+    """返回 extra_backup 目录下 zip 文件名降序列表"""
+    if not os.path.exists(MAO_EXTRA_BACKUP_DIR):
+        return []
+    try:
+        files = [f for f in os.listdir(MAO_EXTRA_BACKUP_DIR) if f.lower().endswith('.zip')]
+    except Exception:
+        return []
+    files.sort(reverse=True)
+    return files
+
+
+def mao_perform_backup(path, game_name, remark, backup_path, log=print):
+    """执行备份：保留父目录，记录完整路径，打包并上传到 WebDAV。返回 True/False。"""
+    try:
+        operator = mao_get_opendal_operator()
+        if operator is None:
+            log("WebDAV 客户端初始化失败")
+            return False
+        timestamp = datetime.now().strftime("%Y %m%d %H%M%S")
+        system = platform.node()
+        if remark:
+            backup_name = f"({remark}){game_name}-{timestamp}-{system}.zip"
+        else:
+            backup_name = f"{game_name}-{timestamp}-{system}.zip"
+        remote_path = f"{backup_path}/{backup_name}".replace("\\", "/")
+        local_zip = os.path.join(program_directory, "temp_backup.zip")
+        real_path = mao_resolve_custom_path(path, prompt_if_missing=False)
+        if real_path is None:
+            real_path = path
+        parent_dir = os.path.dirname(real_path)
+        dir_name = os.path.basename(real_path)
+        backup_path_file = os.path.join(parent_dir, "backup_path.txt")
+        env_map = mao_get_env_map()
+
+        def replace_with_env_vars(p):
+            for var, val in sorted(env_map.items(), key=lambda x: -len(str(x[1]))):
+                if val and p.startswith(val):
+                    return p.replace(val, var, 1)
+            return p
+
+        cfg = mao_load_config()
+        custom = cfg.get('custom_vars', {})
+        custom_var_used = None
+        for var_name, var_path in custom.items():
+            if os.path.normpath(var_path).lower() == os.path.normpath(path).lower():
+                custom_var_used = var_name
+                break
+        if custom_var_used:
+            path_for_backup = custom_var_used
+        else:
+            path_for_backup = replace_with_env_vars(path)
+        try:
+            with open(backup_path_file, "w", encoding="utf-8") as f:
+                f.write(path_for_backup)
+        except Exception as e:
+            log(f"写入 backup_path.txt 失败: {e}")
+            return False
+        with zipfile.ZipFile(local_zip, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, dirs_, files_ in os.walk(real_path):
+                for file_ in files_:
+                    file_path = os.path.join(root, file_)
+                    arcname = os.path.join(dir_name, os.path.relpath(file_path, real_path))
+                    zipf.write(file_path, arcname)
+            zipf.write(backup_path_file, "backup_path.txt")
+        try:
+            os.remove(backup_path_file)
+        except Exception:
+            pass
+        log(f"正在上传备份文件: {remote_path}")
+        with open(local_zip, "rb") as f:
+            data = f.read()
+        if operator.write(remote_path, data):
+            log("备份完成")
+            try:
+                os.remove(local_zip)
+            except Exception:
+                pass
+            return True
+        else:
+            log("备份失败：上传失败")
+            try:
+                os.remove(local_zip)
+            except Exception:
+                pass
+            return False
+    except Exception as e:
+        log(f"备份失败：{e}")
+        return False
+
+
+def mao_do_backup(game_name, path, log=print):
+    log(f"自动备份: {game_name} {path}")
+    backup_path = f"maobackup/{game_name}"
+    return mao_perform_backup(path, game_name, None, backup_path, log=log)
+
+
+def mao_restore_backup(entry, game, log=print, confirm=None, parent=None, scale_factor=1.0, prompt_func=None):
+    """下载并还原一个远程 zip 备份。entry: 相对 maobackup/ 的路径；game: 游戏名。"""
+    parts = entry.split('/')
+    if len(parts) < 2:
+        log("错误: 无效的备份文件路径")
+        return False
+    game = parts[0]
+    zipname = '/'.join(parts[1:])
+    remote_path = f"maobackup/{entry}" if not entry.startswith("maobackup/") else entry
+    client = mao_get_opendal_operator()
+    if not client:
+        log("错误: WebDAV 未配置")
+        return False
+    local_zip = os.path.join(program_directory, os.path.basename(zipname))
+    if not mao_download_webdav_file(remote_path, local_zip, log):
+        log(f"错误: 下载失败: {remote_path}")
+        return False
+    try:
+        with zipfile.ZipFile(local_zip, 'r') as z:
+            path_txt = z.read("backup_path.txt").decode("utf-8").strip()
+            all_names = z.namelist()
+            dir_names = [n.split('/')[0] for n in all_names if '/' in n and not n.startswith('__MACOSX')]
+            suggested = dir_names[0] if dir_names else None
+            restored_path = mao_resolve_custom_path(path_txt, prompt_if_missing=True, suggested_folder=suggested, parent=parent, scale_factor=scale_factor, prompt_func=prompt_func)
+            if restored_path is None:
+                log("用户取消了自定义变量选择，还原中止。")
+                return False
+            if not dir_names:
+                log("错误: 备份包中未找到存档目录")
+                return False
+            archive_dir = os.path.basename(restored_path)
+            total_size = 0
+            file_count = 0
+            SIZE_LIMIT = 50 * 1024 * 1024
+            oversized = False
+            for member in all_names:
+                if member.startswith(archive_dir + "/") and not member.endswith("/"):
+                    info = z.getinfo(member)
+                    total_size += info.file_size
+                    file_count += 1
+                    if total_size > SIZE_LIMIT:
+                        oversized = True
+                        break
+            if oversized:
+                log("提示: 远程备份包中存档总大小超过50 MB，已停止统计。")
+            try:
+                info = z.getinfo("backup_path.txt")
+                zip_time = time.strftime('%Y-%m-%d %H:%M:%S', time.struct_time((info.date_time[0], info.date_time[1], info.date_time[2], info.date_time[3], info.date_time[4], info.date_time[5], 0, 0, -1)))
+            except Exception:
+                zip_time = "N/A"
+            cfg = mao_load_config()
+            games = cfg.get("games", [])
+            found = False
+            for g in games:
+                if g.get("name") == game and g.get("path") == restored_path:
+                    found = True
+                    break
+            if not found and game != "maobackup":
+                games.append({"name": game, "path": restored_path})
+                cfg["games"] = games
+                mao_save_config(cfg)
+            msg = (f"存档目录名: {archive_dir}\n文件数: {file_count}\n总大小: {total_size/1024:.2f} KB\n"
+                   f"备份时间: {zip_time}\n原路径: {restored_path}\n\n是否确认还原？")
+            if confirm and not confirm(msg):
+                log("用户取消了还原。")
+                return False
+            save_dir = os.path.join(os.path.dirname(restored_path), archive_dir)
+            # 先备份当前存档到 extra_backup
+            backup_dir = MAO_EXTRA_BACKUP_DIR
+            if not os.path.exists(backup_dir):
+                os.makedirs(backup_dir)
+            backup_time = time.strftime('%Y%m%d_%H%M%S')
+            backup_zip_path = os.path.join(backup_dir, f"{archive_dir}_{backup_time}.zip")
+            if os.path.exists(restored_path) and os.path.isdir(restored_path):
+                backup_path_txt = os.path.join(os.path.dirname(restored_path), "backup_path.txt")
+                try:
+                    with open(backup_path_txt, "w", encoding="utf-8") as f:
+                        f.write(restored_path)
+                    with zipfile.ZipFile(backup_zip_path, 'w', zipfile.ZIP_DEFLATED) as backup_zip:
+                        for root_, dirs_, files_ in os.walk(restored_path):
+                            for file_ in files_:
+                                file_path_ = os.path.join(root_, file_)
+                                arcname_ = os.path.relpath(file_path_, os.path.dirname(restored_path))
+                                backup_zip.write(file_path_, arcname_)
+                        backup_zip.write(backup_path_txt, "backup_path.txt")
+                except Exception as e:
+                    log(f"备份原存档目录失败: {e}")
+                    return False
+                finally:
+                    try:
+                        os.remove(backup_path_txt)
+                    except Exception:
+                        pass
+            # 清空目标目录
+            if os.path.exists(restored_path) and os.path.isdir(restored_path):
+                try:
+                    for root_, dirs_, files_ in os.walk(restored_path, topdown=False):
+                        for file_ in files_:
+                            try:
+                                os.remove(os.path.join(root_, file_))
+                            except Exception as e:
+                                log(f"删除文件失败: {e}")
+                        for dir_ in dirs_:
+                            try:
+                                shutil.rmtree(os.path.join(root_, dir_))
+                            except Exception as e:
+                                log(f"删除目录失败: {e}")
+                except Exception as e:
+                    log(f"清空目录失败: {e}")
+                    return False
+            # 解压存档目录到目标路径
+            for member in all_names:
+                if member.startswith(archive_dir + "/"):
+                    z.extract(member, os.path.dirname(restored_path))
+        log(f"还原完成: 存档已还原到: {restored_path}")
+        return True
+    except Exception as e:
+        log(f"还原失败: {e}")
+        return False
+    finally:
+        try:
+            os.remove(local_zip)
+        except Exception:
+            pass
+
+
+def mao_restore_extra_backup(filename, log=print, confirm=None, parent=None, scale_factor=1.0, prompt_func=None):
+    """还原 extra_backup 目录下的某个 zip"""
+    local_zip = os.path.join(MAO_EXTRA_BACKUP_DIR, filename)
+    if not os.path.exists(local_zip):
+        log(f"错误: 未找到 {filename}")
+        return False
+    try:
+        with zipfile.ZipFile(local_zip, 'r') as z:
+            path_txt = z.read("backup_path.txt").decode("utf-8").strip()
+            all_names = z.namelist()
+            dir_names = [n.split('/')[0] for n in all_names if '/' in n and not n.startswith('__MACOSX')]
+            suggested = dir_names[0] if dir_names else None
+            restored_path = mao_resolve_custom_path(path_txt, prompt_if_missing=True, suggested_folder=suggested, parent=parent, scale_factor=scale_factor, prompt_func=prompt_func)
+            if restored_path is None:
+                log("用户取消了自定义变量选择，还原中止。")
+                return False
+            if not dir_names:
+                log("错误: 备份包中未找到存档目录")
+                return False
+            archive_dir = os.path.basename(restored_path)
+            total_size = 0
+            file_count = 0
+            for member in all_names:
+                if member.startswith(archive_dir + "/") and not member.endswith("/"):
+                    total_size += z.getinfo(member).file_size
+                    file_count += 1
+            try:
+                info = z.getinfo("backup_path.txt")
+                zip_time = time.strftime('%Y-%m-%d %H:%M:%S', time.struct_time((info.date_time[0], info.date_time[1], info.date_time[2], info.date_time[3], info.date_time[4], info.date_time[5], 0, 0, -1)))
+            except Exception:
+                zip_time = "N/A"
+            msg = (f"存档目录名: {archive_dir}\n文件数: {file_count}\n总大小: {total_size/1024:.2f} KB\n"
+                   f"备份时间: {zip_time}\n原路径: {restored_path}\n\n是否确认还原？")
+            if confirm and not confirm(msg):
+                log("用户取消了还原。")
+                return False
+            if os.path.exists(restored_path) and os.path.isdir(restored_path):
+                try:
+                    for root_, dirs_, files_ in os.walk(restored_path, topdown=False):
+                        for file_ in files_:
+                            try:
+                                os.remove(os.path.join(root_, file_))
+                            except Exception as e:
+                                log(f"删除文件失败: {e}")
+                        for dir_ in dirs_:
+                            try:
+                                shutil.rmtree(os.path.join(root_, dir_))
+                            except Exception as e:
+                                log(f"删除目录失败: {e}")
+                except Exception as e:
+                    log(f"清空目录失败: {e}")
+                    return False
+            for member in all_names:
+                if member.startswith(archive_dir + "/"):
+                    z.extract(member, os.path.dirname(restored_path))
+        log(f"还原完成: 存档已还原到: {restored_path}")
+        return True
+    except Exception as e:
+        log(f"还原失败: {e}")
+        return False
+
+
+def mao_auto_backup(game_name, log=print, parent=None, scale_factor=1.0, prompt_func=None):
+    """自动备份：只执行备份（不还原），检测存档时间戳判断是否被下载替换覆盖。
+    若本地存档最新修改时间早于远程备份时间，判定为下载存档替换（本地未产生新存档），
+    不询问用户，直接返回 False（自动备份流程以错误态退出）。
+    返回 True=备份成功，False=跳过/失败（显示错误态）。"""
+    try:
+        # 断网检测：未联网直接跳过，不产生无意义失败/下载
+        is_connected = ctypes.windll.wininet.InternetGetConnectedState(None, 0)
+        if not is_connected:
+            log("自动备份: 未检测到网络连接，跳过备份")
+            return False
+    except Exception:
+        pass
+    try:
+        cfg = mao_load_config()
+        games = cfg.get("games", [])
+    except Exception:
+        games = []
+    game = next((g for g in games if g.get("name") == game_name), None)
+    local_path = game.get("path") if game else None
+    if not local_path:
+        log(f"自动备份: {game_name} 无备份路径，跳过")
+        return False
+
+    client = mao_get_opendal_operator()
+    if not client:
+        log("错误: WebDAV 未配置")
+        return False
+
+    # 获取远程最新备份时间
+    files = []
+    _mao_walk_remote(client, f"maobackup/{game_name}/", files)
+    remote_time = 0
+    if files:
+        files.sort(reverse=True)
+        tmp_zip = tempfile.mktemp(suffix=".zip")
+        remote_path = f"maobackup/{files[0]}"
+        if mao_download_webdav_file(remote_path, tmp_zip, log):
+            try:
+                with zipfile.ZipFile(tmp_zip, 'r') as z:
+                    info = z.getinfo("backup_path.txt")
+                    remote_time = time.mktime((info.date_time[0], info.date_time[1], info.date_time[2], info.date_time[3], info.date_time[4], info.date_time[5], 0, 0, -1))
+            except Exception:
+                pass
+            try:
+                os.remove(tmp_zip)
+            except Exception:
+                pass
+
+    # 获取本地存档最新修改时间
+    real_path = mao_resolve_custom_path(local_path, prompt_if_missing=False) or local_path
+    local_latest_mtime = 0
+    if os.path.exists(real_path):
+        for root_, dirs_, files_ in os.walk(real_path):
+            for file_ in files_:
+                try:
+                    mtime = os.path.getmtime(os.path.join(root_, file_))
+                    if mtime > local_latest_mtime:
+                        local_latest_mtime = mtime
+                except Exception:
+                    pass
+
+    if remote_time > 0 and local_latest_mtime < remote_time:
+        # 本地存档比远程旧 → 判定为下载替换，无新存档产生
+        log("自动备份: 本地存档时间早于远程备份，判定为下载替换，跳过备份")
+        return False
+
+    log(f"自动备份: {game_name} {local_path}")
+    backup_path = f"maobackup/{game_name}"
+    return mao_perform_backup(local_path, game_name, None, backup_path, log=log)
+
+
+def mao_quick_action(game_name, log=print, confirm=None, parent=None, scale_factor=1.0, prompt_func=None):
+    """比较本地与远程时间戳，自动决定备份或还原"""
+    try:
+        cfg = mao_load_config()
+        games = cfg.get("games", [])
+    except Exception:
+        games = []
+    game = next((g for g in games if g.get("name") == game_name), None)
+    local_path = game.get("path") if game else None
+    client = mao_get_opendal_operator()
+    if not client:
+        log("错误: WebDAV 未配置，请在 设置→云端存档 中配置账号。")
+        return False
+    files = []
+    _mao_walk_remote(client, f"maobackup/{game_name}/", files)
+    if not files:
+        if local_path:
+            log("无远程备份，自动执行备份...")
+            return mao_do_backup(game_name, local_path, log=log)
+        else:
+            log("无远程备份，且本地未找到路径，请先在「云端存档」中添加该游戏路径。")
+            return False
+    files.sort(reverse=True)
+    latest_zip = files[0]
+    remote_path = f"maobackup/{latest_zip}"
+    tmp_zip = tempfile.mktemp(suffix=".zip")
+    if not mao_download_webdav_file(remote_path, tmp_zip, log):
+        log(f"下载远程备份失败: {remote_path}")
+        return False
+    try:
+        with zipfile.ZipFile(tmp_zip, 'r') as z:
+            try:
+                path_txt = z.read("backup_path.txt").decode("utf-8").strip()
+                all_names_tmp = z.namelist()
+                dir_names_tmp = [n.split('/')[0] for n in all_names_tmp if '/' in n and not n.startswith('__MACOSX')]
+                suggested = dir_names_tmp[0] if dir_names_tmp else None
+                restored_path = mao_resolve_custom_path(path_txt, prompt_if_missing=True, suggested_folder=suggested, parent=parent, scale_factor=scale_factor, prompt_func=prompt_func)
+            except Exception:
+                restored_path = None
+            local_latest_mtime = 0
+            if restored_path and os.path.exists(restored_path):
+                for root_, dirs_, files_ in os.walk(restored_path):
+                    for file_ in files_:
+                        try:
+                            mtime = os.path.getmtime(os.path.join(root_, file_))
+                            if mtime > local_latest_mtime:
+                                local_latest_mtime = mtime
+                        except Exception:
+                            pass
+            elif local_path and os.path.exists(local_path):
+                for root_, dirs_, files_ in os.walk(local_path):
+                    for file_ in files_:
+                        try:
+                            mtime = os.path.getmtime(os.path.join(root_, file_))
+                            if mtime > local_latest_mtime:
+                                local_latest_mtime = mtime
+                        except Exception:
+                            pass
+            try:
+                info = z.getinfo("backup_path.txt")
+                remote_time = time.mktime((info.date_time[0], info.date_time[1], info.date_time[2], info.date_time[3], info.date_time[4], info.date_time[5], 0, 0, -1))
+                zip_time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.struct_time((info.date_time[0], info.date_time[1], info.date_time[2], info.date_time[3], info.date_time[4], info.date_time[5], 0, 0, -1)))
+            except Exception:
+                remote_time = 0
+                zip_time_str = "N/A"
+            log(f"本地最新修改时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(local_latest_mtime)) if local_latest_mtime else '无'}")
+            log(f"远程备份时间: {zip_time_str}")
+            if local_latest_mtime > remote_time:
+                if restored_path:
+                    log("本地较新，执行备份...")
+                    return mao_do_backup(game_name, restored_path, log=log)
+                elif local_path:
+                    log("本地较新，执行备份...")
+                    return mao_do_backup(game_name, local_path, log=log)
+                else:
+                    log("未找到本地路径，无法备份")
+                    return False
+            else:
+                log("远程较新，执行还原...")
+                return mao_restore_backup(latest_zip, game_name, log=log, confirm=confirm, parent=parent, scale_factor=scale_factor, prompt_func=prompt_func)
+    finally:
+        try:
+            os.remove(tmp_zip)
+        except Exception:
+            pass
+
+
+def mao_quick_restore(game_name, log=print, confirm=None, parent=None, scale_factor=1.0, prompt_func=None):
+    """直接还原指定游戏的最新远程备份"""
+    client = mao_get_opendal_operator()
+    if not client:
+        log("错误: WebDAV 未配置，请在 设置→云端存档 中配置账号。")
+        return False
+    files = []
+    _mao_walk_remote(client, f"maobackup/{game_name}/", files)
+    if not files:
+        log("错误: 无远程备份，无法还原。")
+        return False
+    files.sort(reverse=True)
+    latest_zip = files[0]
+    log(f"自动还原: {latest_zip}")
+    return mao_restore_backup(latest_zip, game_name, log=log, confirm=confirm, parent=parent, scale_factor=scale_factor, prompt_func=prompt_func)
+
+
+class WatchdogBridge(QObject):
+    """将 watchdog 线程内的目录变化通过 Qt 信号传到主线程"""
+    dir_changed = pyqtSignal(str)
+
+
+class _QtWatchdogHandler(FileSystemEventHandler):
+    def __init__(self, bridge):
+        super().__init__()
+        self.bridge = bridge
+        self.directories = set()
+
+    def _add(self, src_path):
+        directory = os.path.dirname(src_path)
+        if directory not in self.directories:
+            self.directories.add(directory)
+            self.bridge.dir_changed.emit(directory)
+
+    def on_created(self, event):
+        self._add(event.src_path)
+
+    def on_deleted(self, event):
+        self._add(event.src_path)
+
+    def on_modified(self, event):
+        self._add(event.src_path)
+
+    def on_moved(self, event):
+        self._add(event.dest_path)
+
+
+class BackupProgressDialog(QWidget):
+    """非模态、不抢焦点的实时进度日志窗口，支持内联确认（不弹模态框）"""
+
+    log_signal = pyqtSignal(str)
+    confirm_signal = pyqtSignal(str, object)
+    folder_prompt_signal = pyqtSignal(str, str, object)  # varname, suggested_folder, event
+    done_signal = pyqtSignal(bool)
+
+    def __init__(self, title, scale_factor=1.0, parent=None):
+        super().__init__(parent)
+        self.scale_factor = scale_factor
+        self.setWindowTitle(title)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
+        self.setStyleSheet("background-color: #2E2E2E; border-radius: 8px;")
+        self.setFixedSize(int(620 * scale_factor), int(440 * scale_factor))
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(int(16 * scale_factor), int(16 * scale_factor), int(16 * scale_factor), int(16 * scale_factor))
+        layout.setSpacing(int(10 * scale_factor))
+        self.title_label = QLabel(title)
+        self.title_label.setStyleSheet("color: #00bfff; font-size: 22px; border: none; background: transparent;")
+        layout.addWidget(self.title_label)
+        self.text_edit = QTextEdit()
+        self.text_edit.setReadOnly(True)
+        self.text_edit.setStyleSheet("background-color: #1c1c1c; color: #e0e0e0; border: 1px solid #444; border-radius: 6px; font-size: 15px;")
+        layout.addWidget(self.text_edit)
+        self.confirm_widget = QWidget()
+        cl = QVBoxLayout(self.confirm_widget)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(6)
+        self.confirm_label = QLabel("")
+        self.confirm_label.setWordWrap(True)
+        self.confirm_label.setStyleSheet("color: #ffd34d; font-size: 15px; border: none; background: transparent;")
+        cl.addWidget(self.confirm_label)
+        cb = QHBoxLayout()
+        cb.setSpacing(8)
+        self.confirm_yes = QPushButton("确认")
+        self.confirm_no = QPushButton("取消")
+        for b in (self.confirm_yes, self.confirm_no):
+            b.setStyleSheet("background-color: #2E7D9B; color: white; font-size: 15px; padding: 6px 16px; border: none; border-radius: 6px;")
+        cb.addStretch()
+        cb.addWidget(self.confirm_yes)
+        cb.addWidget(self.confirm_no)
+        self.confirm_yes.clicked.connect(self._on_confirm_yes)
+        self.confirm_no.clicked.connect(self._on_confirm_no)
+        cl.addLayout(cb)
+        self.confirm_widget.hide()
+        layout.addWidget(self.confirm_widget)
+        self.close_btn = QPushButton("关闭")
+        self.close_btn.setEnabled(False)
+        self.close_btn.setStyleSheet("background-color: #444; color: white; font-size: 15px; padding: 8px; border: none; border-radius: 6px;")
+        self.close_btn.clicked.connect(self.close)
+        layout.addWidget(self.close_btn)
+        self.log_signal.connect(self._on_log)
+        self.confirm_signal.connect(self._on_confirm)
+        self.folder_prompt_signal.connect(self._on_folder_prompt)
+        self.done_signal.connect(self._on_done)
+        self._confirm_event = None
+        self._confirm_result = False
+        self._folder_result = None
+        self._folder_event = None
+
+    def append_log(self, msg):
+        self.log_signal.emit(str(msg))
+
+    @pyqtSlot(str)
+    def _on_log(self, msg):
+        self.text_edit.append(msg)
+
+    def ask_confirm(self, message):
+        """供工作线程调用，阻塞直到用户点击确认/取消"""
+        ev = threading.Event()
+        self._confirm_result = False
+        self.confirm_signal.emit(message, ev)
+        ev.wait()
+        return self._confirm_result
+
+    @pyqtSlot(str, object)
+    def _on_confirm(self, message, event):
+        # 运行在 GUI 线程：使用项目中经验证的 ConfirmDialog（StaysOnTopHint + Tool）
+        # 弹出真正的顶层询问框，而不是嵌入在进度窗口内部，避免被遮挡就"没有弹窗"
+        try:
+            self.show()
+            self.raise_()
+        except Exception:
+            pass
+        self._confirm_event = event
+        self._confirm_result = False
+        try:
+            # ConfirmDialog 本身带 WindowStaysOnTopHint | Tool，并经项目用户流程验证始终可见
+            dlg = ConfirmDialog(message, scale_factor=self.scale_factor, parent=None)
+            try:
+                dlg.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+            except Exception:
+                pass
+            # 模态 exec_：只要进程在跑，一定会显示在最顶层并等待用户点击
+            ok = dlg.exec_() == QDialog.Accepted
+            self._confirm_result = bool(ok)
+        except Exception as e:
+            print(f"[BackupProgressDialog] _on_confirm dialog 失败: {e}", file=sys.stderr)
+            self._confirm_result = False
+        # 隐藏内嵌的确认区（旧逻辑兼容），避免视觉残留
+        try:
+            self.confirm_widget.hide()
+        except Exception:
+            pass
+        if self._confirm_event is not None:
+            ev = self._confirm_event
+            self._confirm_event = None
+            ev.set()
+
+    def ask_folder(self, varname, suggested_folder=None):
+        """供工作线程调用，在主线程弹出目录选择对话框，阻塞直到用户完成"""
+        ev = threading.Event()
+        self._folder_result = None
+        self._folder_event = ev
+        self.folder_prompt_signal.emit(varname, suggested_folder or "", ev)
+        ev.wait()
+        return self._folder_result
+
+    @pyqtSlot(str, str, object)
+    def _on_folder_prompt(self, varname, suggested_folder, event):
+        # 运行在 GUI 线程：确保窗口可见并置顶
+        try:
+            self.show()
+            self.raise_()
+            self.activateWindow()
+        except Exception:
+            pass
+        self._folder_event = event
+        try:
+            result = mao_prompt_user_select_folder_for_var(
+                varname,
+                suggested_folder=(suggested_folder or None),
+                parent=self,
+                scale_factor=self.scale_factor,
+            )
+        except Exception:
+            result = None
+        self._folder_result = result
+        if self._folder_event is not None:
+            self._folder_event.set()
+            self._folder_event = None
+
+    def _on_confirm_yes(self):
+        self._confirm_result = True
+        self.confirm_widget.hide()
+        if self._confirm_event is not None:
+            self._confirm_event.set()
+
+    def _on_confirm_no(self):
+        self._confirm_result = False
+        self.confirm_widget.hide()
+        if self._confirm_event is not None:
+            self._confirm_event.set()
+
+    def mark_done(self, success=True):
+        self.done_signal.emit(success)
+
+    @pyqtSlot(bool)
+    def _on_done(self, success):
+        self.close_btn.setEnabled(True)
+        if success:
+            self.append_log("\n操作已完成。")
+            try:
+                self.title_label.setStyleSheet("color: #00bfff; font-size: 22px; border: none; background: transparent;")
+            except Exception:
+                pass
+        else:
+            # 取消 / 失败：切换为错误态样式
+            self.append_log("\n操作已取消或存在错误。")
+            try:
+                self.title_label.setStyleSheet("color: #ff8080; font-size: 22px; border: none; background: transparent; font-weight: bold;")
+                self.setStyleSheet("background-color: #2a2222; border-radius: 8px;")
+            except Exception:
+                pass
+
+
+class CloudBackupIslandWidget(QWidget):
+    """灵动岛样式的云端存档进度提示（屏幕顶端中央，可折叠，支持自动关闭）。"""
+
+    log_signal = pyqtSignal(str)
+    confirm_signal = pyqtSignal(str, object)
+    folder_prompt_signal = pyqtSignal(str, str, object)
+    done_signal = pyqtSignal(bool)
+    progress_signal = pyqtSignal(int, int)  # value, max
+    request_expand = pyqtSignal()
+
+    def __init__(self, title, scale_factor=1.0, parent=None):
+        super().__init__(parent)
+        self.scale_factor = scale_factor
+        self.base_title = title or self.tr("云端存档")
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint | Qt.WindowDoesNotAcceptFocus)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
+        self.setCursor(Qt.PointingHandCursor)
+        # 整体透明度：让灵动岛在其他内容之上仍能适度透出背景
+        self.setWindowOpacity(0.65)
+
+        # 折叠 / 展开尺寸
+        self._collapsed_h = int(86 * scale_factor)
+        self._expanded_h = int(500 * scale_factor)
+        self._island_w = int(620 * scale_factor)
+        self.setFixedWidth(self._island_w)
+
+        # 屏幕顶部中央定位
+        screen = QDesktopWidget().screenGeometry()
+        self.move(screen.center().x() - self._island_w // 2, int(14 * scale_factor))
+
+        self._expanded = False
+        self._error_state = False
+        self._done_state = False
+        self._auto_close_timer = None
+
+        # 圆角背景 & 边框（通过 QSS，整体用一张卡片承载）
+        self.card = QFrame(self)
+        self.card.setObjectName("islandCard")
+        # 先只设置卡片自身样式，其他控件稍后在 _update_card_stylesheet 中统一设置
+        radius = int(22 * self.scale_factor)
+        radius_bot = int(18 * self.scale_factor)
+        self.card.setStyleSheet(f"""
+            #islandCard {{
+                background-color: #1c1c1c;
+                border: 2px solid #3a3a3a;
+                border-top-left-radius: {radius}px;
+                border-top-right-radius: {radius}px;
+                border-bottom-left-radius: {radius_bot}px;
+                border-bottom-right-radius: {radius_bot}px;
+            }}
+        """)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        outer.addWidget(self.card)
+
+        card_layout = QVBoxLayout(self.card)
+        card_layout.setContentsMargins(int(18 * scale_factor), int(14 * scale_factor), int(18 * scale_factor), int(10 * scale_factor))
+        card_layout.setSpacing(int(6 * scale_factor))
+
+        # ---------- 折叠态始终可见的部分 ----------
+        # 第一行：标题文本（粗略进度）
+        self.title_label = QLabel(self.base_title)
+        self.title_label.setStyleSheet("color: #ffffff; font-size: 18px; background: transparent; border: none;")
+        self.title_label.setTextFormat(Qt.PlainText)
+        self.title_label.setWordWrap(False)
+        f = self.title_label.font()
+        f.setBold(True)
+        self.title_label.setFont(f)
+        card_layout.addWidget(self.title_label)
+
+        # 底部进度条
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setFixedHeight(int(6 * scale_factor))
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar { background-color: #3a3a3a; border: none; border-radius: 3px; }
+            QProgressBar::chunk { background-color: #00bfff; border-radius: 3px; }
+        """)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        card_layout.addWidget(self.progress_bar)
+
+        # ---------- 展开态才显示的部分（用容器包裹） ----------
+        self.expand_widget = QWidget()
+        self.expand_widget.setStyleSheet("background: transparent;")
+        exp_l = QVBoxLayout(self.expand_widget)
+        exp_l.setContentsMargins(0, int(10 * scale_factor), 0, 0)
+        exp_l.setSpacing(int(8 * scale_factor))
+
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setStyleSheet("QTextEdit { background-color: #1c1c1c; color: #e0e0e0; border: 1px solid #444; border-radius: 6px; font-size: 13px; }")
+        exp_l.addWidget(self.log_text, 1)
+
+        # 确认区域（默认隐藏）
+        self.confirm_widget = QWidget()
+        cl = QVBoxLayout(self.confirm_widget)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(6)
+        self.confirm_label = QLabel("")
+        self.confirm_label.setWordWrap(True)
+        self.confirm_label.setStyleSheet("color: #ffd34d; font-size: 14px; border: none; background: transparent;")
+        cl.addWidget(self.confirm_label)
+        cb = QHBoxLayout()
+        cb.setSpacing(8)
+        self.confirm_yes = QPushButton(self.tr("确认"))
+        self.confirm_no = QPushButton(self.tr("取消"))
+        for b in (self.confirm_yes, self.confirm_no):
+            b.setCursor(Qt.PointingHandCursor)
+            b.setStyleSheet("background-color: #2E7D9B; color: white; font-size: 14px; padding: 6px 18px; border: none; border-radius: 6px;")
+        cb.addStretch()
+        cb.addWidget(self.confirm_yes)
+        cb.addWidget(self.confirm_no)
+        self.confirm_yes.clicked.connect(self._on_confirm_yes)
+        self.confirm_no.clicked.connect(self._on_confirm_no)
+        cl.addLayout(cb)
+        self.confirm_widget.hide()
+        exp_l.addWidget(self.confirm_widget)
+
+        # 底部关闭按钮（仅在完成后可用）
+        self.close_btn_row = QHBoxLayout()
+        self.close_btn_row.setSpacing(0)
+        self.close_btn = QPushButton(self.tr("关闭"))
+        self.close_btn.setEnabled(False)
+        self.close_btn.setCursor(Qt.PointingHandCursor)
+        self.close_btn.setStyleSheet("background-color: #444; color: white; font-size: 13px; padding: 6px 18px; border: none; border-radius: 6px;")
+        self.close_btn.clicked.connect(self.close)
+        self.close_btn_row.addStretch()
+        self.close_btn_row.addWidget(self.close_btn)
+        exp_l.addLayout(self.close_btn_row)
+
+        self.expand_widget.hide()
+        card_layout.addWidget(self.expand_widget)
+
+        # 初始化高度为折叠态
+        self.setFixedHeight(self._collapsed_h)
+
+        # 信号连接
+        self.log_signal.connect(self._on_log)
+        self.confirm_signal.connect(self._on_confirm)
+        self.folder_prompt_signal.connect(self._on_folder_prompt)
+        self.done_signal.connect(self._on_done)
+        self.progress_signal.connect(self._on_progress)
+        self.request_expand.connect(self._ensure_expanded)
+
+        # 同步状态
+        self._confirm_event = None
+        self._confirm_result = False
+        self._folder_event = None
+        self._folder_result = None
+        self._latest_log = ""
+        # 手柄：当前弹出的临时 ConfirmDialog（_on_confirm 创建），供主路由转发手柄输入
+        self._active_confirm_dialog = None
+
+        # 控件全部创建完成后统一应用初始样式（覆盖 title_label / progress_bar 的内联样式，保证后续错误态切换视觉一致）
+        self._update_card_stylesheet(error=False)
+
+    # ---------------- 样式 ----------------
+    def _update_card_stylesheet(self, error=False):
+        if error:
+            bg = "background-color: #2a1a1a;"
+            border = "border: 2px solid #ff4b4b;"
+            glow = ""
+        else:
+            bg = "background-color: #1c1c1c;"
+            border = "border: 2px solid #3a3a3a;"
+            glow = ""
+        # 顶部圆角更大，贴合灵动岛视觉；底部圆角稍小
+        radius = int(22 * self.scale_factor)
+        radius_bot = int(18 * self.scale_factor)
+        self.card.setStyleSheet(f"""
+            #islandCard {{
+                {bg}
+                {border}
+                border-top-left-radius: {radius}px;
+                border-top-right-radius: {radius}px;
+                border-bottom-left-radius: {radius_bot}px;
+                border-bottom-right-radius: {radius_bot}px;
+            }}
+        """)
+        if error:
+            self.progress_bar.setStyleSheet("""
+                QProgressBar { background-color: #3a2a2a; border: none; border-radius: 3px; }
+                QProgressBar::chunk { background-color: #ff4b4b; border-radius: 3px; }
+            """)
+            self.title_label.setStyleSheet("color: #ff8080; font-size: 18px; background: transparent; border: none; font-weight: bold;")
+        else:
+            self.progress_bar.setStyleSheet("""
+                QProgressBar { background-color: #3a3a3a; border: none; border-radius: 3px; }
+                QProgressBar::chunk { background-color: #00bfff; border-radius: 3px; }
+            """)
+            self.title_label.setStyleSheet("color: #ffffff; font-size: 18px; background: transparent; border: none; font-weight: bold;")
+
+    # ---------------- 折叠 / 展开 ----------------
+    def mousePressEvent(self, event):
+        # 点击岛本身切换折叠状态（但当确认/文件夹弹窗展示时不折叠）
+        if self.confirm_widget.isVisible():
+            event.accept()
+            return
+        self._toggle_expand()
+        event.accept()
+
+    def _toggle_expand(self):
+        if self._expanded:
+            self._collapse()
+        else:
+            self._expand()
+
+    def _expand(self):
+        if self._expanded:
+            return
+        self._expanded = True
+        self.expand_widget.show()
+        # 展开后不自动关闭（用户要看日志），即使 done 倒计时已启动也要取消
+        self._cancel_auto_close()
+        # 先更新固定高度约束，让布局立即重算并给 log_text 分配空间，
+        # 否则仅改 geometry 动画时 fixedHeight 仍为折叠态高度，日志区为 0 高度看不见
+        self.setFixedHeight(self._expanded_h)
+        # 动画扩展高度（视觉效果）
+        self._anim = QPropertyAnimation(self, b"geometry")
+        self._anim.setDuration(260)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+        start_geo = self.geometry()
+        end_geo = QRect(start_geo.x(), start_geo.y(), start_geo.width(), self._expanded_h)
+        self._anim.setStartValue(start_geo)
+        self._anim.setEndValue(end_geo)
+        self._anim.start()
+
+    def _collapse(self):
+        if not self._expanded:
+            return
+        self._expanded = False
+        self._anim = QPropertyAnimation(self, b"geometry")
+        self._anim.setDuration(220)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+        start_geo = self.geometry()
+        end_geo = QRect(start_geo.x(), start_geo.y(), start_geo.width(), self._collapsed_h)
+        self._anim.setStartValue(start_geo)
+        self._anim.setEndValue(end_geo)
+        # 动画结束后再恢复固定高度约束并隐藏展开区，避免折叠过程中日志区突兀消失
+        def _on_collapse_done():
+            self.setFixedHeight(self._collapsed_h)
+            self.expand_widget.hide()
+        self._anim.finished.connect(_on_collapse_done)
+        self._anim.start()
+
+    def _ensure_expanded(self):
+        if not self._expanded:
+            self._expand()
+
+    # ---------------- API（主线程） ----------------
+    def append_log(self, msg):
+        self.log_signal.emit(str(msg))
+
+    def set_progress(self, value, max_value=100):
+        self.progress_signal.emit(int(value), int(max_value))
+
+    def mark_done(self, success=True):
+        self.done_signal.emit(bool(success))
+
+    def ask_confirm(self, message):
+        ev = threading.Event()
+        self._confirm_result = False
+        self.confirm_signal.emit(message, ev)
+        ev.wait()
+        return self._confirm_result
+
+    def ask_folder(self, varname, suggested_folder=None):
+        ev = threading.Event()
+        self._folder_result = None
+        self._folder_event = ev
+        self.folder_prompt_signal.emit(varname, suggested_folder or "", ev)
+        ev.wait()
+        return self._folder_result
+
+    # ---------------- 槽实现 ----------------
+    @pyqtSlot(str)
+    def _on_log(self, msg):
+        if not msg:
+            return
+        self._latest_log = msg
+        # 折叠态：直接在标题处展示最新一条作为粗略进度
+        summary = msg.strip().replace("\n", " ")
+        if len(summary) > 70:
+            summary = summary[:67] + "..."
+        self.title_label.setText(summary)
+        # 展开态：同时附加到详细日志
+        if self._expanded:
+            self.log_text.append(msg)
+
+    @pyqtSlot(int, int)
+    def _on_progress(self, value, max_value):
+        if max_value <= 0:
+            max_value = 100
+        if value < 0:
+            value = 0
+        if value > max_value:
+            value = max_value
+        self.progress_bar.setRange(0, max_value)
+        self.progress_bar.setValue(value)
+
+    @pyqtSlot(str, object)
+    def _on_confirm(self, message, event):
+        # 运行在 GUI 线程：改为用项目已验证成功的独立模态 ConfirmDialog 弹出顶层询问，
+        # 不再仅依赖内嵌 confirm_widget（会因为岛体积小/被遮挡造成"没弹窗"的感受）
+        try:
+            self.show()
+            self.raise_()
+        except Exception:
+            pass
+        self._confirm_event = event
+        self._confirm_result = False
+        try:
+            dlg = ConfirmDialog(message, scale_factor=self.scale_factor, parent=None)
+            self._active_confirm_dialog = dlg  # 记录，便于主路由转发手柄输入
+            try:
+                dlg.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+            except Exception:
+                pass
+            ok = dlg.exec_() == QDialog.Accepted
+            self._confirm_result = bool(ok)
+        except Exception as e:
+            print(f"[CloudBackupIslandWidget] _on_confirm dialog 失败: {e}", file=sys.stderr)
+            self._confirm_result = False
+        finally:
+            self._active_confirm_dialog = None
+        # 兼容：隐藏内嵌确认区，避免旧视觉残留
+        try:
+            self.confirm_widget.hide()
+        except Exception:
+            pass
+        self._cancel_auto_close()
+        if self._confirm_event is not None:
+            ev = self._confirm_event
+            self._confirm_event = None
+            ev.set()
+
+    def _on_confirm_yes(self):
+        self._confirm_result = True
+        self.confirm_widget.hide()
+        if self._confirm_event is not None:
+            self._confirm_event.set()
+
+    def _on_confirm_no(self):
+        self._confirm_result = False
+        self.confirm_widget.hide()
+        if self._confirm_event is not None:
+            self._confirm_event.set()
+
+    @pyqtSlot(str, str, object)
+    def _on_folder_prompt(self, varname, suggested_folder, event):
+        # 运行在 GUI 线程：确保岛可见并置顶
+        try:
+            self.show()
+            self.raise_()
+            self.activateWindow()
+        except Exception:
+            pass
+        self._folder_event = event
+        self._cancel_auto_close()
+        self._ensure_expanded()
+        try:
+            result = mao_prompt_user_select_folder_for_var(
+                varname,
+                suggested_folder=(suggested_folder or None),
+                parent=None,  # 使用独立顶层窗口，避免依附于无激活状态的岛
+                scale_factor=self.scale_factor,
+            )
+        except Exception:
+            result = None
+        self._folder_result = result
+        if self._folder_event is not None:
+            self._folder_event.set()
+            self._folder_event = None
+
+    @pyqtSlot(bool)
+    def _on_done(self, success):
+        self._done_state = True
+        self.close_btn.setEnabled(True)
+        # 进度条补满
+        self.progress_bar.setValue(self.progress_bar.maximum() or 100)
+        done_msg = self.tr("✔ 操作已完成。") if success else self.tr("✘ 操作结束（存在错误或被取消）。")
+        self.append_log(done_msg)
+        # 错误态样式
+        if not success:
+            self._error_state = True
+            self._update_card_stylesheet(error=True)
+        # 展开后不自动关闭；否则完成态 2s / 错误态 5s
+        if self._expanded:
+            self._cancel_auto_close()
+        else:
+            delay_ms = 5000 if not success else 2000
+            self._schedule_auto_close(delay_ms)
+
+    # ---------------- 自动关闭 ----------------
+    def _schedule_auto_close(self, delay_ms):
+        self._cancel_auto_close()
+        self._auto_close_timer = QTimer(self)
+        self._auto_close_timer.setSingleShot(True)
+        self._auto_close_timer.timeout.connect(self.close)
+        self._auto_close_timer.start(delay_ms)
+
+    def _cancel_auto_close(self):
+        if self._auto_close_timer is not None:
+            try:
+                self._auto_close_timer.stop()
+            except Exception:
+                pass
+            self._auto_close_timer = None
+
+    def closeEvent(self, event):
+        self._cancel_auto_close()
+        super().closeEvent(event)
+
+
+class WebdavConfigWidget(QWidget):
+    """可复用的 WebDAV 账号配置表单（嵌入设置页或独立对话框）"""
+
+    def __init__(self, scale_factor=1.0, parent=None, on_saved=None):
+        super().__init__(parent)
+        self.scale_factor = scale_factor
+        self.on_saved = on_saved
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(int(10 * scale_factor))
+        form = QtWidgets.QFormLayout()
+        form.setLabelAlignment(Qt.AlignRight)
+        form.setSpacing(int(8 * scale_factor))
+        self.host_edit = QLineEdit()
+        self.host_edit.setPlaceholderText("https://dav.jianguoyun.com/dav/")
+        self.user_edit = QLineEdit()
+        self.pass_edit = QLineEdit()
+        self.pass_edit.setEchoMode(QLineEdit.Password)
+        for e in (self.host_edit, self.user_edit, self.pass_edit):
+            e.setStyleSheet(f"QLineEdit {{ background-color: #2b2b2b; color: white; border: 1px solid #555; border-radius: 6px; padding: 8px; font-size: {int(18 * scale_factor)}px; }}")
+        form.addRow(self._row_label("WebDAV 主机 URL:"), self.host_edit)
+        form.addRow(self._row_label("用户名:"), self.user_edit)
+        form.addRow(self._row_label("密码:"), self.pass_edit)
+        layout.addLayout(form)
+        link = QLabel('已通过测试的网盘：<a href="https://www.jianguoyun.com/" style="color:#00bfff;">坚果云</a>')
+        link.setOpenExternalLinks(True)
+        link.setStyleSheet(f"color:#999; font-size:{int(15 * scale_factor)}px;")
+        layout.addWidget(link)
+        eb = QLabel('还原时会将本机原存档压缩至 /extra_backup 目录，<a href="#" style="color:#00bfff;">点击打开该目录</a>')
+        eb.setOpenExternalLinks(False)
+        eb.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        eb.linkActivated.connect(self._open_extra_backup)
+        eb.setStyleSheet(f"color:#999; font-size:{int(15 * scale_factor)}px;")
+        eb.setWordWrap(True)
+        layout.addWidget(eb)
+        self.save_btn = QPushButton("保存配置")
+        self.save_btn.setStyleSheet(f"QPushButton {{ background-color: #2E7D9B; color: white; border: none; border-radius: 6px; padding: 10px; font-size: {int(18 * scale_factor)}px; }} QPushButton:hover {{ background-color: #45a049; }}")
+        self.save_btn.clicked.connect(self._save)
+        layout.addWidget(self.save_btn)
+        self.load_from_config()
+
+    def _row_label(self, text):
+        l = QLabel(text)
+        l.setStyleSheet(f"color:white; font-size:{int(18 * self.scale_factor)}px;")
+        return l
+
+    def load_from_config(self):
+        cfg = mao_load_config()
+        self.host_edit.setText(cfg.get("hostname", ""))
+        try:
+            self.user_edit.setText(base64.b64decode(cfg.get("username", "")).decode())
+        except Exception:
+            self.user_edit.setText("")
+        try:
+            self.pass_edit.setText(base64.b64decode(cfg.get("password", "")).decode())
+        except Exception:
+            self.pass_edit.setText("")
+
+    def _save(self):
+        host = self.host_edit.text().strip()
+        user = self.user_edit.text().strip()
+        pwd = self.pass_edit.text().strip()
+        if not host or not user:
+            QMessageBox.warning(self, self.tr("错误"), self.tr("WebDAV 主机和用户名不能为空！"))
+            return
+        cfg = mao_load_config()
+        cfg["hostname"] = host
+        cfg["username"] = base64.b64encode(user.encode()).decode()
+        cfg["password"] = base64.b64encode(pwd.encode()).decode()
+        mao_save_config(cfg)
+        QMessageBox.information(self, self.tr("配置"), self.tr("WebDAV 配置已保存。"))
+        if self.on_saved:
+            self.on_saved()
+
+    def _open_extra_backup(self):
+        try:
+            if not os.path.exists(MAO_EXTRA_BACKUP_DIR):
+                os.makedirs(MAO_EXTRA_BACKUP_DIR, exist_ok=True)
+            if sys.platform.startswith("win"):
+                os.startfile(MAO_EXTRA_BACKUP_DIR)
+        except Exception as e:
+            QMessageBox.warning(self, self.tr("打开失败"), str(e))
+
+
+def mao_touch_enable_itemview(view):
+    """让 QListWidget / QTableWidget / QTreeWidget 支持触屏手指拖动滚动。
+    - grabGesture(LeftMouseButtonGesture) 让鼠标左键按下拖动也能滚（触屏滑动常见模拟为左键拖动）
+    - ScrollPerPixel + PixelAligned 视觉更顺滑；部分 Qt 版本需同时禁掉 item 按步长滚动
+    - QScroller 状态：AccelerateFlick 继续保持惯性，避免手指离开立刻停
+    """
+    if view is None:
+        return
+    try:
+        from PyQt5.QtWidgets import QAbstractItemView, QAbstractScrollArea
+    except Exception:
+        return
+    try:
+        view.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+    except Exception:
+        pass
+    try:
+        view.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+    except Exception:
+        pass
+    try:
+        vp = view.viewport() if isinstance(view, QAbstractScrollArea) else view
+    except Exception:
+        vp = None
+    if vp is None:
+        return
+    try:
+        from PyQt5.QtWidgets import QScroller
+        QScroller.grabGesture(vp, QScroller.LeftMouseButtonGesture)
+    except Exception:
+        pass
+    try:
+        from PyQt5.QtWidgets import QScroller
+        scroller = QScroller.scroller(vp)
+        if scroller is not None:
+            props = scroller.scrollerProperties()
+            try:
+                from PyQt5.QtCore import QEasingCurve
+                props.setScrollMetric(props.DecelerationFactor, 0.0025)
+                props.setScrollMetric(props.OvershootDragResistanceFactor, 0.5)
+                props.setScrollMetric(props.OvershootScrollDistanceFactor, 0.35)
+                props.setScrollMetric(props.SnapPositionRatio, 0.0)
+                try:
+                    props.setScrollMetric(props.ScrollingCurve, QEasingCurve.OutQuad)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            scroller.setScrollerProperties(props)
+    except Exception:
+        pass
+
+
+class _RemoteListLoader(QThread):
+    """后台线程拉取远程列表（dirs 或单个游戏 files），完成后 result_ready 信号返回。
+    使用 QThread（非 threading）保证跨线程 Qt 信号槽正常投递到 GUI 线程。"""
+    result_ready = pyqtSignal(str, object, object, object)  # mode, game_name, files, dirs
+
+    def __init__(self, mode, game_name, parent=None):
+        super().__init__(parent)
+        self._mode = mode
+        self._game = game_name
+
+    def run(self):
+        mode = self._mode
+        game = self._game
+        if QThread.currentThread().isInterruptionRequested():
+            return
+        try:
+            if game:
+                files, _ = mao_list_remote_backups(game_name=game, log=print, use_cache=False)
+                dirs = []
+            else:
+                files, dirs = mao_list_remote_backups(log=print, use_cache=False)
+        except Exception as e:
+            print(f"[_RemoteListLoader] 获取失败: {e}")
+            files, dirs = [], []
+        if self.isInterruptionRequested():
+            return
+        self.result_ready.emit(mode, game, files, dirs)
+
+
+class CloudBackupWindow(QDialog):
+    """云端存档主管理窗口（替换原 maobackup Tk 主界面）"""
+    # 备份/还原 异步完成信号（worker 线程 emit，GUI 线程槽接收）：
+    #   kind = "备份"/"还原"/"还原中"/"额外备份还原" 等，success=是否成功，game=操作对应的游戏名或None
+    _async_done_signal = pyqtSignal(str, bool, object)
+
+    def __init__(self, parent=None, mode="manage", game_name=None):
+        super().__init__(parent)
+        self.parent_selector = parent
+        self.scale_factor = getattr(parent, 'scale_factor', settings.get("scale_factor", 1.0))
+        self.mode = mode
+        self.initial_game = game_name
+        self.current_game = game_name if game_name else ""
+        self.current_path = ""
+        # 跨线程刷新缓存/列表信号
+        try:
+            self._async_done_signal.connect(self._on_async_done, Qt.QueuedConnection)
+        except Exception:
+            pass
+        self.setWindowTitle(self.tr("云端存档"))
+        # 采用项目 ConfirmDialog 已验证成功的无边框 + QDialog 圆角模式：
+        # 不启用 WA_TranslucentBackground / setMask，避免在 Windows 下造成方形边角残留
+        # 或与分层窗口属性冲突；直接通过 QDialog 样式表的 border-radius + 显式 border 绘制圆角
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        screen = QDesktopWidget().screenGeometry()
+        self.resize(int(900 * self.scale_factor), int(640 * self.scale_factor))
+        s = self.scale_factor
+        br = int(20 * s)
+        bw = int(2 * s)
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: #1e1e1e;
+                border: {bw}px solid #333;
+                border-radius: {br}px;
+            }}
+            QDialog QTabWidget::pane {{
+                border: 1px solid #444;
+                border-radius: 6px;
+                background-color: #2b2b2b;
+                top: -1px;
+            }}
+            QListWidget {{
+                color: #ddd;
+                background-color: #1c1c1c;
+                border: 1px solid #444;
+                border-radius: 6px;
+                padding: {int(6 * s)}px;
+            }}
+            QListWidget::item {{ padding: {int(8 * s)}px; border-radius: 4px; }}
+            QListWidget::item:selected {{ background-color: #93ffff; color: #222; }}
+            QListWidget::item:hover {{ background-color: #333; }}
+            QLabel {{ color: #ddd; font-size: {int(16 * s)}px; }}
+            QPushButton {{
+                background-color: #2E7D9B;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: {int(10 * s)}px {int(18 * s)}px;
+                font-size: {int(16 * s)}px;
+            }}
+            QPushButton:hover {{ background-color: #45a049; }}
+        """)
+        # 监听相关
+        self.watchdog_bridge = WatchdogBridge()
+        self.watchdog_bridge.dir_changed.connect(self._on_monitor_dir)
+        self.observers = []
+        self.monitoring = False
+        self.monitor_users_only = True
+        self._remote_mode = "game"  # "game"=当前游戏备份列表 / "all"=远程游戏列表 / "extra"=额外备份列表
+        self._last_progress_dlg = None  # 保留对非模态进度窗引用，防 GC
+        # 手柄输入状态（焦点顺序：tabs ↔ list ↔ buttons ↔ bottom）
+        self._cbw_focus = "tabs"  # "tabs" / "list" / "buttons" / "bottom"
+        self._cbw_btn_index = 0
+        self._cbw_ignore_until = 0
+        self._cbw_last_input = 0
+        self._cbw_input_delay = 180
+        self._build_ui()
+        self._load_saved_games()
+        if self.initial_game:
+            self._set_current_game(self.initial_game)
+            # 若当前游戏未设置存档路径：不应直接去"远程备份"列表，而应转到"添加游戏"页面让用户先配置路径
+            if not self.current_path:
+                self._switch_tab("addgame")
+            else:
+                self._switch_tab("remote")
+                self._refresh_remote()
+        else:
+            self._switch_tab("local")
+
+    # ---------------- UI 构建 ----------------
+    def _build_ui(self):
+        s = self.scale_factor
+        # 由于 QDialog 本身已通过样式表绘制圆角底色和边框（与项目 ConfirmDialog 一致），
+        # 根布局留出 2 * s 的内边距，使内容不触及边框圆角的最外沿曲线，避免角部透出方形底色感
+        root = QVBoxLayout(self)
+        pad = max(int(6 * s), int(2 * s) + int(2 * s))  # border(2s) + 安全边距
+        root.setContentsMargins(pad, pad, pad, pad)
+        root.setSpacing(int(10 * s))
+
+        # 标题行
+        title_row = QHBoxLayout()
+        title = QLabel(self.tr("云端存档"))
+        title.setStyleSheet(f"color: #00bfff; font-size: {int(26 * s)}px; border: none; background: transparent;")
+        title_row.addWidget(title)
+        title_row.addStretch()
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(int(40 * s), int(40 * s))
+        close_btn.setStyleSheet("QPushButton { background-color: transparent; color: #aaa; font-size: 20px; border: none; } QPushButton:hover { color: #ff4b4b; }")
+        close_btn.clicked.connect(self._on_close)
+        title_row.addWidget(close_btn)
+        root.addLayout(title_row)
+
+        # 当前选择信息
+        self.info_label = QLabel("")
+        self.info_label.setWordWrap(True)
+        self.info_label.setStyleSheet("border: none; background: transparent;")
+        root.addWidget(self.info_label)
+        self._update_info()
+
+        # 标签页
+        self.tabs = QTabWidget()
+        self.tabs.setStyleSheet(f"""
+            QTabBar::tab {{ background-color: #333; color: #ccc; padding: {int(8 * s)}px {int(18 * s)}px; font-size: {int(16 * s)}px; border-radius: 6px; }}
+            QTabBar::tab:selected {{ background-color: #2E7D9B; color: white; }}
+        """)
+        self.tabs.addTab(self._build_local_tab(s), self.tr("本地游戏"))
+        self.tabs.addTab(self._build_addgame_tab(s), self.tr("添加游戏"))
+        self.tabs.addTab(self._build_remote_tab(s), self.tr("远程备份"))
+        root.addWidget(self.tabs, 1)
+
+        # 底部按钮栏
+        bottom = QHBoxLayout()
+        bottom.setSpacing(int(8 * s))
+        self.backup_btn = QPushButton(self.tr("备份到WebDAV"))
+        self.config_btn = QPushButton(self.tr("配置WebDAV"))
+        self.backup_btn.clicked.connect(self._do_backup)
+        self.config_btn.clicked.connect(self._open_config_dialog)
+        bottom.addWidget(self.backup_btn)
+        bottom.addWidget(self.config_btn)
+        bottom.addStretch()
+        root.addLayout(bottom)
+        # 初始化手柄焦点视觉（窗口打开即显示当前列表焦点）
+        QTimer.singleShot(0, self._cbw_update_focus)
+
+    # 注意：此处不再覆写 resizeEvent 做 setMask（上一版与 WA_TranslucentBackground 组合在
+    # Windows 下仍会出现角部方形底衬，且与 QDialog QSS 圆角 border 绘制模式冲突）。
+    # 改法与项目内 ConfirmDialog 对齐：仅依赖 QDialog 的 border-radius + 显式 border 画圆角，
+    # 并通过 _build_ui 根布局 margins 避让窗口最外沿边缘，保证视觉无方形残留。
+
+    def _list_qss(self):
+        s = self.scale_factor
+        return f"""
+            QListWidget {{ color: #ddd; background-color: #1c1c1c; border: 1px solid #444; border-radius: 6px; padding: {int(6 * s)}px; }}
+            QListWidget::item {{ padding: {int(8 * s)}px; border-radius: 4px; }}
+            QListWidget::item:selected {{ background-color: #93ffff; color: #222; }}
+            QListWidget::item:hover {{ background-color: #333; }}
+        """
+
+    def _btn_qss(self, accent=True):
+        s = self.scale_factor
+        bg = "#2E7D9B" if accent else "#444"
+        hover = "#45a049" if accent else "#555"
+        return f"QPushButton {{ background-color: {bg}; color: white; border: none; border-radius: 6px; padding: {int(8 * s)}px {int(14 * s)}px; font-size: {int(15 * s)}px; }} QPushButton:hover {{ background-color: {hover}; }}"
+
+    def _build_local_tab(self, s):
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(int(6 * s), int(6 * s), int(6 * s), int(6 * s))
+        v.setSpacing(int(8 * s))
+        hint = QLabel(self.tr("已保存的游戏（双击设为当前选择）"))
+        hint.setStyleSheet(f"color:#aaa; font-size:{int(14 * s)}px; border:none; background:transparent;")
+        v.addWidget(hint)
+        self.local_list = QListWidget()
+        self.local_list.setStyleSheet(self._list_qss())
+        self.local_list.itemDoubleClicked.connect(lambda it: self._select_saved_by_text(it.text()))
+        mao_touch_enable_itemview(self.local_list)
+        v.addWidget(self.local_list, 1)
+        row = QHBoxLayout()
+        refresh_b = QPushButton(self.tr("刷新"))
+        select_b = QPushButton(self.tr("设为当前选择"))
+        delete_b = QPushButton(self.tr("删除游戏"))
+        for b in (refresh_b, select_b):
+            b.setStyleSheet(self._btn_qss(True))
+        delete_b.setStyleSheet(self._btn_qss(False))
+        refresh_b.clicked.connect(self._load_saved_games)
+        select_b.clicked.connect(self._select_saved_action)
+        delete_b.clicked.connect(self._delete_saved_game)
+        row.addWidget(refresh_b)
+        row.addWidget(select_b)
+        row.addWidget(delete_b)
+        row.addStretch()
+        v.addLayout(row)
+        return page
+
+    def _build_addgame_tab(self, s):
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(int(6 * s), int(6 * s), int(6 * s), int(6 * s))
+        v.setSpacing(int(8 * s))
+        hint = QLabel(self.tr("开始监听后进入游戏产生存档，返回此处双击变化路径选择（也可手动选择目录）"))
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color:#aaa; font-size:{int(14 * s)}px; border:none; background:transparent;")
+        v.addWidget(hint)
+        self.monitor_list = QListWidget()
+        self.monitor_list.setStyleSheet(self._list_qss())
+        self.monitor_list.itemDoubleClicked.connect(lambda it: self._handle_selected_path(it.text()))
+        mao_touch_enable_itemview(self.monitor_list)
+        v.addWidget(self.monitor_list, 1)
+        row = QHBoxLayout()
+        self.monitor_btn = QPushButton(self.tr("开始监听"))
+        self.manual_btn = QPushButton(self.tr("📁手动选择"))
+        self.pause_btn = QPushButton(self.tr("暂停"))
+        self.users_only_cb = QCheckBox(self.tr("只扫描 C:/Users/"))
+        self.users_only_cb.setChecked(True)
+        self.users_only_cb.setStyleSheet("color:#ddd; font-size:15px;")
+        self.users_only_cb.toggled.connect(self._on_users_only_toggled)
+        for b in (self.monitor_btn, self.manual_btn, self.pause_btn):
+            b.setStyleSheet(self._btn_qss(True))
+        self.monitor_btn.clicked.connect(self._toggle_monitor)
+        self.manual_btn.clicked.connect(self._manual_select_path)
+        self.pause_btn.clicked.connect(self._toggle_pause)
+        self.pause_btn.setEnabled(False)
+        row.addWidget(self.monitor_btn)
+        row.addWidget(self.manual_btn)
+        row.addWidget(self.pause_btn)
+        row.addWidget(self.users_only_cb)
+        row.addStretch()
+        v.addLayout(row)
+        return page
+
+    def _build_remote_tab(self, s):
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(int(6 * s), int(6 * s), int(6 * s), int(6 * s))
+        v.setSpacing(int(8 * s))
+        self.remote_label = QLabel(self.tr("可还原的远程备份（双击还原 / 选中游戏）"))
+        self.remote_label.setStyleSheet(f"color:#aaa; font-size:{int(14 * s)}px; border:none; background:transparent;")
+        v.addWidget(self.remote_label)
+        self.remote_list = QListWidget()
+        self.remote_list.setStyleSheet(self._list_qss())
+        self.remote_list.itemDoubleClicked.connect(self._on_remote_double)
+        mao_touch_enable_itemview(self.remote_list)
+        v.addWidget(self.remote_list, 1)
+        row = QHBoxLayout()
+        refresh_b = QPushButton(self.tr("刷新"))
+        restore_b = QPushButton(self.tr("还原选定备份"))
+        all_b = QPushButton(self.tr("远程游戏列表"))
+        extra_b = QPushButton(self.tr("额外备份列表"))
+        for b in (refresh_b, restore_b, all_b, extra_b):
+            b.setStyleSheet(self._btn_qss(True))
+        refresh_b.clicked.connect(self._refresh_remote)
+        restore_b.clicked.connect(self._do_restore)
+        all_b.clicked.connect(lambda: self._set_remote_mode("all"))
+        extra_b.clicked.connect(self._show_extra_backups)
+        row.addWidget(refresh_b)
+        row.addWidget(restore_b)
+        row.addWidget(all_b)
+        row.addWidget(extra_b)
+        row.addStretch()
+        v.addLayout(row)
+        return page
+
+    # ---------------- 通用辅助 ----------------
+    def tr(self, src):
+        # 优先用父窗口的翻译器
+        try:
+            if self.parent_selector is not None:
+                return self.parent_selector.tr(src)
+        except Exception:
+            pass
+        return super().tr(src)
+
+    def _update_info(self):
+        if self.current_game or self.current_path:
+            self.info_label.setText(f"当前选择 → 游戏名: {self.current_game}    路径: {self.current_path}")
+        else:
+            self.info_label.setText(self.tr("尚未选择游戏/路径。请在「本地游戏」选择，或到「添加游戏」添加。"))
+
+    def _switch_tab(self, name):
+        idx = {"local": 0, "addgame": 1, "remote": 2}.get(name, 0)
+        self.tabs.setCurrentIndex(idx)
+
+    def _set_current_game(self, name, path=None):
+        self.current_game = name
+        if path is None:
+            cfg = mao_load_config()
+            for g in cfg.get("games", []):
+                if g.get("name") == name:
+                    path = g.get("path", "")
+                    break
+        self.current_path = path or ""
+        self._update_info()
+
+    # ---------------- 本地游戏 ----------------
+    def _load_saved_games(self):
+        self.local_list.clear()
+        cfg = mao_load_config()
+        games = cfg.get("games", [])
+        for g in games:
+            self.local_list.addItem(f"{g.get('name','')}  |  {g.get('path','')}")
+
+    def _select_saved_by_text(self, text):
+        name = text.split("|")[0].strip()
+        self._set_current_game(name)
+        self._refresh_remote()
+
+    def _select_saved_action(self):
+        items = self.local_list.selectedItems()
+        if not items:
+            return
+        self._select_saved_by_text(items[0].text())
+
+    def _delete_saved_game(self):
+        items = self.local_list.selectedItems()
+        if not items and not self.current_game:
+            QMessageBox.information(self, self.tr("提示"), self.tr("请先选择要删除的游戏。"))
+            return
+        if items:
+            text = items[0].text()
+            name = text.split("|")[0].strip()
+            path = text.split("|", 1)[1].strip() if "|" in text else ""
+        else:
+            name = self.current_game
+            path = self.current_path
+        cfg = mao_load_config()
+        games = cfg.get("games", [])
+        idx = None
+        for i, g in enumerate(games):
+            if g.get("name") == name and g.get("path") == path:
+                idx = i
+                break
+        if idx is None:
+            QMessageBox.information(self, self.tr("提示"), self.tr("未找到该游戏配置。"))
+            return
+        dlg = ConfirmDialog(self.tr("※确定要删除游戏：") + name + " ?", scale_factor=self.scale_factor, parent=self)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        del games[idx]
+        cfg["games"] = games
+        # 同步清理关联的自定义变量映射
+        custom = cfg.get("custom_vars", {}) or {}
+        keys_to_remove = [k for k, val in custom.items() if k == path or val == path]
+        for k in keys_to_remove:
+            try:
+                del custom[k]
+            except Exception:
+                pass
+        cfg["custom_vars"] = custom
+        last = cfg.get("last_selected", {})
+        if last.get("name") == name and last.get("path") == path:
+            cfg["last_selected"] = {}
+            self.current_game = ""
+            self.current_path = ""
+            self._update_info()
+        mao_save_config(cfg)
+        self._load_saved_games()
+
+    # ---------------- 添加游戏 / 监听 ----------------
+    def _on_users_only_toggled(self, checked):
+        self.monitor_users_only = checked
+        if self.monitoring:
+            self._stop_monitor()
+            self._start_monitor()
+
+    def _toggle_monitor(self):
+        if self.monitoring:
+            self._stop_monitor()
+            self.monitor_btn.setText(self.tr("开始监听"))
+            self.pause_btn.setEnabled(False)
+        else:
+            self.monitor_list.clear()
+            self._start_monitor()
+            if self.monitoring:
+                self.monitor_btn.setText(self.tr("停止监听"))
+                self.pause_btn.setEnabled(True)
+                self.pause_btn.setText(self.tr("暂停"))
+
+    def _toggle_pause(self):
+        if self.monitoring:
+            self._stop_monitor()
+            self.pause_btn.setText(self.tr("继续"))
+        else:
+            self._start_monitor()
+            if self.monitoring:
+                self.pause_btn.setText(self.tr("暂停"))
+
+    def _start_monitor(self):
+        if self.monitoring:
+            return
+        if Observer is None:
+            QMessageBox.warning(self, self.tr("提示"), self.tr("未安装 watchdog 模块，无法监听文件变化。请使用「手动选择目录」。"))
+            return
+        try:
+            if self.monitor_users_only:
+                # 系统盘的 C:\Users（或系统所在盘），不要用程序所在盘符（否则程序装在D盘时拼成 D:\Users 不存在）
+                sys_drive = os.environ.get('SystemDrive')
+                if sys_drive:
+                    user_root = os.path.join(sys_drive + os.sep, 'Users')
+                else:
+                    # 兜底：尝试所有本地盘符，找第一个存在的 <drive>:\Users
+                    user_root = None
+                    try:
+                        from psutil import disk_partitions as _dp
+                        for part in _dp():
+                            cand = os.path.join(part.device.rstrip('\\') + os.sep, 'Users')
+                            if os.path.isdir(cand):
+                                user_root = cand
+                                break
+                    except Exception:
+                        pass
+                if user_root and os.path.isdir(user_root):
+                    handler = _QtWatchdogHandler(self.watchdog_bridge)
+                    observer = Observer()
+                    observer.schedule(handler, user_root, recursive=True)
+                    observer.start()
+                    self.observers.append(observer)
+                    self.monitoring = True
+                    return
+                # 如果 Users 目录都找不到，给提示并降级到手动选择
+                try:
+                    QMessageBox.information(self, self.tr("提示"), self.tr("未找到 Users 目录，请使用「手动选择目录」。"))
+                except Exception:
+                    pass
+                return
+            from psutil import disk_partitions
+            for part in disk_partitions():
+                if "Temp" in part.device:
+                    continue
+                handler = _QtWatchdogHandler(self.watchdog_bridge)
+                observer = Observer()
+                observer.schedule(handler, part.device, recursive=True)
+                observer.start()
+                self.observers.append(observer)
+            self.monitoring = True
+        except Exception as e:
+            QMessageBox.warning(self, self.tr("错误"), f"启动监听失败: {e}")
+
+    def _stop_monitor(self):
+        for o in self.observers:
+            try:
+                o.stop()
+                o.join()
+            except Exception:
+                pass
+        self.observers.clear()
+        self.monitoring = False
+
+    @pyqtSlot(str)
+    def _on_monitor_dir(self, directory):
+        # 来自 watchdog 线程的信号（已跨线程排队到主线程）
+        for i in range(self.monitor_list.count()):
+            if self.monitor_list.item(i).text() == directory:
+                return
+        self.monitor_list.addItem(directory)
+        self.monitor_list.scrollToBottom()
+
+    def _handle_selected_path(self, full_path):
+        if not full_path:
+            return
+        parts = full_path.split("\\")
+        segments = []
+        for i in range(2, len(parts) + 1):
+            segments.append("\\".join(parts[:i]))
+        seg = self._pick_segment(segments)
+        if seg is None:
+            seg = full_path
+        # 统计大小
+        total_size, file_count, oversized = self._stat_path(seg)
+        if oversized:
+            QMessageBox.warning(self, self.tr("提示"), self.tr(f"路径大小超过50 MB，请确认该文件夹是否为游戏存档。"))
+        if self.current_game:
+            name = self.current_game
+        else:
+            name, ok = self._ask_game_name(default=os.path.basename(seg.rstrip("\\/")), info=self.tr(f"当前路径: {seg}\n文件数: {file_count}\n总大小: {total_size/1024:.2f} KB\n请输入游戏名称："))
+            if not ok or not name:
+                return
+        dlg = ConfirmDialog(self.tr("※已添加游戏：") + f"{name}\n路径：{seg}\n文件数: {file_count}\n总大小: {total_size/1024:.2f} KB\n请仔细确认备份信息", scale_factor=self.scale_factor, parent=self)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        self._save_game(name, seg)
+        self._set_current_game(name, seg)
+        self._load_saved_games()
+
+    def _pick_segment(self, segments):
+        if not segments:
+            return None
+        s = self.scale_factor
+        dlg = QDialog(self)
+        dlg.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
+        dlg.setStyleSheet("QDialog { background-color: rgba(46,46,46,0.98); border-radius: 12px; border: 2px solid #444444; }")
+        dlg.setFixedSize(int(620 * s), int(420 * s))
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(16, 16, 16, 16)
+        v.setSpacing(10)
+        v.addWidget(self._mk_label(self.tr("请选择路径分段复制到剪贴板"), s))
+        lw = QListWidget(dlg)
+        lw.setStyleSheet(self._list_qss())
+        for seg in segments:
+            lw.addItem(seg)
+        if lw.count():
+            lw.setCurrentRow(lw.count() - 1)
+        v.addWidget(lw)
+        btn_row = QHBoxLayout()
+        ok_b = QPushButton(self.tr("确定"))
+        cancel_b = QPushButton(self.tr("取消"))
+        for b in (ok_b, cancel_b):
+            b.setStyleSheet(self._btn_qss(True))
+        btn_row.addStretch()
+        btn_row.addWidget(ok_b)
+        btn_row.addWidget(cancel_b)
+        v.addLayout(btn_row)
+        result = {"sel": None}
+
+        def on_ok():
+            it = lw.currentItem()
+            if it:
+                result["sel"] = it.text()
+            dlg.accept()
+        ok_b.clicked.connect(on_ok)
+        cancel_b.clicked.connect(dlg.reject)
+        dlg.exec_()
+        return result["sel"]
+
+    def _mk_label(self, text, s):
+        l = QLabel(text)
+        l.setStyleSheet(f"color:#ddd; font-size:{int(16 * s)}px; border:none; background:transparent;")
+        l.setWordWrap(True)
+        return l
+
+    def _ask_game_name(self, default, info):
+        s = self.scale_factor
+        dlg = QDialog(self)
+        dlg.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
+        dlg.setStyleSheet("QDialog { background-color: rgba(46,46,46,0.98); border-radius: 12px; border: 2px solid #444444; }")
+        dlg.setFixedSize(int(600 * s), int(360 * s))
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(16, 16, 16, 16)
+        v.setSpacing(10)
+        info_l = QLabel(info)
+        info_l.setWordWrap(True)
+        info_l.setStyleSheet(f"color:#ddd; font-size:{int(15 * s)}px; border:none; background:transparent;")
+        v.addWidget(info_l)
+        edit = QLineEdit(default or "")
+        edit.setStyleSheet(f"QLineEdit {{ background-color: #2b2b2b; color: white; border: 1px solid #555; border-radius: 6px; padding: 8px; font-size: {int(18 * s)}px; }}")
+        v.addWidget(edit)
+        row = QHBoxLayout()
+        ok_b = QPushButton(self.tr("确定"))
+        cancel_b = QPushButton(self.tr("取消"))
+        for b in (ok_b, cancel_b):
+            b.setStyleSheet(self._btn_qss(True))
+        row.addStretch()
+        row.addWidget(ok_b)
+        row.addWidget(cancel_b)
+        v.addLayout(row)
+        result = {"name": None}
+
+        def on_ok():
+            result["name"] = edit.text().strip()
+            dlg.accept()
+        ok_b.clicked.connect(on_ok)
+        cancel_b.clicked.connect(dlg.reject)
+        dlg.exec_()
+        return result["name"], result["name"] is not None
+
+    def _stat_path(self, path):
+        total_size = 0
+        file_count = 0
+        SIZE_LIMIT = 50 * 1024 * 1024
+        oversized = False
+        if os.path.exists(path):
+            for root_, dirs_, files_ in os.walk(path):
+                for file_ in files_:
+                    try:
+                        total_size += os.path.getsize(os.path.join(root_, file_))
+                        file_count += 1
+                        if total_size > SIZE_LIMIT:
+                            oversized = True
+                            break
+                    except Exception:
+                        pass
+                if oversized:
+                    break
+        return total_size, file_count, oversized
+
+    def _manual_select_path(self):
+        path = QFileDialog.getExistingDirectory(self, self.tr("请选择游戏存档目录"))
+        if not path:
+            return
+        path = os.path.normpath(path)
+        total_size, file_count, oversized = self._stat_path(path)
+        if self.current_game:
+            name = self.current_game
+        else:
+            default_name = os.path.basename(path.rstrip("\\/"))
+            name, ok = self._ask_game_name(default=default_name, info=self.tr(f"当前路径: {path}\n文件数: {file_count}\n总大小: {total_size/1024:.2f} KB\n请输入游戏名称："))
+            if not ok or not name:
+                return
+        dlg = ConfirmDialog(self.tr("※已添加游戏：") + f"{name}\n路径：{path}\n文件数: {file_count}\n总大小: {total_size/1024:.2f} KB\n请仔细确认备份信息", scale_factor=self.scale_factor, parent=self)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        self._save_game(name, path)
+        self._set_current_game(name, path)
+        self._load_saved_games()
+
+    def _save_game(self, name, path):
+        cfg = mao_load_config()
+        # 若路径未使用系统环境变量，询问是否创建自定义变量
+        try:
+            replaced_check = mao_replace_with_env_vars_global(path)
+        except Exception:
+            replaced_check = path
+        if replaced_check == path:
+            try:
+                ask = ConfirmDialog(self.tr("※当前路径未使用系统环境变量。是否为该路径创建自定义变量以便跨设备迁移？"), scale_factor=self.scale_factor, parent=self)
+                if ask.exec_() == QDialog.Accepted:
+                    var_key = f"%USERSELECTPATH_{mao_sanitize_var_name(name)}%"
+                    custom = cfg.get('custom_vars', {})
+                    custom[var_key] = path
+                    cfg['custom_vars'] = custom
+            except Exception as e:
+                QMessageBox.warning(self, self.tr("错误"), f"创建自定义变量失败: {e}")
+        games = cfg.get("games", [])
+        found = False
+        for g in games:
+            if g.get("name") == name:
+                g["path"] = path
+                found = True
+                break
+        if not found:
+            games.append({"name": name, "path": path})
+        cfg["games"] = games
+        cfg["last_selected"] = {"name": name, "path": path}
+        mao_save_config(cfg)
+
+    # ---------------- 远程备份 ----------------
+    def _set_remote_mode(self, mode):
+        self._remote_mode = mode
+        self._refresh_remote()
+
+    def _refresh_remote(self):
+        """异步加载远程列表（extra / dirs / files），HTTP 不阻塞主线程。
+        期间显示 loading 文案；缓存命中时直接同步填充。"""
+        self.remote_list.clear()
+        # extra_backup 本地目录，直接同步处理
+        if self._remote_mode == "extra":
+            files = mao_list_extra_backups()
+            if not files:
+                self.remote_label.setText(self.tr("extra_backup 目录下没有备份文件。"))
+                return
+            self.remote_label.setText(self.tr("本地还原时产生的额外备份（双击可还原）"))
+            for f in files:
+                self.remote_list.addItem(f)
+            return
+        if not mao_get_opendal_operator():
+            self.remote_label.setText(self.tr("WebDAV 未配置，请点击「配置WebDAV」。"))
+            return
+        mode = self._remote_mode
+        game = None if (mode == "all" or not self.current_game) else self.current_game
+
+        # 缓存快速路径（直接填，不进线程）
+        try:
+            cached = _remote_cache_get(('files', game) if game else ('dirs',))
+        except Exception:
+            cached = None
+        if cached is not None:
+            files, dirs = cached
+            self._apply_remote_result(mode, game, files, dirs, cached_ok=True)
+            return
+
+        # 无缓存：用后台线程加载；先清列表 + 显示 loading
+        self.remote_label.setText(self.tr("加载远程列表中…"))
+        # 取消旧任务（若还在跑），避免多次刷新把旧结果覆盖新的
+        prev = getattr(self, '_remote_worker_thread', None)
+        if prev is not None:
+            try:
+                prev.requestInterruption()
+            except Exception:
+                pass
+            try:
+                prev.finished.disconnect()
+            except Exception:
+                pass
+        worker = _RemoteListLoader(mode=mode, game_name=game)
+        self._remote_worker_thread = worker
+        worker.result_ready.connect(lambda m, g, f, d: self._apply_remote_result(m, g, f, d, cached_ok=False))
+        worker.start()
+
+    def _apply_remote_result(self, mode, game, files, dirs, cached_ok=False):
+        """worker 回调：主线程填充 remote_list"""
+        if mode != self._remote_mode:
+            # 任务返回时模式已经切了，直接忽略
+            return
+        if not (mode == "all" or not self.current_game) and game != self.current_game:
+            # 任务返回时当前游戏已切，忽略
+            return
+        if mode == "all" or not self.current_game:
+            if dirs:
+                self.remote_label.setText(self.tr("远程游戏列表（双击选择该游戏）"))
+                cfg = mao_load_config()
+                saved = {g.get("name"): g.get("path") for g in cfg.get("games", [])}
+                for name, _mt in dirs:
+                    self.remote_list.addItem(name)
+                    it = self.remote_list.item(self.remote_list.count() - 1)
+                    if saved.get(name):
+                        it.setForeground(QColor("#888888"))
+            else:
+                if cached_ok:
+                    # 缓存命中但目录为空，仍然显示真实的文案
+                    self.remote_label.setText(self.tr("远程没有备份。"))
+                else:
+                    # 非缓存路径的空结果可能是服务器空/网络失败，统一提示"远程没有备份"，
+                    # 但如果返回实际是 (None,None) 说明 WebDAV 客户端失效，提示另一条
+                    if files is None and dirs is None:
+                        self.remote_label.setText(self.tr("WebDAV 未配置，请点击「配置WebDAV」。"))
+                    else:
+                        self.remote_label.setText(self.tr("远程没有备份。"))
+        else:
+            if files is None:
+                self.remote_label.setText(self.tr("WebDAV 未配置，请点击「配置WebDAV」。"))
+                return
+            self.remote_label.setText(self.tr(f"{self.current_game} 的远程备份（双击还原）"))
+            if not files:
+                self.remote_label.setText(self.tr(f"{self.current_game} 没有远程备份。"))
+            else:
+                for f in files:
+                    self.remote_list.addItem(f)
+
+    def _on_remote_double(self, item):
+        text = item.text()
+        if self._remote_mode == "extra":
+            self._do_restore_extra(text)
+            return
+        if self._remote_mode == "all" or not self.current_game:
+            # 选中了一个远程游戏
+            self._set_current_game(text)
+            self._remote_mode = "game"
+            self._refresh_remote()
+            return
+        self._do_restore(text)
+
+    def _show_extra_backups(self):
+        self._remote_mode = "extra"
+        self._refresh_remote()
+
+    def _do_restore(self, entry=None):
+        if entry is None:
+            items = self.remote_list.selectedItems()
+            if not items:
+                QMessageBox.information(self, self.tr("提示"), self.tr("请先选择要还原的备份。"))
+                return
+            entry = items[0].text()
+        if not entry or "/" not in entry:
+            # 可能是远程游戏列表项被双击还原（不应到达），提示
+            QMessageBox.information(self, self.tr("提示"), self.tr("请选择一个具体的备份文件，而非游戏名。"))
+            return
+        # 在工作线程执行还原，避免阻塞 UI
+        self._run_async(self.tr("还原中"),
+                        lambda log, confirm, prompt_func=None: mao_restore_backup(entry, entry.split("/")[0], log=log, confirm=confirm, parent=self, scale_factor=self.scale_factor, prompt_func=prompt_func),
+                        self.tr("还原"))
+
+    def _do_restore_extra(self, filename):
+        self._run_async(self.tr("还原额外备份中"),
+                        lambda log, confirm, prompt_func=None: mao_restore_extra_backup(filename, log=log, confirm=confirm, parent=self, scale_factor=self.scale_factor, prompt_func=prompt_func),
+                        self.tr("还原"))
+
+    # ---------------- 备份 / 配置 ----------------
+    def _do_backup(self):
+        if not self.current_game or not self.current_path:
+            QMessageBox.information(self, self.tr("提示"), self.tr("请先选择一个游戏或路径！"))
+            return
+        path = self.current_path
+        game = self.current_game
+        self._run_async(self.tr("备份中"),
+                        lambda log, confirm, prompt_func=None: mao_do_backup(game, path, log=log),
+                        self.tr("备份"))
+
+    def _open_config_dialog(self):
+        s = self.scale_factor
+        dlg = QDialog(self)
+        dlg.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
+        dlg.setStyleSheet("QDialog { background-color: rgba(46,46,46,0.98); border-radius: 12px; border: 2px solid #444444; }")
+        dlg.setFixedSize(int(560 * s), int(460 * s))
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(20, 20, 20, 20)
+        v.setSpacing(10)
+        title = QLabel(self.tr("WebDAV 配置"))
+        title.setStyleSheet(f"color:#00bfff; font-size:{int(20 * s)}px; border:none; background:transparent;")
+        v.addWidget(title)
+        w = WebdavConfigWidget(scale_factor=s, parent=dlg)
+        v.addWidget(w)
+        close_b = QPushButton(self.tr("关闭"))
+        close_b.setStyleSheet(self._btn_qss(True))
+        close_b.clicked.connect(dlg.accept)
+        v.addWidget(close_b)
+        dlg.exec_()
+
+    # ---------------- 异步执行（带进度窗） ----------------
+    def _on_async_done(self, kind, success, game):
+        """备份/还原完成回调（GUI 线程）：失效相关缓存 + 刷新当前远程列表页"""
+        if not success:
+            return
+        # 1. 清理缓存
+        if kind and ("还原" in kind or "备份" in kind):
+            # 备份列表 dirs 也可能变动（例如新游戏第一次上传），全量清
+            try:
+                _remote_cache_clear(None)
+            except Exception:
+                pass
+        else:
+            if game:
+                try:
+                    _remote_cache_clear(game)
+                except Exception:
+                    pass
+        # 2. 刷新当前可见的"远程备份"Tab 列表（如果用户正停在上面且当前窗口仍打开）
+        try:
+            if self.isVisible():
+                current_tab = self.tabs.currentIndex()
+                # remote tab 在 index 2
+                if current_tab == 2:
+                    # 稍后刷新，等回调结束
+                    try:
+                        from PyQt5.QtCore import QTimer
+                        QTimer.singleShot(0, self._refresh_remote)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    def _run_async(self, title, fn, kind):
+        s = self.scale_factor
+        # 使用 parent=None 防止 Dialog 作为父级时 Tool 窗口被层级遮挡，
+        # 并保存到 self._last_progress_dlg 防止无父窗口时被 GC
+        dlg = BackupProgressDialog(title, s, None)
+        self._last_progress_dlg = dlg
+        dlg.show()
+
+        # 注意：confirm_cb / prompt_func_cb 运行在工作线程中，严禁直接操作 QWidget。
+        # show()/raise_()/activateWindow() 等 GUI 操作统一放到 BackupProgressDialog 对应槽内部 (_on_confirm / _on_folder_prompt)。
+        def confirm_cb(message):
+            return dlg.ask_confirm(message)
+
+        def prompt_func_cb(varname, suggested_folder=None):
+            return dlg.ask_folder(varname, suggested_folder)
+
+        def worker():
+            ok = False
+            try:
+                try:
+                    ret = fn(log=dlg.append_log, confirm=confirm_cb, prompt_func=prompt_func_cb)
+                    # fn 返回 False 视为用户取消；返回 None/True 视为正常完成
+                    ok = (ret is not False)
+                except TypeError:
+                    # fn 不接受 prompt_func 时回退
+                    try:
+                        ret = fn(log=dlg.append_log, confirm=confirm_cb)
+                        ok = (ret is not False)
+                    except Exception as e:
+                        dlg.append_log(f"发生异常: {e}")
+                        ok = False
+            except Exception as e:
+                dlg.append_log(f"发生异常: {e}")
+                ok = False
+            finally:
+                dlg.mark_done(success=ok)
+                if ok:
+                    # 成功后让 GUI 线程清理对应的远程列表缓存并刷新（避免刚刚上传的新备份显示不出来）
+                    try:
+                        from PyQt5.QtCore import QMetaObject, Qt as Qtc, Q_ARG
+                        # 跨线程调用：通过 invokeMethod 投递到 GUI 线程队列
+                        # Q_ARG 不支持 str，改用自定义信号更稳；这里直接用已有的信号机制
+                        try:
+                            self._async_done_signal.emit(kind, ok, self.current_game or None)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+
+    # ---------------- 手柄输入支持 ----------------
+    def _cbw_current_list(self):
+        idx = self.tabs.currentIndex()
+        if idx == 0:
+            return self.local_list
+        elif idx == 1:
+            return self.monitor_list
+        else:
+            return self.remote_list
+
+    def _cbw_current_buttons(self):
+        """返回当前 tab 行内所有可见 QPushButton（按布局顺序）"""
+        idx = self.tabs.currentIndex()
+        if idx == 0:
+            page = self.tabs.widget(0)
+        elif idx == 1:
+            page = self.tabs.widget(1)
+        else:
+            page = self.tabs.widget(2)
+        btns = []
+        if page is None:
+            return btns
+        for child in page.findChildren(QPushButton):
+            if child.isVisible() and child.isEnabled():
+                btns.append(child)
+        return btns
+
+    def _cbw_bottom_buttons(self):
+        return [b for b in (self.backup_btn, self.config_btn) if b.isVisible() and b.isEnabled()]
+
+    # ---------- 高亮 / 样式 ----------
+    def _cbw_list_base_qss(self):
+        s = self.scale_factor
+        return f"""
+            QListWidget {{ color: #ddd; background-color: #1c1c1c; border: 1px solid #444; border-radius: 6px; padding: {int(6 * s)}px; }}
+            QListWidget::item {{ padding: {int(8 * s)}px; border-radius: 4px; }}
+            QListWidget::item:selected {{ background-color: #93ffff; color: #222; }}
+            QListWidget::item:hover {{ background-color: #333; }}
+        """
+
+    def _cbw_list_focus_qss(self):
+        s = self.scale_factor
+        return f"""
+            QListWidget {{ color: #ddd; background-color: #222a2d; border: 3px solid #00e5ff; border-radius: 8px; padding: {int(6 * s)}px; outline: 2px solid white; outline-offset: -5px; }}
+            QListWidget::item {{ padding: {int(8 * s)}px; border-radius: 4px; }}
+            QListWidget::item:selected {{ background-color: #93ffff; color: #111; }}
+            QListWidget::item:hover {{ background-color: #333; }}
+        """
+
+    def _cbw_btn_default_qss(self, accent=True):
+        s = self.scale_factor
+        bg = "#2E7D9B" if accent else "#444"
+        # 默认态预留 2px 透明边框 + 与聚焦态一致的 padding / radius，保证大小不跳动
+        return (
+            f"QPushButton {{ background-color: {bg}; color: white;"
+            f" border: 2px solid transparent; border-radius: 8px;"
+            f" padding: 2px 6px; font-size: {int(15 * s)}px; }}"
+            f" QPushButton:hover {{ background-color: {'#45a049' if accent else '#555'}; }}"
+            f" QPushButton:disabled {{ background-color: #333; color: #777; border-color: transparent; }}"
+        )
+
+    def _cbw_btn_focus_qss(self, accent=True):
+        s = self.scale_factor
+        bg = "#245A71" if accent else "#3a3a3a"
+        # 边框颜色变化 + 白色外描边；几何属性（border-width/padding/radius）与默认态完全一致
+        return (
+            f"QPushButton {{ background-color: {bg}; color: white;"
+            f" border: 2px solid #00e5ff; border-radius: 8px;"
+            f" padding: 2px 6px; font-size: {int(15 * s)}px; font-weight: bold;"
+            f" outline: 2px solid white; outline-offset: -6px; }}"
+            f" QPushButton:hover {{ background-color: {'#45a049' if accent else '#555'}; }}"
+        )
+
+    def _cbw_accent_for(self, btn):
+        # 按项目约定："删除"类按钮非 accent；其余 accent
+        txt = btn.text() if hasattr(btn, 'text') else ""
+        non_accent = any(k in txt for k in ("删除", "取消", "暂停", "✕"))
+        return not non_accent
+
+    def _cbw_restore_all_button_styles(self):
+        """恢复所有按钮（含底部/各tab内）的默认样式，并把 list/tab 样式复位。"""
+        # tab 内按钮
+        for idx in range(self.tabs.count()):
+            page = self.tabs.widget(idx)
+            if page is None:
+                continue
+            for b in page.findChildren(QPushButton):
+                if hasattr(b, '_cbw_orig_qss'):
+                    b.setStyleSheet(b._cbw_orig_qss)
+                else:
+                    b.setStyleSheet(self._cbw_btn_default_qss(self._cbw_accent_for(b)))
+        # 底部按钮
+        for b in self._cbw_bottom_buttons_all():
+            if hasattr(b, '_cbw_orig_qss'):
+                b.setStyleSheet(b._cbw_orig_qss)
+            else:
+                b.setStyleSheet(self._cbw_btn_default_qss(True))
+        # list
+        for lst in (self.local_list, self.monitor_list, self.remote_list):
+            if hasattr(lst, '_cbw_orig_qss'):
+                lst.setStyleSheet(lst._cbw_orig_qss)
+            else:
+                lst.setStyleSheet(self._cbw_list_base_qss())
+
+    def _cbw_bottom_buttons_all(self):
+        # 含 enabled/disabled，用于恢复默认样式
+        return [self.backup_btn, self.config_btn]
+
+    def _cbw_save_default_styles_once(self):
+        """只在第一次进入手柄操作时保存默认 QSS 到 _cbw_orig_qss 属性。"""
+        if getattr(self, '_cbw_style_saved', False):
+            return
+        self._cbw_style_saved = True
+        for idx in range(self.tabs.count()):
+            page = self.tabs.widget(idx)
+            if page is None:
+                continue
+            for b in page.findChildren(QPushButton):
+                if not hasattr(b, '_cbw_orig_qss'):
+                    try:
+                        b._cbw_orig_qss = b.styleSheet()
+                    except Exception:
+                        pass
+        for b in self._cbw_bottom_buttons_all():
+            if not hasattr(b, '_cbw_orig_qss'):
+                try:
+                    b._cbw_orig_qss = b.styleSheet()
+                except Exception:
+                    pass
+        for lst in (self.local_list, self.monitor_list, self.remote_list):
+            if not hasattr(lst, '_cbw_orig_qss'):
+                try:
+                    lst._cbw_orig_qss = lst.styleSheet()
+                except Exception:
+                    pass
+
+    def _cbw_update_focus(self):
+        """根据 _cbw_focus 刷新区域高亮 + 当前焦点按钮/列表高亮。"""
+        self._cbw_save_default_styles_once()
+        # 先恢复默认样式（按钮 + 列表 + tab 基础样式）
+        self._cbw_restore_all_button_styles()
+        s = self.scale_factor
+        # Tab 条默认样式 / 聚焦态样式
+        if self._cbw_focus == "tabs":
+            # 焦点落在 tab 栏：选中 tab 显示 cyan 边框 + 白外描边，未选中 tab 浅色边框提示可切
+            self.tabs.setStyleSheet(f"""
+                QTabBar::tab {{
+                    background-color: #333; color: #ccc;
+                    padding: {int(8 * s)}px {int(18 * s)}px; font-size: {int(16 * s)}px;
+                    border-radius: 6px; border: 2px solid transparent;
+                }}
+                QTabBar::tab:selected {{
+                    background-color: #245A71; color: white; font-weight: bold;
+                    border: 2px solid #00e5ff;
+                    outline: 2px solid white; outline-offset: -5px;
+                }}
+            """)
+        else:
+            self.tabs.setStyleSheet(f"""
+                QTabBar::tab {{ background-color: #333; color: #ccc; padding: {int(8 * s)}px {int(18 * s)}px; font-size: {int(16 * s)}px; border-radius: 6px; }}
+                QTabBar::tab:selected {{ background-color: #2E7D9B; color: white; border: 2px solid #00e5ff; outline: 1px solid white; outline-offset: -4px; }}
+            """)
+        # 区域焦点
+        if self._cbw_focus == "list":
+            lst = self._cbw_current_list()
+            if lst is not None:
+                lst.setStyleSheet(self._cbw_list_focus_qss())
+        elif self._cbw_focus in ("buttons", "bottom"):
+            btns = self._cbw_current_buttons() if self._cbw_focus == "buttons" else self._cbw_bottom_buttons()
+            if btns and 0 <= self._cbw_btn_index < len(btns):
+                b = btns[self._cbw_btn_index]
+                b.setStyleSheet(self._cbw_btn_focus_qss(self._cbw_accent_for(b)))
+                try:
+                    b.setFocus()
+                except Exception:
+                    pass
+
+    def _cbw_update_list_visual(self, lst):
+        # 使用 QListWidget 原生选中态作为高亮（样式表已设置 cyan 背景）
+        try:
+            item = lst.currentItem()
+            if item is not None:
+                lst.setCurrentItem(item)
+                lst.scrollToItem(item, QAbstractItemView.PositionAtCenter)
+        except Exception:
+            pass
+
+    def handle_gamepad_input(self, action):
+        """CloudBackupWindow 手柄操作（带按键高亮，方向键导航，不使用 LB/RB）：
+        焦点区域顺序：tabs(顶部tab栏) ↓→ list(列表) ↓→ buttons(tab内按钮行) ↓→ bottom(底部按钮行)
+        LEFT/RIGHT → tabs 区切 tab；buttons/bottom 区切按钮下标
+        UP/DOWN    → list 区滚动选中项；其他区域上下切换焦点区
+        A          → tabs: 进入下方 list；list: 双击当前项；buttons/bottom: 点击焦点按钮
+        X/Y        → 快捷键（X 删除 / Y 刷新等，按当前 tab 映射）
+        B          → 关闭窗口
+        """
+        now = _get_ticks()
+        if now < self._cbw_ignore_until:
+            return
+        if now - self._cbw_last_input < self._cbw_input_delay:
+            return
+        self._cbw_last_input = now
+        self._cbw_save_default_styles_once()
+        tab_count = self.tabs.count()
+        tab_idx = self.tabs.currentIndex()
+        lst = self._cbw_current_list()
+        count = lst.count() if lst else 0
+
+        # LEFT / RIGHT：tabs 区切 tab；buttons/bottom 区切按钮下标
+        if action in ('LEFT', 'RIGHT'):
+            step = -1 if action == 'LEFT' else 1
+            if self._cbw_focus == "tabs":
+                self.tabs.setCurrentIndex((tab_idx + step) % tab_count)
+                self._cbw_btn_index = 0
+            elif self._cbw_focus == "buttons":
+                btns = self._cbw_current_buttons()
+                if btns:
+                    new_idx = self._cbw_btn_index + step
+                    if new_idx < 0:
+                        # 左越界：回到 tabs 区
+                        self._cbw_focus = "tabs"
+                    else:
+                        self._cbw_btn_index = new_idx % len(btns)
+                else:
+                    bottom_btns = self._cbw_bottom_buttons()
+                    if bottom_btns:
+                        self._cbw_focus = "bottom"
+                        self._cbw_btn_index = 0
+            elif self._cbw_focus == "bottom":
+                btns = self._cbw_bottom_buttons()
+                if btns:
+                    new_idx = self._cbw_btn_index + step
+                    if new_idx < 0:
+                        self._cbw_focus = "buttons"
+                        tab_btns = self._cbw_current_buttons()
+                        self._cbw_btn_index = 0 if not tab_btns else max(0, len(tab_btns) - 1)
+                    else:
+                        self._cbw_btn_index = new_idx % len(btns)
+            elif self._cbw_focus == "list":
+                # list 时左右切到 tabs 区（便于方向键切 tab）
+                self._cbw_focus = "tabs"
+            self._cbw_update_focus()
+            self._cbw_ignore_until = now + 120
+            return
+
+        # UP：向上切换区域 / 列表滚上
+        if action == 'UP':
+            if self._cbw_focus == "list" and count > 0:
+                row = lst.currentRow() - 1
+                if row < 0:
+                    # 列表到顶 → 进入 tabs 区
+                    self._cbw_focus = "tabs"
+                else:
+                    lst.setCurrentRow(row)
+                    self._cbw_update_list_visual(lst)
+            elif self._cbw_focus == "list" and count == 0:
+                # 空列表 → 直接到 tabs
+                self._cbw_focus = "tabs"
+            elif self._cbw_focus == "buttons":
+                self._cbw_focus = "list"
+            elif self._cbw_focus == "bottom":
+                self._cbw_focus = "buttons"
+                btns = self._cbw_current_buttons()
+                self._cbw_btn_index = 0 if not btns else min(self._cbw_btn_index, max(0, len(btns) - 1))
+            elif self._cbw_focus == "tabs":
+                pass  # tabs 已经是最上
+            self._cbw_update_focus()
+            self._cbw_ignore_until = now + 120
+            return
+
+        # DOWN：向下切换区域 / 列表滚下
+        if action == 'DOWN':
+            if self._cbw_focus == "tabs":
+                # 从 tabs 下到列表
+                self._cbw_focus = "list"
+                if lst is not None and count > 0 and lst.currentRow() < 0:
+                    lst.setCurrentRow(0)
+            elif self._cbw_focus == "list" and count > 0:
+                row = lst.currentRow() + 1
+                if row >= count:
+                    # 列表到底 → 进入 buttons 行
+                    self._cbw_focus = "buttons"
+                    self._cbw_btn_index = 0
+                else:
+                    lst.setCurrentRow(row)
+                    self._cbw_update_list_visual(lst)
+            elif self._cbw_focus == "list" and count == 0:
+                self._cbw_focus = "buttons"
+                self._cbw_btn_index = 0
+            elif self._cbw_focus == "buttons":
+                btns = self._cbw_bottom_buttons()
+                if btns:
+                    self._cbw_focus = "bottom"
+                    self._cbw_btn_index = 0
+            elif self._cbw_focus == "bottom":
+                pass  # 已是最底
+            self._cbw_update_focus()
+            self._cbw_ignore_until = now + 120
+            return
+
+        if action == 'A':
+            if self._cbw_focus == "tabs":
+                # tabs 区按 A 进入下方 list
+                self._cbw_focus = "list"
+                if lst is not None and count > 0 and lst.currentRow() < 0:
+                    lst.setCurrentRow(0)
+            elif self._cbw_focus == "list":
+                if lst is not None and lst.currentItem() is not None:
+                    it = lst.currentItem()
+                    try:
+                        if tab_idx == 0:
+                            self._select_saved_by_text(it.text())
+                        elif tab_idx == 1:
+                            self._handle_selected_path(it.text())
+                        else:
+                            self._on_remote_double(it)
+                    except Exception:
+                        pass
+            elif self._cbw_focus == "buttons":
+                btns = self._cbw_current_buttons()
+                if btns and 0 <= self._cbw_btn_index < len(btns):
+                    btns[self._cbw_btn_index].click()
+            elif self._cbw_focus == "bottom":
+                btns = self._cbw_bottom_buttons()
+                if btns and 0 <= self._cbw_btn_index < len(btns):
+                    btns[self._cbw_btn_index].click()
+            self._cbw_ignore_until = now + 300
+            self._cbw_update_focus()
+            return
+        # X / Y：功能快捷键（按 tab 映射）
+        if action in ('X', 'Y'):
+            handled = self._cbw_try_shortcut(action, tab_idx)
+            self._cbw_ignore_until = now + 300
+            self._cbw_update_focus()
+            if handled:
+                return
+        if action == 'B':
+            self._cbw_ignore_until = now + 300
+            self._on_close()
+            return
+
+    def _cbw_try_shortcut(self, which, tab_idx):
+        """X/Y 快捷键映射。返回 True 表示已处理。"""
+        try:
+            if tab_idx == 0:
+                # 本地游戏
+                if which == 'X':
+                    self._delete_saved_game()
+                    return True
+                if which == 'Y':
+                    self._load_saved_games()
+                    return True
+            elif tab_idx == 1:
+                # 添加游戏
+                if which == 'X':
+                    # 切换 "只扫描 C:/Users/"
+                    cb = getattr(self, 'users_only_cb', None)
+                    if cb is not None:
+                        cb.setChecked(not cb.isChecked())
+                    return True
+                if which == 'Y':
+                    # 开始/暂停监听切换
+                    self._toggle_monitor()
+                    return True
+            elif tab_idx == 2:
+                # 远程备份
+                if which == 'X':
+                    self._do_restore()
+                    return True
+                if which == 'Y':
+                    self._refresh_remote()
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _on_close(self):
+        self._stop_monitor()
+        self.accept()
+
+    def closeEvent(self, event):
+        self._stop_monitor()
+        super().closeEvent(event)
+
+
+# -------- 鼠标输入的 ctypes 结构（Win32 SendInput 需要，供 ScreenshotWindow 使用） --------
+class _MOUSEINPUT(ctypes.Structure):
+    _fields_ = [("dx", ctypes.c_long),
+                ("dy", ctypes.c_long),
+                ("mouseData", ctypes.c_ulong),
+                ("dwFlags", ctypes.c_ulong),
+                ("time", ctypes.c_ulong),
+                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+
+
+class _INPUT_UNION(ctypes.Union):
+    _fields_ = [("mi", _MOUSEINPUT)]
+
+
+class _INPUT(ctypes.Structure):
+    _fields_ = [("type", ctypes.c_ulong),
+                ("u", _INPUT_UNION)]
+
+
 class ScreenshotWindow(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1321,7 +4488,13 @@ class ScreenshotWindow(QDialog):
         BTN_HEIGHT = int(90 * self.scale_factor)  # 统一按钮高度
 
         def on_backup_save_clicked():
-            open_maobackup("--quick-dgaction")
+            if _has_save_path:
+                open_maobackup("--quick-dgaction")
+            else:
+                # 无存档路径：直接打开 CloudBackupWindow 的添加游戏/本地游戏页定位到当前游戏
+                game_name = self.game_name_label.text()
+                self.parent().startopenmaobackup("-backuplist", game_name)
+                self.safe_close()
         def on_backup_restore_clicked(): 
             open_maobackup("--quick-dgrestore")
         def on_view_backup_list_clicked(): 
@@ -1331,6 +4504,28 @@ class ScreenshotWindow(QDialog):
             game_name = self.game_name_label.text()
             self.parent().startopenmaobackup(sysargv, game_name, exe_path)
             self.safe_close()  # 关闭当前窗口
+        # 判断当前游戏是否已配置备份路径（调用者传 game_name 避免 __init__ 时 game_name_label 还未 setText）
+        _has_save_path = False
+        _init_game_name = ""
+        try:
+            _init_game_name = (getattr(self, 'filter_game_name', None) or "").strip()
+            if not _init_game_name:
+                # 兼容：如果从父窗口传入了当前显示的游戏名，优先使用
+                if isinstance(getattr(self.parent(), 'current_index', None), int):
+                    try:
+                        _sorted = getattr(self.parent(), 'sort_games', lambda: [])()
+                        if _sorted and 0 <= self.parent().current_index < len(_sorted):
+                            _init_game_name = _sorted[self.parent().current_index].get("name", "")
+                    except Exception:
+                        pass
+            if _init_game_name:
+                _cfg_games = mao_load_config().get("games", [])
+                for g in _cfg_games:
+                    if str(g.get("name", "")).strip() == _init_game_name and str(g.get("path", "")).strip():
+                        _has_save_path = True
+                        break
+        except Exception:
+            pass
         def on_mapping_clicked():
             game_name = self.game_name_label.text()
             # 读取 set.json 的 on_mapping_clicked 列表
@@ -1787,26 +4982,29 @@ class ScreenshotWindow(QDialog):
         left_panel_layout.setSpacing(int(19 * self.scale_factor))
 
         # 开头单独按钮
-        btn_toolx = QPushButton(self.tr("同步游戏存档"), self.left_panel)
-        btn_toolx.setFixedHeight(BTN_HEIGHT)
-        btn_toolx.setStyleSheet(btn_style)
-        btn_toolx.clicked.connect(on_backup_save_clicked)
-        left_panel_layout.addWidget(btn_toolx)
+        self.btn_sync_toolx = QPushButton(self.tr("同步游戏存档") if _has_save_path else self.tr("设置存档路径"), self.left_panel)
+        self.btn_sync_toolx.setFixedHeight(BTN_HEIGHT)
+        self.btn_sync_toolx.setStyleSheet(btn_style)
+        self.btn_sync_toolx.clicked.connect(on_backup_save_clicked)
+        left_panel_layout.addWidget(self.btn_sync_toolx)
 
         # 第一排：恢复/查看存档列表
-        row1 = QHBoxLayout()
-        btn_backup = QPushButton(self.tr("恢复游戏存档"), self.left_panel)
-        btn_backup.setFixedHeight(BTN_HEIGHT)
-        btn_backup.setStyleSheet(btn_style)
-        btn_backup.clicked.connect(on_backup_restore_clicked)
-        row1.addWidget(btn_backup)
+        self.row1_backup = QHBoxLayout()
+        self.btn_backup_restore = QPushButton(self.tr("恢复游戏存档"), self.left_panel)
+        self.btn_backup_restore.setFixedHeight(BTN_HEIGHT)
+        self.btn_backup_restore.setStyleSheet(btn_style)
+        self.btn_backup_restore.clicked.connect(on_backup_restore_clicked)
+        self.row1_backup.addWidget(self.btn_backup_restore)
 
-        btn_restore = QPushButton(self.tr("查看存档列表"), self.left_panel)
-        btn_restore.setFixedHeight(BTN_HEIGHT)
-        btn_restore.setStyleSheet(btn_style)
-        btn_restore.clicked.connect(on_view_backup_list_clicked)
-        row1.addWidget(btn_restore)
-        left_panel_layout.addLayout(row1)
+        self.btn_view_backup_list = QPushButton(self.tr("查看存档列表"), self.left_panel)
+        self.btn_view_backup_list.setFixedHeight(BTN_HEIGHT)
+        self.btn_view_backup_list.setStyleSheet(btn_style)
+        self.btn_view_backup_list.clicked.connect(on_view_backup_list_clicked)
+        self.row1_backup.addWidget(self.btn_view_backup_list)
+        if not _has_save_path:
+            self.btn_backup_restore.hide()
+            self.btn_view_backup_list.hide()
+        left_panel_layout.addLayout(self.row1_backup)
 
         self.info_label2 = QLabel(self.tr("---------------------------------------------游戏特性相关---------------------------------------------"), self)
         self.info_label2.setStyleSheet(f"color: #aaa; font-size: {int(16 * self.scale_factor)}px; padding: 0px;")
@@ -2232,8 +5430,9 @@ class ScreenshotWindow(QDialog):
     def move_selection(self, offset):
         """移动选择的截图或左侧按钮"""
         if self.in_left_panel:
-            # 左侧按钮区域上下移动
-            self.current_button_index = (self.current_button_index + (1 if offset > 0 else -1)) % len(self.left_panel_buttons)
+            # 左侧按钮区域上下移动；隐藏按钮（如未设置存档路径时的 恢复/查看 存档）被跳过
+            step = 1 if offset > 0 else -1
+            self.current_button_index = self._find_visible_button_index(self.current_button_index, step)
             self.update_left_panel_button_styles()
         else:
             total_buttons = len(self.buttons)
@@ -2314,37 +5513,44 @@ class ScreenshotWindow(QDialog):
             if action in ('UP',):
                 if self.current_button_index == 0:
                     return  # 如果在第一行的第一个按钮，不能上移
+                # 向上按行：index 1 -> 0；其余 -> 当前前2位置的可见按钮（若中间隐藏则跳过上一行）
                 if self.current_button_index == 1:
-                    self.current_button_index = (self.current_button_index - 1) % len(self.left_panel_buttons)
+                    self.current_button_index = self._find_visible_button_index(self.current_button_index, -1)
                 else:
-                    self.current_button_index = (self.current_button_index - 2) % len(self.left_panel_buttons)
+                    # -2 方向：先从 current-1 往前找 2 个可见（等价于逐步向上跳 2 步，每步跳过隐藏）
+                    tmp = self._find_visible_button_index(self.current_button_index, -1)
+                    self.current_button_index = self._find_visible_button_index(tmp, -1)
                 self.update_left_panel_button_styles()
             elif action in ('DOWN',):
                 if self.current_button_index == 0:
-                    self.current_button_index = (self.current_button_index + 1) % len(self.left_panel_buttons)
-                # 如果在倒数第二个或最后一个按钮，不能下移
-                elif self.current_button_index >= len(self.left_panel_buttons) - 2:
-                    return
+                    self.current_button_index = self._find_visible_button_index(self.current_button_index, 1)
                 else:
-                    self.current_button_index = (self.current_button_index + 2) % len(self.left_panel_buttons)
+                    # +2 方向：先从 current 往后找 2 个可见
+                    tmp = self._find_visible_button_index(self.current_button_index, 1)
+                    nxt = self._find_visible_button_index(tmp, 1)
+                    # 如果再往下没有可见按钮了，视为到末尾
+                    if nxt == tmp or nxt <= self.current_button_index:
+                        # 兜底：如果 current 已在最后一个可见按钮，停止下移
+                        pass
+                    else:
+                        self.current_button_index = nxt
                 self.update_left_panel_button_styles()
             elif action in ('A',):
+                # 在点击前再次确保 index 没有落在隐藏按钮上（被外部中途 hide/show 时的兜底）
+                self._ensure_visible_button_index()
                 self.left_panel_buttons[self.current_button_index].click()
                 self.ignore_input_until = _get_ticks() + 350   
             elif action in ('LEFT',):
                 if self.current_button_index == 0:
                     return
+                # 偶数索引（左列）向左侧相邻列：移到前一个可见按钮；隐藏按钮跳过
                 if self.current_button_index % 2 == 0:
-                    self.current_button_index = (self.current_button_index - 1) % len(self.left_panel_buttons)
+                    self.current_button_index = self._find_visible_button_index(self.current_button_index, -1)
                     self.update_left_panel_button_styles()
-                #else:
-                #    # 切换到截图框区域
-                #    self.in_left_panel = False
-                #    self.update_left_panel_button_styles()
-                #    self.update_highlight()
             elif action in ('RIGHT',):
-                if (self.current_button_index+1) % 2 == 0:
-                    self.current_button_index = (self.current_button_index + 1) % len(self.left_panel_buttons)
+                if (self.current_button_index + 1) % 2 == 0:
+                    # 右列向右：移到后一个可见按钮；隐藏按钮跳过
+                    self.current_button_index = self._find_visible_button_index(self.current_button_index, 1)
                     self.update_left_panel_button_styles()
                 else:
                     # 切换到截图框区域
@@ -2416,6 +5622,37 @@ class ScreenshotWindow(QDialog):
                 self.is_fullscreen_preview.close()  # 修复调用
                 self.is_fullscreen_preview = None  # 清除引用    
 
+    def _refresh_save_path_buttons(self, game_name=None):
+        """根据当前游戏是否设置了存档路径刷新三个存档按钮的显示。供游戏切换后调用。"""
+        if game_name is None:
+            try:
+                game_name = str(self.game_name_label.text() or "").strip()
+            except Exception:
+                game_name = ""
+        has_path = False
+        if game_name:
+            try:
+                cfg_games = mao_load_config().get("games", [])
+                for g in cfg_games:
+                    if str(g.get("name", "")).strip() == game_name and str(g.get("path", "")).strip():
+                        has_path = True
+                        break
+            except Exception:
+                pass
+        try:
+            self.btn_sync_toolx.setText(self.tr("同步游戏存档") if has_path else self.tr("设置存档路径"))
+        except Exception:
+            pass
+        try:
+            if has_path:
+                self.btn_backup_restore.show()
+                self.btn_view_backup_list.show()
+            else:
+                self.btn_backup_restore.hide()
+                self.btn_view_backup_list.hide()
+        except Exception:
+            pass
+
     def init_left_panel_buttons(self):
         # 初始化左侧面板按钮
         self.left_panel_buttons = []  # 存储按钮引用
@@ -2423,7 +5660,53 @@ class ScreenshotWindow(QDialog):
             self.left_panel_buttons.append(btn)
         self.update_left_panel_button_styles()
 
+    def _find_visible_button_index(self, start, step):
+        """从 start 出发，按 step(±1) 方向循环查找下一个可见的 left_panel_button 索引。
+        若没有任何可见按钮（不应发生）返回 0。不会停留在隐藏按钮上。"""
+        n = len(self.left_panel_buttons)
+        if n == 0:
+            return 0
+        i = start % n
+        # 至多循环 n 次避免死循环
+        for _ in range(n):
+            i = (i + step) % n
+            btn = self.left_panel_buttons[i]
+            try:
+                if btn.isVisible():
+                    return i
+            except Exception:
+                pass
+        # 全不可见的退化情形：返回首个索引
+        return 0
+
+    def _ensure_visible_button_index(self):
+        """若 current_button_index 当前指向不可见按钮，调整到下一个可见按钮。"""
+        n = len(self.left_panel_buttons)
+        if n == 0:
+            return
+        if self.current_button_index >= n:
+            self.current_button_index = 0
+        btn = self.left_panel_buttons[self.current_button_index]
+        try:
+            ok = btn.isVisible()
+        except Exception:
+            ok = False
+        if ok:
+            return
+        # 从 current_button_index 开始向 +1 找可见按钮
+        start = self.current_button_index
+        for i in range(n):
+            idx = (start + i) % n
+            try:
+                if self.left_panel_buttons[idx].isVisible():
+                    self.current_button_index = idx
+                    return
+            except Exception:
+                continue
+
     def update_left_panel_button_styles(self):
+        # 先确保 current_button_index 不会指到隐藏按钮（用户隐藏 恢复/查看 存档 时）
+        self._ensure_visible_button_index()
         # 更新左侧面板按钮样式
         for i, button in enumerate(self.left_panel_buttons):
             if i == self.current_button_index and self.in_left_panel:
@@ -2732,6 +6015,10 @@ class ScreenshotWindow(QDialog):
             self.filter_game_name = game if ok and game != "全部游戏" else None
         if ok and game:
             self.game_name_label.setText(game)
+            try:
+                self._refresh_save_path_buttons(game)
+            except Exception:
+                pass
             # 新增：同步按钮状态
             if "freeze_mode" in settings and game in settings["freeze_mode"]:
                 self.btn_freeze.setText(self.tr("冻结方式(%1)").replace('%1', settings['freeze_mode'][game]))
@@ -2768,6 +6055,10 @@ class ScreenshotWindow(QDialog):
     def clear_filter(self):
         self.filter_game_name = None
         self.game_name_label.setText(self.tr("全部游戏"))
+        try:
+            self._refresh_save_path_buttons(self.tr("全部游戏"))
+        except Exception:
+            pass
         self.reload_screenshots()
 
 
@@ -4905,10 +8196,93 @@ class GameSelector(QWidget):
                         icon = _icon_from_file(image_path, 24)
 
                     text = game["name"][:24] + "..." if len(game["name"]) > 24 else game["name"]
-                    game_action = tray_menu.addAction(icon, text)
-                    # 使用默认参数捕获索引，避免闭包问题
                     game_index = len(sorted_games[:self.buttonsindexset]) - 1 - idx
-                    game_action.triggered.connect(lambda checked=False, i=game_index: (self.tray_icon.contextMenu().hide(), self.launch_game(i)))
+                    # 检查该游戏是否已配置存档备份路径
+                    _has_backup = False
+                    try:
+                        _bcfg = mao_load_config()
+                        _bg = next((g for g in _bcfg.get("games", []) if g.get("name") == game["name"]), None)
+                        if _bg and _bg.get("path"):
+                            _has_backup = True
+                    except Exception:
+                        pass
+                    if _has_backup:
+                        # 用 QWidgetAction：一行内左封面/图标+游戏名（点击启动）+ 右侧"↻"同步按钮
+                        row = QWidget()
+                        row.setAutoFillBackground(True)
+                        hl = QHBoxLayout(row)
+                        hl.setContentsMargins(0, 0, 0, 0)
+                        hl.setSpacing(0)
+                        # 封面/图标
+                        icon_lbl = QLabel()
+                        icon_lbl.setFixedSize(24, 24)
+                        if not icon.isNull():
+                            icon_lbl.setPixmap(icon.pixmap(24, 24))
+                        icon_lbl.setStyleSheet("background: transparent; border: none;")
+                        hl.addWidget(icon_lbl, 0)
+                        name_lbl = QLabel("  " + text)
+                        name_lbl.setStyleSheet("color: white; background: transparent; border: none;")
+                        hl.addWidget(name_lbl, 1)
+                        # 弹簧把↻推到最右
+                        hl.addStretch(0)
+                        sync_btn = QPushButton("↻")
+                        sync_btn.setFixedSize(28, 28)
+                        sync_btn.setCursor(Qt.PointingHandCursor)
+                        sync_btn.setStyleSheet("""
+                            QPushButton {
+                                background-color: transparent;
+                                color: #999;
+                                border: 1px solid #666;
+                                font-size: 16px;
+                                font-weight: bold;
+                            }
+                            QPushButton:hover {
+                                background-color: rgba(255,255,255,0.15);
+                                color: white;
+                                border: 1px solid #aaa;
+                            }
+                        """)
+                        sync_btn.setToolTip(self.tr("同步存档"))
+                        hl.addWidget(sync_btn, 0)
+                        wa = QWidgetAction(tray_menu)
+                        wa.setDefaultWidget(row)
+
+                        # 手动管理 hover 高亮：QMenu 的 action 高亮系统不会触发 QWidget :hover
+                        # 注意：用默认参数捕获本次迭代的控件实例，避免 for 循环闭包引用最后一次迭代
+                        _normal_bg = "transparent"
+                        _hover_bg = "#93ffff"
+                        def _apply_hover(active, _nl=name_lbl, _il=icon_lbl, _rw=row):
+                            _nl.setStyleSheet(
+                                f"color: {'black' if active else 'white'}; background: transparent; border: none;")
+                            _il.setStyleSheet("background: transparent; border: none;")
+                            _rw.setStyleSheet(f"background-color: {_hover_bg if active else _normal_bg};")
+                        def _enter(e, _wa=wa, _apply=_apply_hover):
+                            _apply(True)
+                            try:
+                                tray_menu.setActiveAction(_wa)
+                            except Exception:
+                                pass
+                        def _leave(e, _apply=_apply_hover):
+                            _apply(False)
+                        row.enterEvent = _enter
+                        row.leaveEvent = _leave
+
+                        # 点击游戏名区域 → 启动游戏（关闭菜单 + launch）
+                        def _on_row_click(e, i=game_index):
+                            self.tray_icon.contextMenu().hide()
+                            self.launch_game(i)
+                        row.mousePressEvent = _on_row_click
+                        name_lbl.mousePressEvent = _on_row_click
+                        icon_lbl.mousePressEvent = _on_row_click
+                        # 点击↻ → 同步存档
+                        def _on_sync(checked=False, gn=game["name"]):
+                            self.tray_icon.contextMenu().hide()
+                            self.startopenmaobackup("--quick-dgaction", gn)
+                        sync_btn.clicked.connect(_on_sync)
+                        tray_menu.addAction(wa)
+                    else:
+                        game_action = tray_menu.addAction(icon, text)
+                        game_action.triggered.connect(lambda checked=False, i=game_index: (self.tray_icon.contextMenu().hide(), self.launch_game(i)))
             tray_menu.addSeparator()
             # 新增“工具”子菜单
             tools_menu = QMenu(self.tr("工具"), self)
@@ -5499,55 +8873,90 @@ class GameSelector(QWidget):
                 self.reload_interface()
             except Exception:
                 pass
-    def startopenmaobackup(self, sysargv, game_name, exe_path):
-        # 检查是否已有maobackup.exe进程在运行
-        for proc in psutil.process_iter(['name', 'exe']):
-            try:
-                if proc.info['name'] and proc.info['name'].lower() == 'maobackup.exe':
-                    # 弹窗询问是否关闭
-                    self.confirm_dialog = ConfirmDialog("maobackup已经启动，是否要关闭？", scale_factor=self.scale_factor)
-                    result = self.confirm_dialog.exec_()
-                    if result == QDialog.Accepted:
+    def startopenmaobackup(self, sysargv, game_name, exe_path=None):
+        """整合版：弃用 maobackup.exe，直接在 Simplenite 内调度云端存档功能。
+
+        sysargv 取值：
+            --quick-dgaction : 比较本地/远程时间戳，自动备份或还原
+            --quick-dgrestore: 直接还原最新远程备份
+            -backuplist      : 打开该游戏的远程备份列表（CloudBackupWindow）
+        exe_path 仅为兼容旧调用保留，不再使用。
+        """
+        # 终结可能残留的旧 maobackup.exe 进程
+        try:
+            for proc in psutil.process_iter(['name']):
+                try:
+                    if proc.info['name'] and proc.info['name'].lower() == 'maobackup.exe':
                         proc.terminate()
-                        proc.wait()
-                    else:
-                        return
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
-        if os.path.exists(exe_path):
-            process = QProcess(self)
-            process.setProgram(exe_path)
-            process.setArguments([sysargv, game_name])
-            process.setProcessChannelMode(QProcess.MergedChannels)
-            buffer = b''
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    continue
+        except Exception:
+            pass
 
-            def handle_ready_read():
-                nonlocal buffer
-                buffer += process.readAllStandardOutput().data()
-                while b'\n' in buffer:
-                    line, buffer = buffer.split(b'\n', 1)
-                    try:
-                        msg = json.loads(line.decode(errors='ignore'))
-                        if msg.get("type") in ("error", "info", "warning"):
-                            self.confirm_dialog = ConfirmDialog("※"+msg.get("message", ""), scale_factor=self.scale_factor)
-                            result = self.confirm_dialog.exec_()
-                        elif msg.get("type") == "confirm":
-                            self.confirm_dialog = ConfirmDialog("※"+msg.get("message", ""))
-                            result = self.confirm_dialog.exec_()
-                            process.write(("yes\n" if result == QDialog.Accepted else "no\n").encode())
-                            process.waitForBytesWritten(100)
-                    except Exception as e:
-                        print("解析JSON失败：", e)
+        s = self.scale_factor
+        game = (game_name or "").strip()
 
-            def handle_finished(exitCode, exitStatus):
-                # 可在此处理进程结束后的逻辑
-                pass
+        # 检查 WebDAV 是否已配置（仅备份列表不强制要求）
+        cfg = mao_load_config()
+        has_webdav = bool(cfg.get("hostname") and cfg.get("username"))
 
-            process.readyReadStandardOutput.connect(handle_ready_read)
-            process.finished.connect(handle_finished)
-            process.start()
+        if sysargv == "-backuplist":
+            # 打开云端存档管理窗口并定位到该游戏的远程备份
+            win = CloudBackupWindow(parent=self, mode="manage", game_name=game)
+            win.setAttribute(Qt.WA_DeleteOnClose)
+            self._cloud_backup_window = win  # 防止被GC
+            win.show()
+            return
+
+        if not has_webdav:
+            self.confirm_dialog = ConfirmDialog(self.tr("※未配置 WebDAV，请在 设置→云端存档 中配置账号。"), scale_factor=s)
+            self.confirm_dialog.exec_()
+            return
+
+        # 防止重复触发快速操作
+        if getattr(self, "_cloud_quick_active", False):
+            return
+        self._cloud_quick_active = True
+
+        if sysargv == "--quick-dgrestore":
+            title = self.tr("还原存档")
+            runner = lambda log, confirm, prompt_func=None: mao_quick_restore(game, log=log, confirm=confirm, parent=self, scale_factor=s, prompt_func=prompt_func)
         else:
-            self.confirm_dialog = ConfirmDialog(self.tr("未找到maobackup.exe"), scale_factor=self.scale_factor).exec_()
+            # 默认 --quick-dgaction
+            title = self.tr("云端存档")
+            runner = lambda log, confirm, prompt_func=None: mao_quick_action(game, log=log, confirm=confirm, parent=self, scale_factor=s, prompt_func=prompt_func)
+
+        # 使用灵动岛样式提示（屏幕顶端中央，可折叠，不抢焦点）
+        island = CloudBackupIslandWidget(title=title, scale_factor=s, parent=None)
+        island.show()
+        # 保留引用避免 GC（parent=None 时）
+        self._cloud_backup_island = island
+
+        def confirm_cb(message):
+            return island.ask_confirm(message)
+
+        def prompt_func_cb(varname, suggested_folder=None):
+            return island.ask_folder(varname, suggested_folder)
+
+        def worker():
+            ok = False
+            try:
+                try:
+                    ret = runner(log=island.append_log, confirm=confirm_cb, prompt_func=prompt_func_cb)
+                    # runner 返回 False 视为用户取消；返回 None/True 视为正常完成
+                    ok = (ret is not False)
+                except TypeError:
+                    ret = runner(log=island.append_log, confirm=confirm_cb)
+                    ok = (ret is not False)
+            except Exception as e:
+                island.append_log(f"发生异常: {e}")
+                ok = False
+            finally:
+                island.mark_done(success=ok)
+                self._cloud_quick_active = False
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+
     def deep_reload_games(self):
         """深度刷新游戏库：重新读取apps.json并刷新界面"""
         load_apps()  # 重新加载有效应用列表
@@ -6566,9 +9975,23 @@ class GameSelector(QWidget):
         # 初始化鼠标按键状态变量
         left_button_down = False
         right_button_down = False
+        # 防抖状态机变量（非阻塞式，非对称）：仅"释放"方向做驻留确认
+        # 解决部分手柄长按时 get_button() 间歇性返回 False（chatter），
+        # 原边缘检测会误触发 DOWN→UP→DOWN 多次循环 → 被识别为多次点击。
+        # 非对称设计：按下（False→True）立即响应，保证点击即时生效；
+        # 仅释放（True→False）需连续保持 DEBOUNCE_MS 才确认，滤除长按中的瞬时抖动。
+        # （chatter 物理上主要发生在释放阶段——触点弹起时机械抖动）
+        DEBOUNCE_MS = 30  # 释放驻留阈值；<人类最快点击间隔，可滤除绝大多数抖动
+        left_candidate = None     # 左键释放候选（None=无待确认；False=待确认释放）
+        left_candidate_since = 0  # 候选首次出现的时间戳
+        right_candidate = None
+        right_candidate_since = 0
         screen_width, screen_height = pyautogui.size()
-        pyautogui.moveTo(int(screen_width/2), int(screen_height/1.5))  # 移动鼠标到屏幕中心
-        time.sleep(0.7) 
+        # 优化：用 ctypes SetCursorPos 直接定位（零延迟），替代 pyautogui.moveTo 的归一化开销；
+        # 同时大幅缩短等待时间——原 0.7s 主要为等用户手就位，实测 0.15s 足以让首个事件轮询稳定。
+        # 这一步原先贡献了开启鼠标模拟时约 0.7s 的卡顿（含 pyautogui 调用 + sleep）。
+        ctypes.windll.user32.SetCursorPos(int(screen_width/2), int(screen_height//1.5))
+        time.sleep(0.15)
         #print(f'所有按键: {joystick.get_button(mapping.button_a)}, {joystick.get_button(mapping.button_b)}, {joystick.get_button(mapping.button_x)}, {joystick.get_button(mapping.button_y)}, {joystick.get_button(mapping.start)}, {joystick.get_button(mapping.back)}')
         #print(f"X轴: {x_axis:.2f}, Y轴: {y_axis:.2f}, 右扳机: {rt_val:.2f}, 左扳机: {lt_val:.2f}, 滚动: {scrolling_up}, {scrolling_down}")
         #print(f"{mapping.guide} {mapping.right_stick_in} {mapping.left_stick_in} {mapping.start} {mapping.back} {mapping.button_a} {mapping.button_b} {mapping.button_x} {mapping.button_y}")
@@ -6634,25 +10057,45 @@ class GameSelector(QWidget):
                         #time.sleep(0.5)  
                         break
 
-                    # 检查左键状态
-                    if joystick.get_button(mapping.button_a) or joystick.get_button(mapping.right_bumper):  # A键模拟左键按下
-                        if not left_button_down:  # 状态变化时触发
-                            pyautogui.mouseDown()
-                            left_button_down = True
+                    # 检查左键状态（A 键 或 右肩键 → 鼠标左键）
+                    # 非对称防抖：按下立即响应；释放需持续 DEBOUNCE_MS 才确认
+                    # 解决部分手柄长按时 get_button() 间歇返回 False（chatter）
+                    # 导致边缘检测误触发 DOWN→UP→DOWN 多次循环、被识别为多次点击。
+                    left_pressed = bool(joystick.get_button(mapping.button_a) or joystick.get_button(mapping.right_bumper))
+                    if left_pressed == left_button_down:
+                        # 与已确认状态一致：取消释放候选（抖动结束）
+                        left_candidate = None
+                    elif left_pressed:
+                        # 按下方向：立即下发，保证点击即时生效
+                        self.send_mouse_button(True, 'left')
+                        left_button_down = True
+                        left_candidate = None
                     else:
-                        if left_button_down:  # 状态变化时触发
-                            pyautogui.mouseUp()
+                        # 释放方向：驻留确认，滤除长按中瞬时抖动
+                        if left_candidate is None:
+                            left_candidate = False
+                            left_candidate_since = _get_ticks()
+                        elif _get_ticks() - left_candidate_since >= DEBOUNCE_MS:
+                            self.send_mouse_button(False, 'left')
                             left_button_down = False
+                            left_candidate = None
 
-                    # 检查右键状态
-                    if joystick.get_button(mapping.button_b) or joystick.get_button(mapping.left_bumper):  # B键模拟右键按下
-                        if not right_button_down:  # 状态变化时触发
-                            pyautogui.mouseDown(button='right')
-                            right_button_down = True
+                    # 检查右键状态（B 键 或 左肩键 → 鼠标右键）
+                    right_pressed = bool(joystick.get_button(mapping.button_b) or joystick.get_button(mapping.left_bumper))
+                    if right_pressed == right_button_down:
+                        right_candidate = None
+                    elif right_pressed:
+                        self.send_mouse_button(True, 'right')
+                        right_button_down = True
+                        right_candidate = None
                     else:
-                        if right_button_down:  # 状态变化时触发
-                            pyautogui.mouseUp(button='right')
+                        if right_candidate is None:
+                            right_candidate = False
+                            right_candidate_since = _get_ticks()
+                        elif _get_ticks() - right_candidate_since >= DEBOUNCE_MS:
+                            self.send_mouse_button(False, 'right')
                             right_button_down = False
+                            right_candidate = None
                     # 读取左摇杆轴值（0: X 轴，1: Y 轴）
                     x_axis = joystick.get_axis(0)
                     y_axis = joystick.get_axis(1)
@@ -6862,6 +10305,30 @@ class GameSelector(QWidget):
         except KeyboardInterrupt:
             print("程序已退出。")
         finally:
+            # 兜底：循环退出时保证鼠标按键被释放，避免"系统以为一直按着左键/右键"。
+            # 无论正常退出、异常还是 GUIDE 按钮 break，都走这段清理。
+            try:
+                if left_button_down:
+                    try:
+                        self.send_mouse_button(False, 'left')
+                    except Exception:
+                        try:
+                            pyautogui.mouseUp()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            try:
+                if right_button_down:
+                    try:
+                        self.send_mouse_button(False, 'right')
+                    except Exception:
+                        try:
+                            pyautogui.mouseUp(button='right')
+                        except Exception:
+                            pass
+            except Exception:
+                pass
             # 退出时重置标志
             window.close()
             #ctypes.windll.user32.SystemParametersInfoW(0x0057, 0, None, 0)  # SPI_SETCURSORS = 0x0057 还原鼠标光标
@@ -6871,29 +10338,49 @@ class GameSelector(QWidget):
     ########################
     def move_mouse_once(self):
         """模拟鼠标移动，避免光标不显示"""
-        class MOUSEINPUT(ctypes.Structure):
-            _fields_ = [("dx", ctypes.c_long),
-                        ("dy", ctypes.c_long),
-                        ("mouseData", ctypes.c_ulong),
-                        ("dwFlags", ctypes.c_ulong),
-                        ("time", ctypes.c_ulong),
-                        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
-
-        class INPUT_UNION(ctypes.Union):
-            _fields_ = [("mi", MOUSEINPUT)]
-
-        class INPUT(ctypes.Structure):
-            _fields_ = [("type", ctypes.c_ulong),
-                        ("u", INPUT_UNION)]
-
         def send(dx, dy):
             extra = ctypes.c_ulong(0)
-            mi = MOUSEINPUT(dx, dy, 0, 0x0001, 0, ctypes.pointer(extra))  # 0x0001 = MOUSEEVENTF_MOVE
-            inp = INPUT(0, INPUT_UNION(mi))  # 0 = INPUT_MOUSE
-            ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
-
+            mi = _MOUSEINPUT(dx, dy, 0, 0x0001, 0, ctypes.pointer(extra))  # 0x0001 = MOUSEEVENTF_MOVE
+            inp = _INPUT(0, _INPUT_UNION(mi))  # 0 = INPUT_MOUSE
+            ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
         send(1, 0)   # 向右移动1像素
         send(-1, 0)  # 向左移动1像素
+
+    def send_mouse_button(self, is_down, button='left'):
+        """用 ctypes SendInput 发送纯鼠标按键按下/抬起事件（无坐标归一化移动副作用）。
+        - is_down=True -> DOWN；is_down=False -> UP
+        - button in {'left', 'right', 'middle'}
+        相比 pyautogui.mouseDown/mouseUp：不带 SetCursorPos、不重置 active window，
+        在摇杆移动/窗口变动期间也不会产生多余的鼠标事件，避免"按住 A 键实际变成高速连点"。
+        """
+        MOUSEEVENTF_LEFTDOWN = 0x0002
+        MOUSEEVENTF_LEFTUP = 0x0004
+        MOUSEEVENTF_RIGHTDOWN = 0x0008
+        MOUSEEVENTF_RIGHTUP = 0x0010
+        MOUSEEVENTF_MIDDLEDOWN = 0x0020
+        MOUSEEVENTF_MIDDLEUP = 0x0040
+        if button == 'left':
+            flags = MOUSEEVENTF_LEFTDOWN if is_down else MOUSEEVENTF_LEFTUP
+        elif button == 'right':
+            flags = MOUSEEVENTF_RIGHTDOWN if is_down else MOUSEEVENTF_RIGHTUP
+        elif button == 'middle':
+            flags = MOUSEEVENTF_MIDDLEDOWN if is_down else MOUSEEVENTF_MIDDLEUP
+        else:
+            return
+        try:
+            extra = ctypes.c_ulong(0)
+            mi = _MOUSEINPUT(0, 0, 0, flags, 0, ctypes.pointer(extra))
+            inp = _INPUT(0, _INPUT_UNION(mi))
+            ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
+        except Exception:
+            # SendInput 失败时回退 pyautogui 作为兜底
+            try:
+                if is_down:
+                    pyautogui.mouseDown(button=button)
+                else:
+                    pyautogui.mouseUp(button=button)
+            except Exception:
+                pass
     def is_magnifier_open(self):
         """检查放大镜是否已打开"""
         for process in psutil.process_iter(['name']):
@@ -6959,9 +10446,113 @@ class GameSelector(QWidget):
         QTimer.singleShot(100, self.reload_interface)
 
     def update_play_app_name(self, new_play_app_name):
-        """更新主线程中的 play_app_name"""
+        """更新主线程中的 play_app_name，检测游戏结束并触发自动备份"""
+        old_set = set(getattr(self, 'player', []))
+        new_set = set(new_play_app_name)
+        # 新启动的游戏：记录启动时间戳
+        started_games = new_set - old_set
+        if not hasattr(self, '_game_start_times'):
+            self._game_start_times = {}
+        import time as _t
+        for g in started_games:
+            self._game_start_times[g] = _t.time()
+        # 找出刚关闭的游戏（在旧列表中但不在新列表中）
+        closed_games = old_set - new_set
+        # 计算每个刚关闭游戏的本次会话时长（分钟）
+        session_minutes = {}
+        for g in closed_games:
+            start_ts = self._game_start_times.pop(g, None)
+            if start_ts is not None:
+                session_minutes[g] = (_t.time() - start_ts) / 60.0
+            else:
+                # 无启动记录（如程序刚启动时已有游戏在跑），用总累计时间兜底
+                session_minutes[g] = settings.get("play_time", {}).get(g, 0)
         self.player = new_play_app_name
         print(f"更新后的 play_app_name: {self.play_app_name}")
+        # 检测游戏结束，触发自动备份
+        if closed_games:
+            QTimer.singleShot(200, lambda: self._check_auto_backup(closed_games, session_minutes))
+
+    def _check_auto_backup(self, closed_games, session_minutes=None):
+        """检查自动备份条件并执行。
+        session_minutes: {game_name: 本次会话分钟数}，用于判断是否达到最小游玩时长。"""
+        ab = settings.get("auto_backup", {})
+        if not ab.get("enabled", False):
+            return
+        # 防止重复触发
+        if getattr(self, "_cloud_quick_active", False):
+            return
+        # 断网直接返回：不执行备份，也不创建灵动岛
+        try:
+            if not ctypes.windll.wininet.InternetGetConnectedState(None, 0):
+                return
+        except Exception:
+            pass
+        min_minutes = ab.get("min_play_minutes", 5)
+        list_mode = ab.get("list_mode", "blacklist")
+        blacklist = set(ab.get("blacklist", []))
+        whitelist = set(ab.get("whitelist", []))
+        if session_minutes is None:
+            session_minutes = {}
+
+        for game_name in closed_games:
+            # 只在有备份路径的游戏上生效
+            cfg = mao_load_config()
+            games = cfg.get("games", [])
+            game = next((g for g in games if g.get("name") == game_name), None)
+            if not game or not game.get("path"):
+                continue
+            # 检查本次会话游玩时长（非总累计时间）
+            minutes = session_minutes.get(game_name, 0)
+            if minutes < min_minutes:
+                # 未达最小游玩时长，不显示灵动岛，直接跳过
+                continue
+            # 白名单/黑名单筛选
+            if list_mode == "whitelist":
+                if game_name not in whitelist:
+                    continue
+            else:  # blacklist
+                if game_name in blacklist:
+                    continue
+            # 检查 WebDAV 是否已配置
+            if not cfg.get("hostname") or not cfg.get("username"):
+                continue
+            # 条件满足，执行自动备份
+            self._start_auto_backup(game_name)
+            break  # 一次只处理一个
+
+    def _start_auto_backup(self, game_name):
+        """执行自动备份，使用灵动岛显示进度"""
+        s = self.scale_factor
+        self._cloud_quick_active = True
+
+        island = CloudBackupIslandWidget(title=self.tr("自动备份"), scale_factor=s, parent=None)
+        island.show()
+        self._cloud_backup_island = island
+
+        runner = lambda log, confirm, prompt_func=None: mao_auto_backup(
+            game_name, log=log, parent=self, scale_factor=s, prompt_func=prompt_func
+        )
+
+        def confirm_cb(message):
+            return island.ask_confirm(message)
+
+        def prompt_func_cb(varname, suggested_folder=None):
+            return island.ask_folder(varname, suggested_folder)
+
+        def worker():
+            ok = False
+            try:
+                ret = runner(log=island.append_log, confirm=confirm_cb, prompt_func=prompt_func_cb)
+                ok = (ret is not False)
+            except Exception as e:
+                island.append_log(f"发生异常: {e}")
+                ok = False
+            finally:
+                island.mark_done(success=ok)
+                self._cloud_quick_active = False
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
 
     def create_game_button(self, game, index):
         """创建游戏按钮和容器"""
@@ -7060,6 +10651,10 @@ class GameSelector(QWidget):
         # 检查是否有游戏
         if not sorted_games:
             self.game_name_label.setText(self.tr("没有找到游戏"))
+            try:
+                self._refresh_save_path_buttons(self.tr("没有找到游戏"))
+            except Exception:
+                pass
             # 无游戏模式下高亮 no_games_button
             if getattr(self, '_no_games_mode', False) and self.buttons:
                 no_games_btn = self.buttons[0]
@@ -7093,8 +10688,17 @@ class GameSelector(QWidget):
         if self.current_section == 0:  # 游戏选择区域
             if self.more_section == 0 and self.current_index == self.buttonsindexset:  # 如果是"更多"按钮
                 self.game_name_label.setText(self.tr("所有软件"))
+                try:
+                    self._refresh_save_path_buttons(self.tr("所有软件"))
+                except Exception:
+                    pass
             else:
-                self.game_name_label.setText(sorted_games[self.current_index]["name"])
+                _cur_game_name = sorted_games[self.current_index]["name"]
+                self.game_name_label.setText(_cur_game_name)
+                try:
+                    self._refresh_save_path_buttons(_cur_game_name)
+                except Exception:
+                    pass
 
                 # 检查当前游戏是否在运行
                 current_game_name = sorted_games[self.current_index]["name"]
@@ -9455,6 +13059,30 @@ class GameSelector(QWidget):
         except RuntimeError:
             if getattr(self, 'settings_window', None):
                 self.settings_window.confirm_dialog = None
+
+        # 检查 CloudBackupIslandWidget（灵动岛）的临时确认框：即使 gsfocus=False 也可能在顶部显示
+        try:
+            cbi = getattr(self, '_cloud_backup_island', None)
+            if cbi is not None and cbi.isVisible():
+                dlg = getattr(cbi, '_active_confirm_dialog', None)
+                if dlg is not None and dlg.isVisible() and hasattr(dlg, 'handle_gamepad_input'):
+                    dlg.handle_gamepad_input(action)
+                    self.ignore_input_until = _get_ticks() + 300
+                    return
+        except RuntimeError:
+            pass
+
+        # 检查 CloudBackupWindow 自身的 confirm_dialog（内部 _do_backup/_do_restore 可能创建）
+        try:
+            cbw = getattr(self, '_cloud_backup_window', None)
+            if cbw is not None and cbw.isVisible():
+                cd = getattr(cbw, 'confirm_dialog', None)
+                if cd is not None and cd.isVisible() and hasattr(cd, 'handle_gamepad_input'):
+                    cd.handle_gamepad_input(action)
+                    self.ignore_input_until = _get_ticks() + 300
+                    return
+        except RuntimeError:
+            pass
         
         # 检查文件对话框
         try:
@@ -9465,6 +13093,20 @@ class GameSelector(QWidget):
         except RuntimeError:
             if hasattr(self, 'file_dialog_manager'):
                 self.file_dialog_manager = None
+
+        # 检查 云端存档管理窗口 CloudBackupWindow（同步备份对话框）
+        try:
+            cbw = getattr(self, '_cloud_backup_window', None)
+            if cbw is not None and cbw.isVisible():
+                if hasattr(cbw, 'handle_gamepad_input'):
+                    cbw.handle_gamepad_input(action)
+                    self.ignore_input_until = _get_ticks() + 200
+                    return
+        except RuntimeError:
+            try:
+                self._cloud_backup_window = None
+            except Exception:
+                pass
 
         # 检查 active_dialog（如后台窗口选择器等）
         try:
@@ -13488,6 +17130,7 @@ class SettingsWindow(QWidget):
             self.category_buttons.append((key, btn))
 
         add_category(self.tr("主机"), "console", True)
+        add_category(self.tr("云端存档"), "cloud_backup")
         add_category(self.tr("主页功能"), "home_feature")
         add_category(self.tr("游玩时长"), "play_time")
         add_category(self.tr("关于"), "about")
@@ -13519,6 +17162,7 @@ class SettingsWindow(QWidget):
 
         # 创建各个页面
         self.console_page = self._create_console_page(scale)
+        self.cloud_backup_page = self._create_cloud_backup_page(scale)
         self.home_feature_page = self._create_home_feature_page(scale)
         self.background_selection_page = self._create_background_selection_page(scale)
         self.placeholder_page = self._create_placeholder_page(scale)
@@ -13526,13 +17170,14 @@ class SettingsWindow(QWidget):
         self.about_page = self._create_about_page(scale)
         self.developer_page = self._create_developer_page(scale)
 
-        self.pages.addWidget(self.console_page)     # index 0 - 主机
-        self.pages.addWidget(self.home_feature_page) # index 1 - 主页功能
-        self.pages.addWidget(self.background_selection_page) # index 2 - 自定义背景图
-        self.pages.addWidget(self.placeholder_page) # index 3 - 其它
-        self.pages.addWidget(self.play_time_page)   # index 4 - 游玩时长
-        self.pages.addWidget(self.about_page)       # index 5 - 关于
-        self.pages.addWidget(self.developer_page)   # index 6 - 开发者选项
+        self.pages.addWidget(self.console_page)      # index 0 - 主机
+        self.pages.addWidget(self.cloud_backup_page) # index 1 - 云端存档
+        self.pages.addWidget(self.home_feature_page) # index 2 - 主页功能
+        self.pages.addWidget(self.background_selection_page) # index 3 - 自定义背景图
+        self.pages.addWidget(self.placeholder_page)  # index 4 - 其它
+        self.pages.addWidget(self.play_time_page)    # index 5 - 游玩时长
+        self.pages.addWidget(self.about_page)        # index 6 - 关于
+        self.pages.addWidget(self.developer_page)    # index 7 - 开发者选项
 
         main_layout.addWidget(left_container)
         main_layout.addWidget(right_container, 1)
@@ -13820,6 +17465,212 @@ class SettingsWindow(QWidget):
         ]
 
         return page
+
+    def _create_cloud_backup_page(self, scale: float) -> QWidget:
+        """云端存档设置页：嵌入 WebDAV 账号表单 + 管理入口"""
+        # 滚动区域，支持触摸滑动
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        QScroller.grabGesture(scroll.viewport(), QScroller.LeftMouseButtonGesture)
+
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(int(12 * scale))
+
+        # 顶部说明
+        desc = QLabel(self.tr("配置 WebDAV 网盘账号以启用云端存档备份/还原。"))
+        desc.setWordWrap(True)
+        desc.setStyleSheet(f"color: #999999; font-size: {int(16 * scale)}px;")
+        layout.addWidget(desc)
+
+        # 分割线
+        line_top = QFrame()
+        line_top.setFrameShape(QFrame.HLine)
+        line_top.setStyleSheet("color: #444444;")
+        layout.addWidget(line_top)
+
+        # 管理入口按钮（打开 CloudBackupWindow）
+        self.cloud_backup_manage_button = QPushButton(self.tr("管理云端存档（本地游戏 / 添加游戏 / 远程备份 / 额外备份）"))
+        self.cloud_backup_manage_button.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent;
+                color: #00bfff;
+                text-align: left;
+                padding: {int(16 * scale)}px 0;
+                border: none;
+                font-size: {int(24 * scale)}px;
+            }}
+            QPushButton:hover {{
+                background-color: #1e3a5f;
+            }}
+        """)
+        self.cloud_backup_manage_button.clicked.connect(self.open_cloud_backup_manager)
+        layout.addWidget(self.cloud_backup_manage_button)
+
+        # 分割线
+        line_mid = QFrame()
+        line_mid.setFrameShape(QFrame.HLine)
+        line_mid.setStyleSheet("color: #444444;")
+        layout.addWidget(line_mid)
+
+        # 嵌入 WebDAV 账号配置表单
+        self.webdav_config_widget = WebdavConfigWidget(
+            scale_factor=scale,
+            parent=self,
+            on_saved=None,
+        )
+        # 将表单内可聚焦控件纳入导航
+        layout.addWidget(self.webdav_config_widget)
+
+        # 分割线
+        line_ab = QFrame()
+        line_ab.setFrameShape(QFrame.HLine)
+        line_ab.setStyleSheet("color: #444444;")
+        layout.addWidget(line_ab)
+
+        # ---------- 自动备份配置 ----------
+        ab_label = QLabel(self.tr("自动备份"))
+        ab_label.setStyleSheet(f"color: #00bfff; font-size: {int(24 * scale)}px; border: none; background: transparent;")
+        layout.addWidget(ab_label)
+
+        ab_desc = QLabel(self.tr("游戏关闭后自动上传存档到 WebDAV。需游戏有备份路径且游玩时长达到设定值。"))
+        ab_desc.setWordWrap(True)
+        ab_desc.setStyleSheet(f"color: #999999; font-size: {int(16 * scale)}px;")
+        layout.addWidget(ab_desc)
+
+        _ab = settings.get("auto_backup", {})
+
+        # 开关
+        ab_switch_row = QHBoxLayout()
+        self.ab_enabled_checkbox = QCheckBox(self.tr("启用自动备份"))
+        self.ab_enabled_checkbox.setChecked(_ab.get("enabled", False))
+        self.ab_enabled_checkbox.setStyleSheet(f"color: #ddd; font-size: {int(18 * scale)}px; spacing: {int(8 * scale)}px;")
+        ab_switch_row.addWidget(self.ab_enabled_checkbox)
+        ab_switch_row.addStretch()
+        layout.addLayout(ab_switch_row)
+
+        # 最小游玩时长
+        ab_time_row = QHBoxLayout()
+        ab_time_label = QLabel(self.tr("最小游玩时长（分钟）"))
+        ab_time_label.setStyleSheet(f"color: #ddd; font-size: {int(16 * scale)}px;")
+        ab_time_row.addWidget(ab_time_label)
+        self.ab_min_play_spin = QSpinBox()
+        self.ab_min_play_spin.setRange(1, 999)
+        self.ab_min_play_spin.setValue(_ab.get("min_play_minutes", 5))
+        self.ab_min_play_spin.setStyleSheet(f"QSpinBox {{ background-color: #1c1c1c; color: #ddd; font-size: {int(16 * scale)}px; padding: {int(4 * scale)}px; border: 1px solid #444; border-radius: 4px; }}")
+        ab_time_row.addWidget(self.ab_min_play_spin)
+        ab_time_row.addStretch()
+        layout.addLayout(ab_time_row)
+
+        # 名单模式
+        ab_mode_row = QHBoxLayout()
+        ab_mode_label = QLabel(self.tr("名单模式"))
+        ab_mode_label.setStyleSheet(f"color: #ddd; font-size: {int(16 * scale)}px;")
+        ab_mode_row.addWidget(ab_mode_label)
+        self.ab_mode_combo = QComboBox()
+        self.ab_mode_combo.addItem(self.tr("黑名单（备份全部，排除选中游戏）"), "blacklist")
+        self.ab_mode_combo.addItem(self.tr("白名单（只备份选中游戏）"), "whitelist")
+        _mode = _ab.get("list_mode", "blacklist")
+        self.ab_mode_combo.setCurrentIndex(0 if _mode != "whitelist" else 1)
+        self.ab_mode_combo.setStyleSheet(f"QComboBox {{ background-color: #1c1c1c; color: #ddd; font-size: {int(16 * scale)}px; padding: {int(4 * scale)}px; border: 1px solid #444; border-radius: 4px; }} QComboBox QAbstractItemView {{ background-color: #1c1c1c; color: #ddd; selection-background-color: #2E7D9B; }}")
+        ab_mode_row.addWidget(self.ab_mode_combo)
+        ab_mode_row.addStretch()
+        layout.addLayout(ab_mode_row)
+
+        # 名单选择（复选列表）
+        self.ab_list_label = QLabel(self.tr("游戏列表"))
+        self.ab_list_label.setStyleSheet(f"color: #ddd; font-size: {int(16 * scale)}px;")
+        layout.addWidget(self.ab_list_label)
+        self.ab_game_list = QListWidget()
+        self.ab_game_list.setStyleSheet(f"""
+            QListWidget {{ color: #ddd; background-color: #1c1c1c; border: 1px solid #444; border-radius: 6px; padding: {int(6 * scale)}px; }}
+            QListWidget::item {{ padding: {int(8 * scale)}px; border-radius: 4px; }}
+            QListWidget::item:selected {{ background-color: #93ffff; color: #222; }}
+        """)
+        mao_touch_enable_itemview(self.ab_game_list)
+        # 填充游戏列表
+        _list_set = set(_ab.get("whitelist" if _mode == "whitelist" else "blacklist", []))
+        try:
+            _cfg_games = mao_load_config().get("games", [])
+        except Exception:
+            _cfg_games = []
+        for g in _cfg_games:
+            item = QListWidgetItem(g.get("name", ""))
+            item.setCheckState(Qt.Checked if g.get("name") in _list_set else Qt.Unchecked)
+            self.ab_game_list.addItem(item)
+        layout.addWidget(self.ab_game_list)
+
+        # 保存按钮
+        self.ab_save_btn = QPushButton(self.tr("保存自动备份设置"))
+        self.ab_save_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #2E7D9B; color: white; border: none; border-radius: 6px;
+                padding: {int(10 * scale)}px {int(18 * scale)}px; font-size: {int(16 * scale)}px;
+            }}
+            QPushButton:hover {{ background-color: #45a049; }}
+        """)
+        self.ab_save_btn.clicked.connect(self._save_auto_backup_settings)
+        layout.addWidget(self.ab_save_btn)
+
+        layout.addStretch()
+
+        scroll.setWidget(content)
+
+        # 可聚焦控件列表（供手柄/键盘导航使用）
+        self.focusable_widgets_cloud_backup = [
+            self.cloud_backup_manage_button,
+            self.webdav_config_widget.host_edit,
+            self.webdav_config_widget.user_edit,
+            self.webdav_config_widget.pass_edit,
+            self.webdav_config_widget.save_btn,
+            self.ab_enabled_checkbox,
+            self.ab_min_play_spin,
+            self.ab_mode_combo,
+            self.ab_game_list,
+            self.ab_save_btn,
+        ]
+
+        return scroll
+
+    def _save_auto_backup_settings(self):
+        """保存自动备份设置到 set.json"""
+        ab = settings.get("auto_backup", {})
+        ab["enabled"] = self.ab_enabled_checkbox.isChecked()
+        ab["min_play_minutes"] = self.ab_min_play_spin.value()
+        ab["list_mode"] = self.ab_mode_combo.currentData() or "blacklist"
+        # 收集勾选的游戏名
+        checked = []
+        for i in range(self.ab_game_list.count()):
+            item = self.ab_game_list.item(i)
+            if item.checkState() == Qt.Checked:
+                checked.append(item.text())
+        if ab["list_mode"] == "whitelist":
+            ab["whitelist"] = checked
+            ab["blacklist"] = []
+        else:
+            ab["blacklist"] = checked
+            ab["whitelist"] = []
+        settings["auto_backup"] = ab
+        try:
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump(settings, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            QMessageBox.warning(self, self.tr("保存失败"), str(e))
+            return
+        QMessageBox.information(self, self.tr("保存"), self.tr("自动备份设置已保存。"))
+
+    def open_cloud_backup_manager(self):
+        """打开云端存档主管理窗口"""
+        try:
+            win = CloudBackupWindow(parent=self.parent_window, mode="manage", game_name=None)
+            win.setAttribute(Qt.WA_DeleteOnClose)
+            self._cloud_backup_window = win  # 防止被GC
+            win.show()
+        except Exception as e:
+            QMessageBox.warning(self, self.tr("打开失败"), str(e))
 
     def _create_home_feature_page(self, scale: float) -> QWidget:
         """主页功能设置页：主页游戏数量和每行游戏数量"""
@@ -14581,26 +18432,29 @@ class SettingsWindow(QWidget):
         if key == "console":
             self.current_title.setText(self.tr("主机"))
             self.pages.setCurrentIndex(0)
+        elif key == "cloud_backup":
+            self.current_title.setText(self.tr("云端存档"))
+            self.pages.setCurrentIndex(1)
         elif key == "home_feature":
             self.current_title.setText(self.tr("主页功能"))
-            self.pages.setCurrentIndex(1)
+            self.pages.setCurrentIndex(2)
         elif key == "background_selector":
             self.current_title.setText(self.tr("自定义背景图"))
-            self.pages.setCurrentIndex(2)
+            self.pages.setCurrentIndex(3)
         elif key == "play_time":
             self.current_title.setText(self.tr("游玩时长"))
-            self.pages.setCurrentIndex(4)
+            self.pages.setCurrentIndex(5)
         elif key == "about":
             self.current_title.setText(self.tr("关于"))
-            self.pages.setCurrentIndex(5)
+            self.pages.setCurrentIndex(6)
         elif key == "developer":
             self.current_title.setText(self.tr("开发者选项"))
-            self.pages.setCurrentIndex(6)
+            self.pages.setCurrentIndex(7)
         else:
             # 其它类别暂时复用同一个占位页
             btn = next((b for k2, b in self.category_buttons if k2 == key), None)
             self.current_title.setText(btn.text() if btn else self.tr("设置"))
-            self.pages.setCurrentIndex(3)
+            self.pages.setCurrentIndex(4)
 
         # 设置可聚焦控件
         self.focusable_widgets = getattr(self, f'focusable_widgets_{key}', [])
